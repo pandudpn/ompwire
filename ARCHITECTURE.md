@@ -162,7 +162,15 @@ ompwire gateway remove NAME  -> stop, delete unit, delete definition
 foreground mode to document.
 
 The unit is generated, never checked in: it needs this machine's `ompwire` path, `.env` path and
-working directory. `Restart=always`, `RestartSec=5`, `MemoryMax=4G` per gateway.
+working directory. `Restart=always`, `RestartSec=5`, `MemoryMax=4G` per gateway. It also carries
+`Environment=PATH=` built from where this install found the agent and `ompwire`, because a systemd
+user unit does not inherit an interactive shell's PATH: without it the poller connects and then
+every turn fails with `ACP command not found`.
+
+Because the unit is generated, `gateway restart` rewrites it before restarting. A plain
+`systemctl restart` would bring back the same process with the same stale paths, which is exactly
+the bug that made the restart useless the first time it happened. `doctor` compares each unit on
+disk against what this version would write and names the ones that need a restart.
 
 ## What would have to change for multi-user
 

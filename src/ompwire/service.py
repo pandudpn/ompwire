@@ -46,8 +46,39 @@ def command_path() -> str:
     return str(Path(sys.argv[0]).resolve())
 
 
+def agent_command() -> str:
+    """The agent this machine is configured to launch."""
+    from .config import load_config
+
+    return str(load_config().get("acp", "command", "omp"))
+
+
+def service_path(agent: str = "") -> str:
+    """PATH for the unit.
+
+    A systemd user unit does not inherit the interactive shell's PATH. Without this the gateway
+    starts, then fails its first turn with "ACP command not found": the poller runs, and the agent
+    binary sits in ~/.local/bin, which systemd never had on its path. The directories holding the
+    binaries this install resolved come first, so the unit finds exactly what this shell found.
+    """
+    dirs: list[str] = []
+    # The agent's directory first: ExecStart is already an absolute path to ompwire, so the agent
+    # is the binary this PATH exists for.
+    for binary in (shutil.which(agent or agent_command()) or "", command_path()):
+        if not binary:
+            continue
+        parent = str(Path(binary).parent)
+        if parent not in dirs:
+            dirs.append(parent)
+    for directory in (Path.home() / ".local" / "bin", Path.home() / ".bun" / "bin",
+                      Path("/usr/local/bin"), Path("/usr/bin"), Path("/bin")):
+        if str(directory) not in dirs:
+            dirs.append(str(directory))
+    return ":".join(dirs)
+
+
 def render_unit(exec_start: str, env_file: Path, workdir: str,
-                gateway: str = "telegram") -> str:
+                gateway: str = "telegram", path: str = "") -> str:
     return f"""[Unit]
 Description=ompwire gateway: {gateway}
 After=network-online.target
@@ -57,6 +88,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory={workdir}
 EnvironmentFile={env_file}
+# The agent is not on systemd's default path, so the unit carries the one this install used.
+Environment=PATH={path or service_path()}
 ExecStart={exec_start} gateway _run {gateway}
 # Credentials live in {env_file} (chmod 600), loaded above rather than written
 # into this unit. One gateway per unit: stopping this one leaves the others alone.
@@ -224,8 +257,21 @@ def restart(gateway: str = "telegram") -> int:
     if not _systemd_available():
         print("FAIL systemd --user is not available on this machine")
         return 1
-    if not unit_path(gateway).is_file():
+    target = unit_path(gateway)
+    if not target.is_file():
         return start(gateway)
+    # Rewrite the unit before restarting it. The unit is generated from this machine's paths, so a
+    # plain `systemctl restart` would keep running an old PATH or an old ExecStart written by a
+    # previous version: the process restarts and the same bug restarts with it.
+    refreshed = render_unit(command_path(), _env_file(), _workdir(), gateway)
+    if target.read_text(encoding="utf-8") != refreshed:
+        target.write_text(refreshed, encoding="utf-8")
+        print(f"ok   unit refreshed: {target}")
+        reload_result = _systemctl("daemon-reload")
+        if reload_result.returncode != 0:
+            print(f"FAIL systemctl --user daemon-reload: "
+                  f"{(reload_result.stderr or reload_result.stdout).strip()}")
+            return 1
     result = _systemctl("restart", unit_name(gateway), timeout=120)
     if result.returncode != 0:
         print(f"FAIL systemctl --user restart {unit_name(gateway)}: "

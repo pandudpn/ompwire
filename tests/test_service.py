@@ -285,3 +285,72 @@ def _env(path):
     target = Path(path) / ".env"
     target.write_text("TELEGRAM_BOT_TOKEN=x\n", encoding="utf-8")
     return target
+
+
+class TestUnitPath:
+    """The failure this guards: the poller starts, then every turn says ACP command not found."""
+
+    def test_the_unit_carries_the_directory_the_agent_was_found_in(self, monkeypatch, tmp_path):
+        agent = tmp_path / "bin" / "omp"
+        agent.parent.mkdir()
+        agent.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.setattr(service.shutil, "which",
+                            lambda name: str(agent) if name == "omp" else None)
+        monkeypatch.setattr(service, "command_path", lambda: str(tmp_path / "ompwire"))
+
+        path = service.service_path("omp")
+        assert path.split(":")[0] == str(agent.parent)
+        assert "/usr/bin" in path.split(":")
+        assert len(path.split(":")) == len(set(path.split(":")))
+
+    def test_the_rendered_unit_sets_that_path(self, tmp_path):
+        unit = service.render_unit("/home/you/.local/bin/ompwire", tmp_path / ".env",
+                                   "/home/you", "telegram", path="/a/bin:/usr/bin")
+        assert "Environment=PATH=/a/bin:/usr/bin" in unit
+
+    def test_a_stale_unit_is_rewritten_before_the_restart(self, monkeypatch, tmp_path):
+        target = tmp_path / "ompwire-telegram.service"
+        target.write_text("[Service]\nExecStart=old\n", encoding="utf-8")
+        monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": target)
+        monkeypatch.setattr(service, "_systemd_available", lambda: True)
+        monkeypatch.setattr(service, "command_path", lambda: "/usr/bin/ompwire")
+        monkeypatch.setattr(service, "_env_file", lambda: tmp_path / ".env")
+        monkeypatch.setattr(service, "_workdir", lambda: "/home/you")
+        monkeypatch.setattr(service, "state", lambda gateway="telegram": "active")
+
+        calls: list[tuple[str, ...]] = []
+
+        class Done:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_systemctl(*args, **_kwargs):
+            calls.append(args)
+            return Done()
+
+        monkeypatch.setattr(service, "_systemctl", fake_systemctl)
+
+        assert service.restart("telegram") == 0
+        assert "Environment=PATH=" in target.read_text(encoding="utf-8")
+        assert calls[0] == ("daemon-reload",)
+        assert calls[1][0] == "restart"
+
+    def test_a_unit_without_the_path_is_named_by_doctor(self, monkeypatch, tmp_path, capsys):
+        from ompwire import __main__ as entry
+
+        units = tmp_path / "systemd"
+        units.mkdir()
+        stale = units / "ompwire-telegram.service"
+        stale.write_text("[Service]\nExecStart=/usr/bin/ompwire gateway _run telegram\n",
+                         encoding="utf-8")
+        monkeypatch.setattr(entry, "_home_dir", lambda: tmp_path, raising=False)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        (tmp_path / ".config" / "systemd" / "user").mkdir(parents=True)
+        (tmp_path / ".config" / "systemd" / "user" / "ompwire-telegram.service").write_text(
+            stale.read_text(encoding="utf-8"), encoding="utf-8")
+
+        entry._doctor_units("omp")
+        out = capsys.readouterr().out
+        assert "predates PATH in its unit" in out
+        assert "ompwire gateway restart telegram" in out

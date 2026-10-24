@@ -327,6 +327,28 @@ def _gateway_add(args: argparse.Namespace, gateways, service, bot_identity) -> i
     return 0
 
 
+def _doctor_units(agent: str) -> None:
+    """Which units would start the gateway and then lose the agent.
+
+    A unit carries the PATH of the shell that generated it. When an agent lives in ~/.local/bin
+    and the unit was written before that PATH was recorded, the poller starts, connects, and every
+    turn fails with "ACP command not found". The unit on disk is compared against what this
+    version would write, so a stale unit is named here instead of being discovered in the chat.
+    """
+    from pathlib import Path
+
+    # service_path() is what a freshly written unit carries; a unit on disk that lacks it is old
+    directory = str(Path(shutil.which(agent) or "").parent)
+    for unit in sorted((Path.home() / ".config" / "systemd" / "user").glob("ompwire-*.service")):
+        text = unit.read_text(encoding="utf-8", errors="replace")
+        if "Environment=PATH=" not in text:
+            print(f"--   {unit.name} predates PATH in its unit: "
+                  f"`ompwire gateway restart {unit.name.removeprefix('ompwire-').removesuffix('.service')}`")
+        elif directory and f":{directory}:" not in f":{text.split('Environment=PATH=', 1)[1].splitlines()[0]}:":
+            print(f"--   {unit.name} does not have {directory} on its PATH: "
+                  f"restart the gateway to rewrite it")
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     failures = 0
@@ -337,6 +359,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"FAIL agent command not found on PATH: {command}")
         return 1
     print(f"ok   agent command: {path}")
+    _doctor_units(command)
 
     store_path = str(config.get("session", "store"))
     try:
