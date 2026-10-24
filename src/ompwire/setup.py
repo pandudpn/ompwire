@@ -338,11 +338,76 @@ def _next_steps() -> None:
     print("  ompwire serve      # start the Telegram transport")
 
 
+def provider_of(model: str) -> str:
+    return model.split("/")[0] if "/" in model else ""
+
+
+def pick_provider_and_model(catalog_values: dict[str, Any],
+                            logged_in: dict[str, tuple[str, str]],
+                            *, yes: bool) -> str:
+    """One step, two answers: a model id is meaningless without its provider."""
+    models = [str(model) for model in (catalog_values.get("models") or [])]
+    current = str((catalog_values.get("current") or {}).get("model") or "")
+    if not models:
+        return _ask("model (provider/model)", current, yes=yes)
+
+    providers = sorted({provider_of(model) for model in models if provider_of(model)})
+    default_provider = provider_of(current)
+    if default_provider not in providers:
+        default_provider = next((name for name in providers if name in logged_in),
+                                providers[0] if providers else "")
+    provider = choose("provider", providers, default_provider, yes=yes)
+
+    pool = [model for model in models if provider_of(model) == provider] or models
+    default_model = current if current in pool else pool[0]
+    model = choose(f"model ({provider})", pool, default_model, yes=yes)
+    return model if provider_of(model) else model
+
+
+def _gateway_step(yes: bool, env_file: Path) -> tuple[bool, str]:
+    """Platform plus the credential that platform needs. Returns (ok, username)."""
+    platform = "telegram"
+    if not yes:
+        while True:
+            answer = _ask("gateway platform (telegram)", "telegram", yes=False).strip().lower()
+            if answer in ("", "telegram"):
+                platform = "telegram"
+                break
+            # never echo the answer back: a token pasted here would be a secret
+            shown = "that value looks like a secret, not a platform name" \
+                if ":" in answer or len(answer) > 24 else repr(answer)
+            print(f"--   {shown}; only telegram is implemented so far")
+
+    env_values = _existing_env()
+    token = env_values.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    username = ""
+    for attempt in range(1, 4):
+        if not token:
+            token = _ask_secret(f"{platform} bot token from @BotFather", yes)
+        if not token:
+            break
+        username = bot_identity(token) if platform == "telegram" else ""
+        if username:
+            env_file.parent.mkdir(parents=True, exist_ok=True)
+            env_file.write_text(f"TELEGRAM_BOT_TOKEN={token}\n", encoding="utf-8")
+            env_file.chmod(0o600)
+            print(f"ok   token stored in {env_file} (0600)")
+            print(f"ok   token valid: @{username}")
+            return True, username
+        print(f"--   that token failed getMe (attempt {attempt}/3)")
+        token = ""
+    print(f"\nFAIL no usable {platform.upper()}_BOT_TOKEN. "
+          "The gateway cannot start without it.\n"
+          f"     get one from @BotFather, then either re-run `ompwire setup` or write\n"
+          f"     TELEGRAM_BOT_TOKEN=… into {env_file} (chmod 600)")
+    return False, ""
+
+
 def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) -> int:
     config_dir, config_file, env_file = _paths()
     print("ompwire setup\n")
 
-    # 1. the agent comes first: the transport has nothing to drive without it
+    # 1. agent
     found = agent_path()
     if found:
         print(f"ok   agent found: {found}")
@@ -366,7 +431,7 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
             print("     skipping. Install omp, then re-run `ompwire setup`.")
             return 1
 
-    # 2. a provider has to be logged in before a model means anything
+    # 2. provider and model, together: a model id means nothing without its provider
     logged_in = providers()
     if logged_in:
         detail = ", ".join(f"{name} ({kind})" for name, (kind, _) in sorted(logged_in.items()))
@@ -380,66 +445,33 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
             print("warn no provider logged in: the bot starts but cannot answer until you "
                   "run `omp login` or `/login` in the chat")
 
-    # 3. the gateway identity, verified before anything depends on it
-    env_values = _existing_env()
-    token = env_values.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    username = ""
-    for attempt in range(1, 4):
-        if not token:
-            token = _ask_secret("telegram bot token from @BotFather", yes)
-        if not token:
-            break
-        username = bot_identity(token)
-        if username:
-            env_file.parent.mkdir(parents=True, exist_ok=True)
-            env_file.write_text(f"TELEGRAM_BOT_TOKEN={token}\n", encoding="utf-8")
-            env_file.chmod(0o600)
-            print(f"ok   token stored in {env_file} (0600)")
-            print(f"ok   token valid: @{username}")
-            break
-        print(f"--   that token failed getMe (attempt {attempt}/3)")
-        token = ""
-    else:
-        print("--   token could not be verified; check it in @BotFather and re-run setup")
-
-    if not token:
-        print(f"\nFAIL no usable TELEGRAM_BOT_TOKEN. The telegram gateway cannot start without it.\n"
-              f"     get one from @BotFather, then either re-run `ompwire setup` or write\n"
-              f"     TELEGRAM_BOT_TOKEN=… into {env_file} (chmod 600)")
-        return 1
-
-    # 4. settings, now that the bot has an identity to hand out
-    if config_file.is_file() and not force:
+    config_exists = config_file.is_file() and not force
+    if config_exists:
         print(f"ok   config kept: {config_file}  (use --force to rewrite)")
         _next_steps()
         return 0
 
-    allowed = _ask(f"allowed telegram user ids for @{username or 'the bot'} "
-                   "(message @userinfobot to get yours, blank = nobody)", "", yes=yes)
-    allowed_list = ", ".join(part.strip() for part in allowed.split(",") if part.strip().isdigit())
-    home = allowed_list.split(",")[0].strip() if allowed_list else "0"
-    if not allowed_list:
-        print("warn no allowed users: nobody can talk to the bot until you add one")
+    catalog_values = agent_catalog(os.path.expanduser("~"))
+    model = pick_provider_and_model(catalog_values, logged_in, yes=yes)
 
-    cwd = _ask("agent working directory", os.path.expanduser("~"), yes=yes)
-    print("\nreading the agent's model/mode/thinking options…")
-    catalog_values = agent_catalog(os.path.expanduser(cwd))
+    # 3. thinking, 4. mode
     current = catalog_values.get("current") or {}
-    model = choose("model", catalog_values.get("models") or [],
-                   str(current.get("model") or ""), yes=yes)
-    mode = choose("mode", catalog_values.get("modes") or [],
-                  str(current.get("mode") or "default"), yes=yes)
     thinking = choose("thinking", catalog_values.get("thinking") or [],
                       str(current.get("thinking") or "xhigh"), yes=yes)
+    mode = choose("mode", catalog_values.get("modes") or [],
+                  str(current.get("mode") or "default"), yes=yes)
 
-    # 5. one question, not two: yolo decides whether an approval policy is needed
+    # 5. yolo decides whether an approval policy is needed at all
     yolo_answer = _ask("yolo mode (approvals bypassed)", "yes", yes=yes)
     yolo = yolo_answer.strip().lower() in ("yes", "y", "true", "on", "1")
     approval = "always-ask"
     if not yolo:
         approval = _ask("approval policy (always-ask|write)", "always-ask", yes=yes)
 
-    # 6. MCP belongs to omp; ompwire only merges a hub when explicitly asked
+    # 6. working directory
+    cwd = _ask("agent working directory", os.path.expanduser("~"), yes=yes)
+
+    # 7. MCP belongs to omp itself
     print(f"\nmcp: server definitions live in omp itself ({OMP_MCP_FILE})")
     _mcp_wizard(yes)
     hub = Path("~/mcp-hub/servers.yaml").expanduser()
@@ -447,6 +479,17 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
     if not yes and hub.is_file():
         if _confirm(f"     merge servers from {hub} at runtime too? [y/N]: ") in ("y", "yes"):
             mcp_source = "mcp-hub"
+
+    # 8. gateway: platform, credential, and who may talk to it
+    ok, username = _gateway_step(yes, env_file)
+    if not ok:
+        return 1
+    allowed = _ask(f"allowed telegram user ids for @{username or 'the bot'} "
+                   "(message @userinfobot to get yours, blank = nobody)", "", yes=yes)
+    allowed_list = ", ".join(part.strip() for part in allowed.split(",") if part.strip().isdigit())
+    home = allowed_list.split(",")[0].strip() if allowed_list else "0"
+    if not allowed_list:
+        print("warn no allowed users: nobody can talk to the bot until you add one")
 
     body = TEMPLATE.format(
         cwd=cwd, approval=approval, hint=default_hint(), allowed=allowed_list, home=home,

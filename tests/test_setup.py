@@ -7,6 +7,13 @@ import tomllib
 
 from ompwire import setup
 
+CATALOG = {
+    "models": ["zai/glm-5.1", "zai/glm-5.3-flash", "anthropic/claude-opus-5", "web/zai"],
+    "modes": ["default", "plan"],
+    "thinking": ["off", "low", "high", "xhigh"],
+    "current": {"model": "zai/glm-5.1", "mode": "default", "thinking": "xhigh"},
+}
+
 
 def _sandbox(monkeypatch, tmp_path):
     monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(tmp_path))
@@ -14,6 +21,7 @@ def _sandbox(monkeypatch, tmp_path):
     monkeypatch.setattr(setup, "providers", lambda: {"zai": ("api_key", "2026-10-24")})
     monkeypatch.setattr(setup, "login_provider", lambda yes: False)
     monkeypatch.setattr(setup, "_mcp_wizard", lambda yes, path=None: None)
+    monkeypatch.setattr(setup, "agent_catalog", lambda cwd, command="omp": CATALOG)
     return tmp_path
 
 
@@ -288,3 +296,74 @@ def test_mcp_wizard_collects_a_server_from_the_terminal(monkeypatch, tmp_path):
     assert data["mcpServers"]["github"]["command"] == "npx"
     assert data["mcpServers"]["github"]["args"] == ["-y", "@modelcontextprotocol/server-github"]
     assert data["mcpServers"]["github"]["env"] == {"TOKEN": "x"}
+
+
+def test_provider_and_model_are_one_step(monkeypatch, tmp_path):
+    """The model list must be narrowed to the provider chosen just before it."""
+    _sandbox(monkeypatch, tmp_path)
+    _agent(monkeypatch)
+    _token(monkeypatch)
+    seen: list[tuple[str, list[str]]] = []
+
+    def choose(prompt: str, choices: list[str], default: str, **kwargs) -> str:
+        seen.append((prompt, list(choices)))
+        return default
+
+    monkeypatch.setattr(setup, "choose", choose)
+    monkeypatch.setattr(setup, "_ask", lambda prompt, default, *, yes=False: default)
+
+    assert setup.run(yes=False) == 0
+    prompts = [prompt for prompt, _ in seen]
+    provider_index = next(i for i, prompt in enumerate(prompts) if prompt == "provider")
+    model_index = next(i for i, prompt in enumerate(prompts) if prompt.startswith("model ("))
+    assert provider_index < model_index
+    assert seen[provider_index][1] == ["anthropic", "web", "zai"]
+    assert seen[model_index][1] == ["zai/glm-5.1", "zai/glm-5.3-flash"]
+    data = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert data["agent"]["model"] == "zai/glm-5.1"
+
+
+def test_gateway_is_the_last_step_and_asks_for_the_token(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    _agent(monkeypatch)
+    order: list[str] = []
+
+    def answer(prompt: str, default: str, *, yes: bool = False) -> str:
+        order.append(prompt)
+        return default
+
+    def secret(prompt: str, yes: bool) -> str:
+        order.append(prompt)
+        return "123:abc"
+
+    monkeypatch.setattr(setup, "_ask", answer)
+    monkeypatch.setattr(setup, "_ask_secret", secret)
+    monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "late_bot")
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+
+    assert setup.run(yes=False) == 0
+    token_index = next(i for i, prompt in enumerate(order) if "bot token" in prompt)
+    assert "yolo mode" in order[0]
+    assert token_index >= len(order) - 2          # the gateway comes last
+    assert "working directory" in " ".join(order[:token_index])
+
+
+def test_gateway_rejects_a_pasted_secret_without_echoing_it(monkeypatch, tmp_path, capsys):
+    _sandbox(monkeypatch, tmp_path)
+    _agent(monkeypatch)
+    _token(monkeypatch)
+    state = {"platform_tries": 0}
+
+    def answer(prompt: str, default: str, *, yes: bool = False) -> str:
+        if "gateway platform" in prompt:
+            state["platform_tries"] += 1
+            return "8384807287:AAEwqsecret" if state["platform_tries"] == 1 else "telegram"
+        return default
+
+    monkeypatch.setattr(setup, "_ask", answer)
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+
+    assert setup.run(yes=False) == 0
+    out = capsys.readouterr().out
+    assert "AAEwqsecret" not in out
+    assert "looks like a secret" in out
