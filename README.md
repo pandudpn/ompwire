@@ -149,22 +149,53 @@ If a feature needs agent state, it belongs upstream in OMP, not here.
 
 ## Install
 
-ompwire is a Python tool, so the equivalent of `npx` is `uv`. Nothing is published
-to PyPI; it installs straight from the repository.
+One command, on a machine that may not have anything yet:
+
+```bash
+gh api repos/pandudpn/ompwire/contents/scripts/install.sh \
+   -H "Accept: application/vnd.github.raw" | sh
+```
+
+It installs `omp` if it is missing (official installer, after asking), installs ompwire
+from the newest release tag, checks that the `ompwire` command is reachable, and hands
+over to `ompwire setup`. The repo is private, so the entry point goes through your own
+`gh` auth instead of an anonymous `curl`.
+
+From a clone, the same script runs directly:
+
+```bash
+git clone https://github.com/pandudpn/ompwire.git
+cd ompwire && uv venv && uv pip install -e '.[dev]'
+./scripts/install.sh          # or skip it and use .venv/bin/ompwire
+```
+
+Manual install, when you would rather see each step:
 
 ```bash
 # one-off, no install
-uvx --from git+https://github.com/pandudpn/ompwire.git@v0.2.0 ompwire doctor
+uvx --from git+https://github.com/pandudpn/ompwire.git@v0.6.0 ompwire doctor
 
 # install the newest release
-uv tool install --from git+https://github.com/pandudpn/ompwire.git@v0.2.0 ompwire
+uv tool install --from git+https://github.com/pandudpn/ompwire.git@v0.6.0 ompwire
 
 # follow main instead
 uv tool install --from git+https://github.com/pandudpn/ompwire.git@main ompwire
 ```
 
-`pipx install git+https://github.com/pandudpn/ompwire.git@v0.2.0` is supported by the
+`pipx install git+https://github.com/pandudpn/ompwire.git@v0.6.0` is supported by the
 same code path, though only `uv` is verified on this machine.
+
+### Working from a checkout
+
+`uv tool install` puts `ompwire` in `~/.local/bin`. A checkout does not, so one symlink
+makes the command available everywhere without a second copy to keep in sync:
+
+```bash
+ln -sfn "$PWD/.venv/bin/ompwire" ~/.local/bin/ompwire
+```
+
+If a shell still says `command not found`, it started before the symlink existed:
+`hash -r` (or a new shell) fixes the lookup.
 
 ## The CLI
 
