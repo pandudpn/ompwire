@@ -83,6 +83,25 @@ def _workdir() -> str:
     return str(Path(cwd).expanduser()) if cwd else str(Path.home())
 
 
+def _credential_works(gateway: str) -> bool:
+    """A unit that restarts a rejected token every 5 seconds is worse than no unit."""
+    from . import gateways
+
+    try:
+        items = {item.name: item for item in gateways.load()}
+    except gateways.GatewayError:
+        return True          # nothing readable to check: do not block on our own bug
+    item = items.get(gateway)
+    if item is None or item.kind != "telegram":
+        return True          # not a telegram gateway, or not defined here at all
+    token = gateways.token(item)
+    if not token:
+        return False
+    from .setup import bot_identity
+
+    return bool(bot_identity(token))
+
+
 def _systemctl(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True,
                           timeout=timeout, check=False)
@@ -114,6 +133,11 @@ def install(gateway: str = "telegram", *, force: bool = False, start: bool = Tru
     if not env_file.is_file():
         print(f"FAIL {env_file} is missing: add a credential first "
               f"(`ompwire gateway add {gateway}`)")
+        return 1
+    if not force and not _credential_works(gateway):
+        print(f"FAIL the credential for {gateway!r} is not accepted by the platform. "
+              f"Restart=always would hammer it every 5 seconds.\n"
+              f"     replace it: ompwire gateway add {gateway} --force")
         return 1
 
     target.parent.mkdir(parents=True, exist_ok=True)

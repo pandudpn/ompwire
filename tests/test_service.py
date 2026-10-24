@@ -104,6 +104,7 @@ def test_install_writes_the_unit_and_enables_it(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(service, "_workdir", lambda: "/home/you")
     monkeypatch.setattr(service, "command_path", lambda: "/home/you/.local/bin/ompwire")
     monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
+    monkeypatch.setattr(service, "_credential_works", lambda gateway: True)
     monkeypatch.setattr(service.subprocess, "run",
                         lambda command, **kwargs: calls.append(command) or Result())
 
@@ -211,3 +212,61 @@ class TestOneGatewayOneUnit:
                                    "/w", "whatsapp")
         assert "gateway run whatsapp" in body
         assert "telegram" not in body
+
+
+def test_install_refuses_a_rejected_credential(monkeypatch, tmp_path, capsys):
+    """Restart=always on a revoked token is a crash loop, not a service."""
+    from ompwire import gateways
+
+    monkeypatch.setattr(service, "_systemd_available", lambda: True)
+    monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": _tmp_unit(gateway))
+    monkeypatch.setattr(service, "_env_file", lambda: _env(tmp_path))
+    monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
+    monkeypatch.setattr(gateways, "load", lambda config=None: [gateways.Gateway(name="telegram")])
+    monkeypatch.setattr(gateways, "token", lambda item: "old:token")
+    monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "")
+
+    assert service.install("telegram") == 1
+    out = capsys.readouterr().out
+    assert "not accepted" in out and "gateway add telegram --force" in out
+
+
+def test_install_proceeds_when_the_credential_verifies(monkeypatch, tmp_path, capsys):
+    from ompwire import gateways
+
+    unit = tmp_path / "ompwire-telegram.service"
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=x\n", encoding="utf-8")
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(service, "_systemd_available", lambda: True)
+    monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": unit)
+    monkeypatch.setattr(service, "_env_file", lambda: env)
+    monkeypatch.setattr(service, "_workdir", lambda: "/home/you")
+    monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
+    monkeypatch.setattr(service.subprocess, "run",
+                        lambda command, **kwargs: Result())
+    monkeypatch.setattr(gateways, "load", lambda config=None: [gateways.Gateway(name="telegram")])
+    monkeypatch.setattr(gateways, "token", lambda item: "good:token")
+    monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "vidura_omp_bot")
+
+    assert service.install("telegram") == 0
+    assert unit.exists()
+
+
+def _tmp_unit(gateway: str = "telegram"):
+    from pathlib import Path
+
+    return Path(f"/tmp/ompwire-test-{gateway}.service")
+
+
+def _env(path):
+    from pathlib import Path
+
+    target = Path(path) / ".env"
+    target.write_text("TELEGRAM_BOT_TOKEN=x\n", encoding="utf-8")
+    return target
