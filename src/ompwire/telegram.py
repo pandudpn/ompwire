@@ -13,6 +13,7 @@ block the reader thread until the user taps a button.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Iterable
@@ -21,7 +22,8 @@ from typing import Any
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, TelegramError
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes,
+                          MessageHandler, filters)
 
 from .acp import AcpClient, AcpError, Update as AcpUpdate, pick_permission_option
 from .config import Config
@@ -56,6 +58,30 @@ COMMANDS: list[tuple[str, str]] = [
     ("help", "this list"),
 ]
 
+def normalize_mcp_servers(servers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shape MCP entries the way omp 18.12.6 accepts them.
+
+    Measured: `env` must be a list. An object, or a missing env, makes
+    `session/new` fail with "Internal error / undefined is not an object".
+    """
+    out: list[dict[str, Any]] = []
+    for server in servers or []:
+        env = server.get("env", [])
+        if isinstance(env, dict):
+            env = [{"name": str(k), "value": str(v)} for k, v in env.items()]
+        elif env is None:
+            env = []
+        entry = {
+            "name": str(server.get("name", "mcp")),
+            "type": str(server.get("type", "stdio")),
+            "command": str(server.get("command", "")),
+            "args": [str(a) for a in (server.get("args") or [])],
+            "env": list(env),
+        }
+        out.append(entry)
+    return out
+
+
 FORWARD_HINT = (
     "Everything else is sent to the agent as a prompt. Its own commands work here, "
     "including /skill:<name> and /compact."
@@ -88,6 +114,8 @@ class ChatAgent:
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
         self.usage = {"input": 0, "output": 0, "cached": 0, "turns": 0}
         self.options: dict[str, dict[str, Any]] = {}
+        self.mcp_warning = ""
+        self.picker: dict[str, Any] = {}
         self.advertised_commands: list[str] = []
         self._updates: asyncio.Queue[AcpUpdate | None] = asyncio.Queue()
         self._pending_perm: dict[str, dict[str, Any]] = {}
@@ -132,6 +160,13 @@ class ChatAgent:
             else:
                 result = await asyncio.to_thread(self.client.new_session, self.cwd, self._mcp_servers())
                 self.session_id = str(result.get("sessionId") or "")
+        except AcpError as exc:
+            if not self._mcp_servers():
+                raise
+            log.warning("session/new with mcp servers failed (%s); retrying without them", exc)
+            self.mcp_warning = str(exc)
+            result = await asyncio.to_thread(self.client.new_session, self.cwd, [])
+            self.session_id = str(result.get("sessionId") or "")
         finally:
             self.client.on_update = previous
         self.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
@@ -139,7 +174,7 @@ class ChatAgent:
         await self._apply_preferences()
 
     def _mcp_servers(self) -> list[dict[str, Any]]:
-        return list(self.config.get("mcp", "servers", []) or [])
+        return normalize_mcp_servers(self.config.get("mcp", "servers", []) or [])
 
     async def _apply_preferences(self) -> None:
         for config_id in ("model", "mode"):
@@ -208,14 +243,14 @@ class ChatAgent:
         return False
 
     # ------------------------------------------------------------------ turn
-    async def ask(self, text: str, status_message=None) -> str:
+    async def ask(self, text: str, message=None) -> str:
         await self.ensure()
         await self.app.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
         self.busy = True
         self.last_used = time.time()
         buffer: list[str] = []
         sent: list[Any] = []
-        state = {"msg": status_message, "last_edit": 0.0, "text": ""}
+        state = {"msg": None, "last_edit": 0.0, "text": ""}
 
         async def flush(force: bool = False) -> None:
             now = time.time()
@@ -256,10 +291,11 @@ class ChatAgent:
 
         drain_task = asyncio.create_task(drain())
         try:
-            result = await asyncio.to_thread(
-                self.client.prompt, self.session_id, text,
-                timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
-            )
+            async with self.typing():
+                result = await asyncio.to_thread(
+                    self.client.prompt, self.session_id, text,
+                    timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
+                )
         except AcpError as exc:
             self._updates.put_nowait(None)
             await drain_task
@@ -276,15 +312,39 @@ class ChatAgent:
         self.usage["output"] += int(usage.get("outputTokens") or 0)
         self.usage["cached"] += int(usage.get("cachedReadTokens") or 0)
         self.usage["turns"] += 1
-        if self.config.get("stream", "show_usage", True) and state["msg"] is not None:
+        anchor = state["msg"] or message
+        if self.config.get("stream", "show_usage", True) and anchor is not None:
             try:
-                await state["msg"].reply_text(
+                await anchor.reply_text(
                     f"{result.stop_reason} · in {usage.get('inputTokens', '?')} "
                     f"out {usage.get('outputTokens', '?')} cached {usage.get('cachedReadTokens', 0)}"
                 )
             except TelegramError:
                 pass
         return result.text
+
+    @contextlib.asynccontextmanager
+    async def typing(self):
+        """Keep the Telegram 'typing…' indicator alive for the duration of a turn."""
+        stop = asyncio.Event()
+
+        async def loop() -> None:
+            while not stop.is_set():
+                try:
+                    await self.app.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
+                except TelegramError:
+                    pass
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=4.0)
+                except asyncio.TimeoutError:
+                    continue
+
+        task = asyncio.create_task(loop())
+        try:
+            yield
+        finally:
+            stop.set()
+            task.cancel()
 
     async def cancel(self) -> bool:
         if self.client is None or not self.session_id:
@@ -387,9 +447,8 @@ class Transport:
             try:
                 if kind == "prompt":
                     message = payload
-                    status = await message.reply_text("working…")
                     try:
-                        await agent.ask(message.text, status_message=status)
+                        await agent.ask(message.text, message=message)
                     except AcpError as exc:
                         await message.reply_text(f"agent error: {exc}")
                     except Exception as exc:  # noqa: BLE001 - a turn must never kill the worker
@@ -526,35 +585,121 @@ class Transport:
         session_id = await agent.new_session()
         await update.effective_message.reply_text(f"cwd {target}, new session {session_id[:8]}")
 
-    async def _config_show_set(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE, config_id: str) -> None:
+    # -------------------------------------------------- config pickers (UI)
+    PAGE_SIZE = 8
+
+    def _values(self, agent: ChatAgent, config_id: str) -> list[str]:
+        option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
+        return [str(o.get("value")) for o in (option.get("options") or [])]
+
+    def _current(self, agent: ChatAgent, config_id: str) -> str:
+        option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
+        return str(option.get("currentValue") or "?")
+
+    def _providers(self, agent: ChatAgent, config_id: str) -> list[tuple[str, list[int]]]:
+        values = self._values(agent, config_id)
+        grouped: dict[str, list[int]] = {}
+        for index, value in enumerate(values):
+            provider = value.split("/", 1)[0] if "/" in value else "other"
+            grouped.setdefault(provider, []).append(index)
+        return sorted(grouped.items())
+
+    async def _show_config(
+        self,
+        agent: ChatAgent,
+        chat_id: int,
+        config_id: str,
+        screen: str = "l",
+        arg: int = 0,
+        edit: Any = None,
+    ) -> None:
+        current = self._current(agent, config_id)
+        providers = self._providers(agent, config_id)
+        multi_provider = len(providers) > 1
+
+        if screen == "p" and multi_provider:
+            rows = []
+            row: list[InlineKeyboardButton] = []
+            for index, (provider, indices) in enumerate(providers):
+                label = f"{provider} ({len(indices)})"
+                if provider == (current.split("/", 1)[0] if "/" in current else "other"):
+                    label = f"• {label}"
+                row.append(InlineKeyboardButton(label[:60], callback_data=f"o:{config_id}:l:{index}:0"))
+                if len(row) == 2:
+                    rows.append(row)
+                    row = []
+            if row:
+                rows.append(row)
+            text = f"{config_id}: {current}\n{len(providers)} providers · pick one"
+        else:
+            page = max(0, arg)
+            if multi_provider:
+                provider_name, indices = providers[page] if page < len(providers) else providers[0]
+                page = 0
+                values = [self._values(agent, config_id)[i] for i in indices]
+                start, pages = 0, (len(values) + self.PAGE_SIZE - 1) // self.PAGE_SIZE
+                label_prefix = provider_name
+            else:
+                values = self._values(agent, config_id)
+                pages = max(1, (len(values) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+                page = min(page, pages - 1)
+                start = page * self.PAGE_SIZE
+                label_prefix = config_id
+            window = values[start:start + self.PAGE_SIZE]
+            rows = []
+            for offset, value in enumerate(window):
+                mark = "• " if value == current else ""
+                rows.append([InlineKeyboardButton(f"{mark}{value}"[:60],
+                                                  callback_data=f"o:{config_id}:s:{start + offset}:0")])
+            nav: list[InlineKeyboardButton] = []
+            if multi_provider:
+                nav.append(InlineKeyboardButton("◀ providers", callback_data=f"o:{config_id}:p:0:0"))
+            if pages > 1:
+                if page > 0:
+                    nav.append(InlineKeyboardButton("◀", callback_data=f"o:{config_id}:l:{arg}:{page - 1}"))
+                nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="o:noop"))
+                if page < pages - 1:
+                    nav.append(InlineKeyboardButton("▶", callback_data=f"o:{config_id}:l:{arg}:{page + 1}"))
+            if nav:
+                rows.append(nav)
+            text = (
+                f"{config_id}: {current}\n{label_prefix} · {len(values)} option(s)"
+                + (f" · page {page + 1}/{pages}" if pages > 1 else "")
+            )
+
+        markup = InlineKeyboardMarkup(rows)
+        if edit is not None:
+            try:
+                await edit.edit_text(text, reply_markup=markup)
+                return
+            except BadRequest:
+                pass
+        await self.app.bot.send_message(chat_id, text, reply_markup=markup)
+
+    async def _apply_pick(self, agent: ChatAgent, config_id: str, value: str) -> None:
+        result = await asyncio.to_thread(agent.client.set_config_option, agent.session_id, config_id, value)
+        agent.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
+
+    async def cmd_model(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
         await agent.ensure()
-        options = getattr(agent, "options", {}) or {}
-        current = options.get(config_id) or {}
-        if not ctx.args:
-            choices = [str(o.get("value")) for o in (current.get("options") or [])]
-            listing = ", ".join(choices[:40]) + (" …" if len(choices) > 40 else "")
-            return await update.effective_message.reply_text(
-                f"{config_id}: {current.get('currentValue', '?')}\nchoices: {listing or '-'}"
-            )
-        value = " ".join(ctx.args)
-        try:
-            result = await asyncio.to_thread(agent.client.set_config_option, agent.session_id, config_id, value)
-            agent.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
-            await update.effective_message.reply_text(f"{config_id} = {value}")
-        except AcpError as exc:
-            await update.effective_message.reply_text(f"{config_id} failed: {exc}")
+        await self._show_config(agent, update.effective_chat.id, "model", "p", 0)
 
-    async def cmd_model(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._config_show_set(update, ctx, "model")
+    async def cmd_mode(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return await self._deny(update)
+        agent = self.agent_for(update.effective_chat.id)
+        await agent.ensure()
+        await self._show_config(agent, update.effective_chat.id, "mode", "l", 0)
 
-    async def cmd_mode(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._config_show_set(update, ctx, "mode")
-
-    async def cmd_thinking(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._config_show_set(update, ctx, "thinking")
+    async def cmd_thinking(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return await self._deny(update)
+        agent = self.agent_for(update.effective_chat.id)
+        await agent.ensure()
+        await self._show_config(agent, update.effective_chat.id, "thinking", "l", 0)
 
     async def cmd_verbose(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -642,15 +787,56 @@ class Transport:
         query = update.callback_query
         if query is None or not self._authorized(update):
             return
+        data = str(query.data or "")
+        chat_id = update.effective_chat.id
+        agent = self.agent_for(chat_id)
+
+        if data.startswith("o:"):
+            parts = data.split(":")
+            if len(parts) < 3 or parts[1] == "noop":
+                return await query.answer()
+            _, config_id, screen = parts[0], parts[1], parts[2]
+            a = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            b = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+            try:
+                await agent.ensure()
+                if screen == "s":
+                    value = self._values(agent, config_id)[a]
+                    await self._apply_pick(agent, config_id, value)
+                    await query.answer("model set" if config_id == "model" else f"{config_id} set")
+                    await query.edit_message_text(f"{config_id} = {value}")
+                    return
+                if screen == "p":
+                    await query.answer()
+                    await self._show_config(agent, chat_id, config_id, "p", 0, edit=query.message)
+                    return
+                if screen == "l":
+                    await query.answer()
+                    await self._show_config(agent, chat_id, config_id, "l", a, b, edit=query.message)
+                    return
+            except (AcpError, IndexError) as exc:
+                await query.answer("failed", show_alert=False)
+                await self.app.bot.send_message(chat_id, f"{config_id} failed: {exc}")
+                return
+            await query.answer()
+            return
+
         try:
-            token, index = str(query.data).rsplit(":", 1)
-            agent = self.agent_for(update.effective_chat.id)
+            token, index = data.rsplit(":", 1)
             ok = await agent.handle_permission_callback(token, int(index))
             await query.answer("recorded" if ok else "expired")
             if ok:
-                await query.edit_message_text(f"{query.message.text}\n\n→ {query.data}")
+                await query.edit_message_text(f"{query.message.text}\n\n→ selected")
         except (ValueError, AttributeError):
             await query.answer("bad callback")
+
+    async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        log.exception("handler failed", exc_info=context.error)
+        try:
+            if isinstance(update, Update) and update.effective_message is not None:
+                await update.effective_message.reply_text(f"error: {context.error}")
+        except TelegramError:
+            pass
 
     # ------------------------------------------------------------------ serve
     async def run(self) -> None:
@@ -679,6 +865,7 @@ class Transport:
         app.add_handler(CommandHandler("help", self.cmd_help))
         app.add_handler(CommandHandler("start", self.cmd_help))
         app.add_handler(CallbackQueryHandler(self.on_callback))
+        app.add_error_handler(self.on_error)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
 
         await app.initialize()

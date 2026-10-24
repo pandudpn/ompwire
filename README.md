@@ -141,6 +141,7 @@ These are the sharp edges found while building it. They are the reason `tests/` 
 - **Model selection is a config option.** There is no ACP-level model field; it is `configOptions` entry `id = "model"`, set through `session/set_config_option`.
 - **Keep the process warm.** A turn costs a large baseline of input tokens (OMP's own prompt), most of it cache-served on later turns. Spawning per message throws that away.
 - **One subprocess per conversation** is the whole concurrency model. That is enough for a personal assistant and not enough for a public bot.
+- **`mcpServers` needs `env` as a list.** `session/new` with an entry whose `env` is an object, or missing, fails with `Internal error / undefined is not an object`. `{"name": "x", "type": "stdio", "command": "npx", "args": [...], "env": []}` is the shape omp 18.12.6 accepts; dict-shaped env config is converted automatically, and a failure falls back to a session without MCP servers instead of blocking the chat.
 
 ## Development
 
@@ -174,6 +175,8 @@ The transport owns session routing, approvals, streaming and cost reporting. Any
 | `/yolo` | respawns the agent with `--approval-mode=yolo` |
 | `/kill` | terminates the agent subprocess for this chat |
 | `/help`, `/whoami` | transport metadata |
+
+`/model`, `/mode` and `/thinking` open inline keyboards rather than printing a list: for the model you pick a provider first (grouped from the `provider/model` id), then page through that provider's models; the current value is marked with a dot. Turns show Telegram's native typing indicator, so no "working…" placeholder is posted into the chat.
 
 ## Queue vs steer
 

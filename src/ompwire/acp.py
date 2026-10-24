@@ -205,7 +205,11 @@ class AcpClient:
             self._pending.pop(msg_id, None)
         if "error" in reply:
             err = reply["error"]
-            raise AcpError(f"{method} failed: {err.get('message', err)}")
+            detail = err.get("data")
+            if isinstance(detail, dict):
+                detail = detail.get("details") or detail
+            suffix = f" ({detail})" if detail else ""
+            raise AcpError(f"{method} failed: {err.get('message', err)}{suffix}")
         return reply.get("result") or {}
 
     def _stderr_hint(self) -> str:
