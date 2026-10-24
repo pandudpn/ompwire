@@ -1,13 +1,13 @@
 """Telegram transport for ompwire.
 
-Design rule: this module owns transport concerns only (polling, streaming edits,
-approvals, queueing, session routing). Anything the agent can do itself is
+Design rule: this module owns transport concerns only (polling, posting each step of a turn,
+approvals, steering and queueing, session routing). Anything the agent can do itself is
 forwarded as a prompt.
 
-Threading model: the ACP client is synchronous and talks on its own reader
-thread; Telegram is asyncio. The bridge is one asyncio.Queue fed by
-`loop.call_soon_threadsafe`, plus a threading.Event for approvals, which must
-block the reader thread until the user taps a button.
+Threading model: the ACP client is synchronous and talks on its own reader thread;
+Telegram is asyncio. The bridge is one asyncio.Queue fed by `loop.call_soon_threadsafe`.
+An approval is answered on its own thread, which waits for the button while the reader
+keeps delivering updates.
 """
 
 from __future__ import annotations
