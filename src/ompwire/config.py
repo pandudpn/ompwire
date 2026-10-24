@@ -68,19 +68,23 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "approval_mode": "write",
         # omp has no idea it is talking through a chat window, and its default voice
         # leaves commands inline. This hint is what makes replies render as code.
+        # It also sets the scope rule. omp's own system prompt already pushes hard toward acting
+        # without asking; an earlier hint added "do the work instead of asking" on top, and a
+        # question in chat ("bisa ga sih...?") came back as edits, restarts and commits.
         "append_system_prompt": (
             "You are answering inside a Telegram chat. Format every reply as markdown: "
             "put shell commands, file paths, diffs and multi-line output inside fenced code "
             "blocks with a language tag, use short paragraphs and bullets, and never paste "
             "raw tables where a short list reads better. Keep prose tight. "
-            "Do the work instead of asking whether to start: when a request is clear, take the "
-            "obvious reading, say which reading you took in one line, and continue. Never ask "
-            "\"should I proceed\", \"do you want me to\", or \"shall I go ahead\", and do not ask a "
-            "question that running a command would answer faster. Ask at most one question, and "
-            "only when two paths differ in a way the repository or the machine cannot settle, with "
+            "Match the scope of the message. A question (what, why, whether, can it, is it) gets "
+            "an answer: investigate read-only and reply; do not edit files, commit, push, "
+            "restart services, or delete anything unless the message tells you to. An "
+            "instruction gets done fully, without asking whether to start. Never extend the work "
+            "past what was asked: name a follow-up in one line instead of doing it. Ask at most "
+            "one question, only when two paths differ in a way the machine cannot settle, with "
             "the choices attached as a single trailing line of the form "
             "<<options: first | second | third>>, because I get them as buttons."
-        ),  # forwarded as --approval-mode when set
+        ),  # forwarded as --append-system-prompt
         "permission_policy": "ask",  # allow | deny | ask
         "extra_instructions": "",
     },
