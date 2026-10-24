@@ -56,3 +56,22 @@ def test_bar_chart_lines_become_a_pre_block():
     pre = html.split("<pre>")[1].split("</pre>")[0]
     assert "[░░░░░░░░] 1%" in pre and "[████████] 66%" in pre
     assert "Tail text" not in pre
+
+
+def test_agent_mcp_failure_notice_is_stripped():
+    from ompwire.mdrender import strip_agent_noise
+
+    noise = ('MCP srv "honcho" failed to connect: MCP subprocess closed stdout before '
+             'responding. Its tools are unavailable until the client restarts the session.')
+    assert strip_agent_noise(noise * 4) == ""
+    assert strip_agent_noise(f"{noise}Jawaban asli.") == "Jawaban asli."
+
+
+def test_strip_html_unwraps_a_rendered_tool_block():
+    from ompwire.format import tool_block
+    from ompwire.mdrender import strip_html
+
+    body = tool_block("execute", "", command="ls | head -1", output="a<b")
+    plain = strip_html(body)
+    assert "<" not in plain and "a<b" in plain
+    assert plain.splitlines()[0] == "🔧 execute"

@@ -34,7 +34,7 @@ from . import __version__
 from .config import Config, approval_policy, save_override
 from .format import card, change, esc, help_sections, now_wib, tool_block
 from .mcp_hub import hub_servers, merge_entry as merge_mcp_entry, normalize
-from .mdrender import to_html, to_plain
+from .mdrender import strip_agent_noise, strip_html, to_html, to_plain
 from .format import uptime as fmt_uptime
 from .store import SessionStore
 
@@ -355,7 +355,7 @@ class ChatAgent:
         state = {"text_msg": None, "tool_msg": None, "last_edit": 0.0, "text": "", "tools": 0}
 
         async def flush_text(force: bool = False) -> None:
-            joined = "".join(text_buffer)
+            joined = strip_agent_noise("".join(text_buffer))
             if not joined.strip():
                 return
             now = time.time()
@@ -393,13 +393,19 @@ class ChatAgent:
             if dropped:
                 body = f"… {dropped} earlier call(s)\n{body}" if body else f"… {dropped} call(s)"
             if state["tool_msg"] is None:
-                state["tool_msg"] = await self.app.bot.send_message(self.chat_id, body)
+                state["tool_msg"] = await self.send_html(body)
                 sent.append(state["tool_msg"])
                 return
             try:
-                await state["tool_msg"].edit_text(body)
-            except BadRequest:
-                pass
+                await state["tool_msg"].edit_text(body, parse_mode=ParseMode.HTML)
+            except BadRequest as exc:
+                if "not modified" in str(exc).lower():
+                    return
+                log.debug("tool trace edit rejected (%s); retrying as plain text", exc)
+                try:
+                    await state["tool_msg"].edit_text(strip_html(body))
+                except BadRequest:
+                    pass
 
         async def drain() -> None:
             while True:
@@ -468,6 +474,14 @@ class ChatAgent:
             except TelegramError:
                 pass
         return result.text
+
+    async def send_html(self, body: str):
+        """Send pre-rendered Telegram HTML, falling back to plain text."""
+        try:
+            return await self.app.bot.send_message(self.chat_id, body, parse_mode=ParseMode.HTML)
+        except BadRequest as exc:
+            log.warning("html send rejected (%s); falling back to plain text", exc)
+            return await self.app.bot.send_message(self.chat_id, strip_html(body))
 
     async def send_md(self, text: str):
         """Send agent markdown as Telegram HTML, degrading to plain text on refusal."""

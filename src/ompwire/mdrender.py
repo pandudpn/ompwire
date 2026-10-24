@@ -100,6 +100,24 @@ def to_html(text: str) -> str:
     return "".join(parts)
 
 
+def strip_html(text: str) -> str:
+    """Plain-text fallback: drop tags and unescape entities."""
+    return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+
+# omp injects MCP connect failures into the agent's own message stream; they are
+# diagnostics for us, not something to read in the chat.
+MCP_NOISE_RE = re.compile(
+    r"MCP (?:srv|server)s?\s+[\"']?[^\"'.:]+[\"']?\s+failed to connect:.*?"
+    r"(?:restarts the session\.|$)",
+    re.DOTALL,
+)
+
+
+def strip_agent_noise(text: str) -> str:
+    return MCP_NOISE_RE.sub("", text).strip()
+
+
 def to_plain(text: str) -> str:
     """Strip the markdown markers that look like noise in a plain-text fallback."""
     text = FENCE_RE.sub(lambda m: m.group(0).strip("`"), text)
