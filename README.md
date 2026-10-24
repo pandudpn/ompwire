@@ -69,9 +69,29 @@ uv tool install --from git+https://github.com/pandudpn/ompwire.git@main ompwire
 ```
 
 `pipx install git+https://github.com/pandudpn/ompwire.git@v0.2.0` is supported by the
-same code path, though only `uv` is verified on this machine. Then
-write a config at `~/.config/ompwire/config.toml` (copy `config.toml.example`),
-run `ompwire doctor`, and start the transport with `ompwire serve`.
+same code path, though only `uv` is verified on this machine.
+
+## Setup
+
+```bash
+ompwire setup
+```
+
+Setup does three things in this order, because the transport is useless without the
+first:
+
+1. **Checks for `omp`.** If the agent is missing it prints the official installer
+   (`curl -fsSL https://omp.sh/install | sh`) and offers to run it. Nothing else is
+   written until an agent is on disk — `ompwire serve` refuses to start otherwise.
+2. **Writes `~/.config/ompwire/config.toml`** with the working directory, approval
+   policy, MCP source and allowed Telegram user ids. An existing config is kept;
+   `--force` moves it to `config.toml.bak` first.
+3. **Writes `~/.config/ompwire/.env` (0600)** with the bot token, asked for with
+   hidden input, then verified with `getMe` and reported as `token valid: @name`.
+   The token is never echoed back and never lands in `config.toml`.
+
+`ompwire setup --yes` takes every default without prompting, which is what a
+provisioning script wants. Afterwards: `ompwire doctor`, then `ompwire serve`.
 
 Working on ompwire itself: clone it, `uv venv && uv pip install -e '.[dev]'`, and
 run `.venv/bin/ompwire serve` — the checkout keeps its own session store.

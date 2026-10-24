@@ -59,6 +59,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     for warning in config.warnings:
         print(f"warn: {warning}", file=sys.stderr)
+    from .setup import agent_path
+
+    command = str(config.get("acp", "command", "omp"))
+    if agent_path(command) is None:
+        print(f"FAIL agent not found: {command}. Run `ompwire setup` first.", file=sys.stderr)
+        return 1
     from .telegram import serve
 
     return serve(config)
@@ -127,6 +133,12 @@ def cmd_update(args: argparse.Namespace) -> int:
     return run(edge=args.edge, check=args.check, force=args.force)
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    from .setup import run
+
+    return run(yes=args.yes, force=args.force, install_omp=args.install_omp)
+
+
 def cmd_version(_args: argparse.Namespace) -> int:
     from .update import current_commit, current_version, install_mode
 
@@ -166,6 +178,13 @@ def build_parser() -> argparse.ArgumentParser:
     upd.add_argument("--check", action="store_true", help="report what an update would do")
     upd.add_argument("--force", action="store_true", help="for a source checkout, run git checkout")
     upd.set_defaults(func=cmd_update)
+
+    setup = sub.add_parser("setup", help="check for omp, then write config and .env")
+    setup.add_argument("--yes", action="store_true", help="accept the defaults, no prompts")
+    setup.add_argument("--force", action="store_true", help="rewrite an existing config")
+    setup.add_argument("--install-omp", action="store_true",
+                       help="run the official omp installer without asking")
+    setup.set_defaults(func=cmd_setup)
 
     ver = sub.add_parser("version", help="print the installed version and installer")
     ver.set_defaults(func=cmd_version)
