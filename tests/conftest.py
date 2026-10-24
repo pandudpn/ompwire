@@ -26,6 +26,8 @@ def isolate_real_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(gateways, "gateways_file", lambda: tmp_path / "gateways.toml")
     monkeypatch.setattr(lock, "lock_path", lambda gateway="": state / f"serve-{gateway or 'default'}.lock")
     monkeypatch.setattr(config_module, "OVERRIDES_PATH", state / "overrides.json")
+    # the session store holds per-chat preferences; a stray fixture once wrote a real one
+    monkeypatch.setitem(config_module.DEFAULTS["session"], "store", str(state / "sessions.db"))
     # systemd is the host's; nothing in the suite should call it for real
     monkeypatch.setattr(service, "_systemd_available", lambda: False)
     # the agent is the developer's: a test that cares about a missing agent patches this to None

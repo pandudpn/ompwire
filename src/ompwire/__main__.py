@@ -446,9 +446,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"FAIL agent command not found on PATH: {command}")
         return 1
     print(f"ok   agent command: {path}")
-    if bool(config.get("agent", "yolo", False)):
-        # not a failure: yolo is a legitimate choice, but it must be a decision, not a surprise
-        print("WARN yolo is on: no tool asks, and the agent can write anywhere its cwd allows")
+    # The config file is not the whole truth: /yolo and /approval are per chat and live in the
+    # store, so a doctor that only reads the file reports a gate that is not there.
+    open_chats: list[str] = []
+    try:
+        probe = SessionStore(str(config.get("session", "store")))
+        for chat, prefs in probe.all_prefs().items():
+            if str(prefs.get("yolo", "")).lower() in {"1", "true", "on"}:
+                open_chats.append(f"chat {chat} (yolo on)")
+            if str(prefs.get("approval", "")) == "allow":
+                open_chats.append(f"chat {chat} (approval allow)")
+        probe.close()
+    except Exception as exc:
+        print(f"WARN could not read per-chat preferences: {exc}")
+    file_yolo = bool(config.get("agent", "yolo", False))
+    if file_yolo or open_chats:
+        print("WARN no gate: " + (", ".join(open_chats) if open_chats
+                                  else "yolo in the config file")
+              + " · the agent can write and run anything inside its cwd")
     else:
         print(f"ok   approvals: {config.get('agent', 'approval_mode', 'write')} "
               f"· a shell command asks in the chat")

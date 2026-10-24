@@ -249,8 +249,10 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
     if path is None and explicit:
         warnings.append(f"config file not found: {explicit} (using defaults + env)")
 
-    merged = _deep_merge(DEFAULTS, load_overrides())
-    merged = _deep_merge(merged, file_data)
+    # Order matters: a runtime toggle (/yolo, /approval, /model) is a decision made after the file
+    # was written, so it must beat the file. Only the environment outranks it.
+    merged = _deep_merge(DEFAULTS, file_data)
+    merged = _deep_merge(merged, load_overrides())
 
     for env_name, (section, key) in ENV_OVERRIDES.items():
         if env_name in env and env[env_name] != "":

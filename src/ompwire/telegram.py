@@ -1099,6 +1099,10 @@ class Transport:
         if getattr(agent, "yolo", False):
             return "yolo · no tool asks"
         mode = str(self.config.get("agent", "approval_mode", "write") or "write")
+        if approval_policy(self.config) == "allow":
+            return f"{mode} · auto-allow · nothing asks"
+        if approval_policy(self.config) == "deny":
+            return f"{mode} · auto-deny"
         timeout = float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
         return f"{mode} · asks · {timeout:.0f}s"
 

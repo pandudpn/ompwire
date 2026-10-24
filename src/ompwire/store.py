@@ -59,6 +59,14 @@ class SessionStore:
         rows = self._db.execute("SELECT name, value FROM prefs WHERE key = ?", (key,)).fetchall()
         return {row["name"]: row["value"] for row in rows}
 
+    def all_prefs(self) -> dict[str, dict[str, str]]:
+        """Every chat's preferences, for diagnostics that must not guess from the config file."""
+        rows = self._db.execute("SELECT key, name, value FROM prefs").fetchall()
+        out: dict[str, dict[str, str]] = {}
+        for row in rows:
+            out.setdefault(row["key"], {})[row["name"]] = row["value"]
+        return out
+
     def set_pref(self, key: str, name: str, value: str) -> None:
         self._db.execute(
             "INSERT INTO prefs (key, name, value) VALUES (?, ?, ?) "
