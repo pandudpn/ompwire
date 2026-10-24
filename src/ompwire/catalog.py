@@ -143,6 +143,28 @@ def credentials_in_db(db_path: str = "~/.omp/agent/agent.db") -> dict[str, str]:
     return {str(provider): str(kind) for provider, kind in rows}
 
 
+def credential_snapshot(db_path: str = "~/.omp/agent/agent.db") -> dict[str, tuple[str, str]]:
+    """provider -> (type, updated_at). Lets a re-login show up even when the name exists."""
+    import sqlite3
+
+    path = Path(db_path).expanduser()
+    if not path.is_file():
+        return {}
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return {}
+    try:
+        rows = con.execute(
+            "SELECT provider, credential_type, COALESCE(updated_at, '') FROM auth_credentials"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        con.close()
+    return {str(provider): (str(kind), str(updated)) for provider, kind, updated in rows}
+
+
 def list_providers(command: str = "omp") -> list[Provider]:
     """The login menu plus which entries already hold credentials."""
     menu = parse_menu(run_pty([command, "login"], timeout=9.0))

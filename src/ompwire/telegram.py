@@ -31,7 +31,8 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
 
 from .acp import AcpClient, AcpError, Update as AcpUpdate, pick_permission_option
 from . import __version__
-from .catalog import credentials_in_db, list_providers, list_skills, skill_body
+from .catalog import (credential_snapshot, credentials_in_db, list_providers, list_skills,
+                     skill_body)
 from .config import Config, approval_policy, save_override
 from .format import card, change, esc, help_sections, now_wib, tool_block
 from .login import LoginSession
@@ -597,7 +598,7 @@ class Transport:
         self._login_cache_at = 0.0
         self._skills: dict[int, list[Any]] = {}
         self.logins: dict[int, Any] = {}
-        self._login_before: dict[int, dict[str, str]] = {}
+        self._login_before: dict[int, dict[str, tuple[str, str]]] = {}
         self.credential_db = str(config.get("agent", "credential_db", "~/.omp/agent/agent.db"))
         self.token = str(config.get("telegram", "bot_token", "") or "")
         self.allowed = {int(str(u)) for u in (config.get("telegram", "allowed_users") or []) if str(u).strip()}
@@ -685,7 +686,7 @@ class Transport:
             session.send(message.text)
             log.info("login code relayed chat=%s chars=%s", update.effective_chat.id,
                      len(message.text.strip()))
-            await message.reply_text("🔑 kode dikirim ke omp, menunggu hasil…")
+            await message.reply_text("🔑 code sent to omp, waiting for the result…")
             return
         if message is None or not message.text:
             return
@@ -844,7 +845,7 @@ class Transport:
     async def show_skill(self, chat_id: int, index: int) -> None:
         skills = self._skills.get(chat_id) or []
         if not (0 <= index < len(skills)):
-            return await self.app.bot.send_message(chat_id, "skill tidak dikenal, buka /skills lagi")
+            return await self.app.bot.send_message(chat_id, "unknown skill, open /skills again")
         skill = skills[index]
         body = await asyncio.to_thread(skill_body, skill)
         log.info("skill opened chat=%s name=%s chars=%s", chat_id, skill.name, len(body))
@@ -854,7 +855,7 @@ class Transport:
             await self.send_md(chunk)
         if len(body) > 3200:
             await self.app.bot.send_message(
-                chat_id, f"<i>dipotong · buka file untuk teks lengkap: {esc(str(skill.path))}</i>",
+                chat_id, f"<i>truncated · full text in {esc(str(skill.path))}</i>",
                 parse_mode=ParseMode.HTML,
             )
 
@@ -929,10 +930,10 @@ class Transport:
         if not self._authorized(update):
             return await self._deny(update)
         chat_id = update.effective_chat.id
-        message = await update.effective_message.reply_text("membaca daftar provider dari omp…")
+        message = await update.effective_message.reply_text("reading the provider list from omp…")
         providers = await self._provider_list(force=True)
         if not providers:
-            return await message.edit_text("daftar provider kosong")
+            return await message.edit_text("omp returned an empty provider list")
         page = 1
         if ctx.args and ctx.args[0].isdigit():
             page = int(ctx.args[0])
@@ -963,7 +964,7 @@ class Transport:
         providers = self._login_cache or await self._provider_list()
         provider = next((item for item in providers if item.index == index), None)
         if provider is None:
-            return await self.app.bot.send_message(chat_id, "provider tidak dikenal")
+            return await self.app.bot.send_message(chat_id, "unknown provider")
         target = provider.provider_id or ""   # empty -> choose from omp's menu
         self.close_login(chat_id)
         loop = asyncio.get_running_loop()
@@ -980,33 +981,37 @@ class Transport:
             menu_index=None if target else provider.index,
         )
         self.logins[chat_id] = session
-        self._login_before[chat_id] = await asyncio.to_thread(credentials_in_db, self.credential_db)
+        self._login_before[chat_id] = await asyncio.to_thread(credential_snapshot, self.credential_db)
         log.info("login started chat=%s provider=%s target=%s (credentials before: %s)",
                  chat_id, provider.label, target, len(self._login_before[chat_id]))
         await self.app.bot.send_message(
             chat_id,
             card("🔐 login started", provider.label,
                  [("target", target or f"menu #{provider.index}")],
-                 "ikuti instruksi di bawah, lalu kirim kode otorisasinya ke chat ini"),
+                 "follow the steps below, then paste the authorization code into this chat"),
             parse_mode=ParseMode.HTML,
         )
 
+    # omp's own console chatter; the chat only needs the actionable lines
+    LOGIN_NOISE = ("Local shortcut", "Preferred port", "Waiting for browser authentication",
+                   "Complete login in your browser")
+
     async def _login_line(self, chat_id: int, label: str, line: str) -> None:
         text = line.strip()
-        if not text:
+        if not text or any(noise in text for noise in self.LOGIN_NOISE):
             return
         session = self.logins.get(chat_id)
         if session is not None and session.url and session.url in text:
-            rows = [[InlineKeyboardButton("buka halaman login", url=session.url)]]
+            rows = [[InlineKeyboardButton("open login page", url=session.url)]]
             await self.app.bot.send_message(
                 chat_id,
-                card("🔗 buka URL ini", label, [], "setelah approve, kirim kode/redirect URL ke chat"),
+                card("🔗 open this URL", label, [], "after approving, paste the code or redirect URL here"),
                 reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
             )
             return
         if session is not None and session.awaiting_code:
             await self.app.bot.send_message(
-                chat_id, "🔑 omp menunggu kode otorisasi — kirim sekarang di chat ini.")
+                chat_id, "🔑 omp is waiting for the authorization code — paste it here.")
             return
         if len(text) <= 200:
             safe = esc(text)
@@ -1016,20 +1021,27 @@ class Transport:
         self.logins.pop(chat_id, None)
         self._login_cache_at = 0.0  # force a status refresh on the next /login
         before = self._login_before.pop(chat_id, {})
-        after = await asyncio.to_thread(credentials_in_db, self.credential_db)
-        stored = sorted(set(after) - set(before))
-        log.info("login finished chat=%s provider=%s ok=%s stored=%s total=%s", chat_id, label,
-                 ok, stored or "-", len(after))
+        after = await asyncio.to_thread(credential_snapshot, self.credential_db)
+        added = sorted(set(after) - set(before))
+        refreshed = sorted(p for p in set(after) & set(before) if after[p] != before[p])
+        if added:
+            stored = f"new credential: {', '.join(added)}"
+        elif refreshed:
+            stored = f"credential refreshed: {', '.join(refreshed)}"
+        else:
+            stored = f"no change detected ({len(after)} in store)"
+        log.info("login finished chat=%s provider=%s ok=%s added=%s refreshed=%s total=%s",
+                 chat_id, label, ok, added or "-", refreshed or "-", len(after))
         rows = [
             ("provider", label),
             ("result", "ok" if ok else "failed"),
-            ("stored", ", ".join(stored) if stored else f"no new credential ({len(after)} in store)"),
+            ("store", stored),
             ("db", self.credential_db),
         ]
-        note = ("credential tertulis ke store omp; agent akan di-restart supaya model baru muncul"
-                if ok else "lihat detail di bawah")
+        note = ("credential is in omp's store; the agent restarts so the new provider "
+                "appears in /model" if ok else "see the output below")
         await self.app.bot.send_message(
-            chat_id, card("✅ login selesai" if ok else "⛔ login gagal", now_wib(), rows, note),
+            chat_id, card("✅ login complete" if ok else "⛔ login failed", now_wib(), rows, note),
             parse_mode=ParseMode.HTML,
         )
         if output and not ok:

@@ -40,6 +40,8 @@ class LoginSession:
         self.command = command
         self.awaiting_code = False
         self.url = ""
+        self.url_announced = False
+        self.code_announced = False
         self.started_at = time.time()
         self.exit_code: int | None = None
         self._buffer = ""
@@ -93,8 +95,14 @@ class LoginSession:
                 self.url = match.group(0)
         if CODE_PROMPT_RE.search(line):
             self.awaiting_code = True
-        if line.strip():
-            self.on_line(line)
+            if self.code_announced:      # omp redraws its prompt; tell the chat once
+                return
+            self.code_announced = True
+        if self.url and not self.url_announced and self.url in line:
+            self.url_announced = True
+        elif self.url and self.url_announced and self.url in line:
+            return                        # same URL repeated by a redraw
+        self.on_line(line)
 
     def _finish(self) -> None:
         if self._buffer.strip():
@@ -114,6 +122,7 @@ class LoginSession:
         except OSError:
             return
         self.awaiting_code = False
+        self.code_announced = False   # a rejected code means omp asks again
 
     def close(self) -> None:
         if self.alive:

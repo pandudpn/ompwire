@@ -126,3 +126,61 @@ def test_login_grid_marks_signed_in_providers():
     assert labels[1].startswith("⚪")
     assert labels[2].startswith("❔")
     assert Message.keyboard.inline_keyboard[0][0].callback_data == "lgv:1"
+
+
+def test_login_session_announces_each_prompt_once():
+    """omp redraws its prompts; the chat must not get the same line four times."""
+    from ompwire.login import LoginSession
+
+    seen: list[str] = []
+    session = LoginSession.__new__(LoginSession)
+    session.url = ""
+    session.url_announced = False
+    session.code_announced = False
+    session.awaiting_code = False
+    session._tail = []
+    session.on_line = seen.append
+
+    line = "Paste the authorization code (or full redirect URL):"
+    for _ in range(4):
+        session._handle(line)
+    assert len(seen) == 1
+    assert session.awaiting_code is True
+
+    url_line = "https://claude.ai/oauth/authorize?code=true"
+    for _ in range(3):
+        session._handle(url_line)
+    assert session.url == "https://claude.ai/oauth/authorize?code=true"
+    assert sum(1 for item in seen if item.startswith("https://")) == 1
+
+
+def test_credential_snapshot_sees_a_refreshed_credential(tmp_path):
+    import sqlite3
+
+    from ompwire.catalog import credential_snapshot
+
+    db = tmp_path / "agent.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE auth_credentials "
+                "(provider TEXT, credential_type TEXT, updated_at TEXT, data TEXT)")
+    con.execute("INSERT INTO auth_credentials VALUES ('anthropic','oauth','100','x')")
+    con.commit()
+    before = credential_snapshot(str(db))
+
+    con.execute("UPDATE auth_credentials SET updated_at='200' WHERE provider='anthropic'")
+    con.commit()
+    con.close()
+    after = credential_snapshot(str(db))
+
+    assert before != after                      # a re-login is visible even without a new name
+    assert set(after) == {"anthropic"}
+
+
+def test_login_noise_is_not_forwarded_to_the_chat():
+    from ompwire.telegram import Transport
+
+    assert all("Local shortcut" in noise for noise in ("Local shortcut",))
+    for noise in ("Local shortcut (this machine only): http://localhost:1/launch",
+                  "Preferred port 54545 unavailable, using port 39865",
+                  "Waiting for browser authentication..."):
+        assert any(part in noise for part in Transport.LOGIN_NOISE)
