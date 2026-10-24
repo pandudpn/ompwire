@@ -105,6 +105,7 @@ def test_start_writes_the_unit_and_enables_it(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(service, "command_path", lambda: "/home/you/.local/bin/ompwire")
     monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
     monkeypatch.setattr(service, "_credential_works", lambda gateway: True)
+    monkeypatch.setattr(service, "agent_binary", lambda command="": "/home/you/.local/bin/omp")
     monkeypatch.setattr(service.subprocess, "run",
                         lambda command, **kwargs: calls.append(command) or Result())
 
@@ -133,6 +134,7 @@ def test_start_rewrites_a_stale_unit(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(service, "_env_file", lambda: env)
     monkeypatch.setattr(service, "_workdir", lambda: "/home/you")
     monkeypatch.setattr(service, "_credential_works", lambda gateway: True)
+    monkeypatch.setattr(service, "agent_binary", lambda command="": "/home/you/.local/bin/omp")
     monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
     monkeypatch.setattr(service.subprocess, "run", lambda *a, **k: Result())
 
