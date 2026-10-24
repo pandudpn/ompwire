@@ -46,9 +46,12 @@ jobs:
       # downstream job has to be told which ref to test.
       commit: ${{ steps.resolve.outputs.commit }}
     steps:
+      # No stored credentials: this job pushes, but the token belongs on the push command, not
+      # in the git config where every later step in the job inherits it.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
@@ -72,17 +75,18 @@ jobs:
             version=$(python -m scripts.release.version bump "$KIND")
           fi
           git add pyproject.toml src/ompwire/__init__.py
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}"
           if git diff --cached --quiet; then
             echo "files already say ${version}, no bump commit needed"
           else
             git commit -m "chore(release): v${version}"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            git push "$remote" "HEAD:${GITHUB_REF_NAME}"
           fi
           if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
             echo "tag v${version} already exists, reusing it"
           else
             git tag -a "v${version}" -m "ompwire ${version}"
-            git push origin "v${version}"
+            git push "$remote" "v${version}"
           fi
           echo "TAG=v${version}" >> "$GITHUB_ENV"
 

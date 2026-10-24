@@ -1,0 +1,66 @@
+name: quality
+
+# Three linters that judge the repository itself rather than the code in it. They run on every
+# change because the files they read are the ones that decide what CI is allowed to do: a
+# workflow with an unpinned action or a wide permission is a supply-chain hole that no test can
+# see.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned, because an auditor that upgrades itself turns a rule change into a red build nobody
+  # caused. Bumping one of these is a commit that says so.
+  ACTIONLINT_VERSION: "1.7.12"
+  ZIZMOR_VERSION: "1.25.2"
+  GITLEAKS_VERSION: "8.30.1"
+
+jobs:
+  workflows:
+    name: Workflows and secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") \
+            "${ACTIONLINT_VERSION}" /usr/local/bin
+          actionlint -color
+
+      - name: zizmor
+        # Audits the workflows themselves: unpinned actions, template injection, permissions
+        # wider than the job needs, credentials left in the git config for later steps.
+        run: |
+          python -m pip install --quiet "zizmor==${ZIZMOR_VERSION}"
+          zizmor --format plain .github/workflows/
+
+      - name: gitleaks
+        # Runs over the full history, not just the diff: a token that landed in an old commit is
+        # still a live token to whoever clones this repository.
+        run: |
+          curl -fsSL -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+          gitleaks detect --no-banner --redact --source .
+
+      - name: No machine-specific paths
+        # The one thing gitleaks cannot know: this tree once carried a path that only existed on
+        # the author's machine, which made a test pass here and fail everywhere else.
+        run: |
+          if git grep -nE '/home/pandu/' -- src tests; then
+            echo "::error::a real home directory is hard-coded in src or tests"
+            exit 1
+          fi
