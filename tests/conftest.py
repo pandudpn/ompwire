@@ -28,4 +28,7 @@ def isolate_real_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(config_module, "OVERRIDES_PATH", state / "overrides.json")
     # systemd is the host's; nothing in the suite should call it for real
     monkeypatch.setattr(service, "_systemd_available", lambda: False)
+    # the agent is the developer's: a test that cares about a missing agent patches this to None
+    monkeypatch.setattr(service, "agent_binary", lambda command="": "/usr/bin/omp")
+    monkeypatch.setattr(service, "agent_command", lambda: "omp")
     return tmp_path

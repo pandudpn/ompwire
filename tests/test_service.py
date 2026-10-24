@@ -296,8 +296,7 @@ class TestUnitPath:
         agent = tmp_path / "bin" / "omp"
         agent.parent.mkdir()
         agent.write_text("#!/bin/sh\n", encoding="utf-8")
-        monkeypatch.setattr(service.shutil, "which",
-                            lambda name: str(agent) if name == "omp" else None)
+        monkeypatch.setattr(service, "agent_binary", lambda command="": str(agent))
         monkeypatch.setattr(service, "command_path", lambda: str(tmp_path / "ompwire"))
 
         path = service.service_path("omp")
