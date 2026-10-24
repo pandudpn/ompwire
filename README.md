@@ -54,6 +54,42 @@ If a feature needs agent state, it belongs upstream in OMP, not here.
 
 ## Install
 
+ompwire is a Python tool, so the equivalent of `npx` is `uv`. Nothing is published
+to PyPI; it installs straight from the repository.
+
+```bash
+# one-off, no install
+uvx --from git+https://github.com/pandudpn/ompwire.git@v0.2.0 ompwire doctor
+
+# install the newest release
+uv tool install --from git+https://github.com/pandudpn/ompwire.git@v0.2.0 ompwire
+
+# follow main instead
+uv tool install --from git+https://github.com/pandudpn/ompwire.git@main ompwire
+```
+
+`pipx install git+https://github.com/pandudpn/ompwire.git@v0.2.0` is supported by the
+same code path, though only `uv` is verified on this machine. Then
+write a config at `~/.config/ompwire/config.toml` (copy `config.toml.example`),
+run `ompwire doctor`, and start the transport with `ompwire serve`.
+
+Working on ompwire itself: clone it, `uv venv && uv pip install -e '.[dev]'`, and
+run `.venv/bin/ompwire serve` — the checkout keeps its own session store.
+
+## Update
+
+```bash
+ompwire update            # newest release tag
+ompwire update --edge     # tip of main, for testing what is not released yet
+ompwire update --check    # report the target, change nothing
+ompwire version           # installed version, commit, and which installer owns it
+```
+
+`update` inspects how ompwire was installed (uv tool, pipx, or a git checkout) and
+runs the matching command, so the same verb works everywhere. On a checkout it
+prints the `git fetch --tags && git checkout <ref>` line instead of guessing.
+
+
 ```bash
 git clone https://github.com/pandudpn/ompwire
 cd ompwire
