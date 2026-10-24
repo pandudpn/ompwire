@@ -156,6 +156,9 @@ jobs:
         # against HEAD. The repository may be private, so git gets the workflow token.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout in this job: it only moves artifacts. gh still needs to know which
+          # repository it is talking about, and without a git dir it cannot infer one.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
@@ -221,6 +224,9 @@ jobs:
         # to mangle. Re-running replaces the assets instead of failing.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout in this job: it only moves artifacts. gh still needs to know which
+          # repository it is talking about, and without a git dir it cannot infer one.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
