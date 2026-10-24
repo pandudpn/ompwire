@@ -14,14 +14,18 @@ timeout. `--yolo` per schedule opts out of the approval refusal, deliberately an
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import signal
 import sys
+import time
 from typing import Any
 
 from . import attachments, gateways, schedules
 from .acp import AcpClient, AcpError
 from .config import PROTOCOL_HINT, load_config
+from .format import now_wib, run_card, run_status
+from .mdrender import to_html
 
 log = logging.getLogger("ompwire.schedule")
 
@@ -72,19 +76,53 @@ def _chunks(text: str, limit: int = MAX_MESSAGE) -> list[str]:
     return parts or [""]
 
 
+def _meta(item: schedules.Schedule, run: dict[str, Any]) -> list[tuple[str, str]]:
+    """What the run cost and what it touched, in the order a person reads it."""
+    rows: list[tuple[str, str]] = []
+    if run.get("model"):
+        rows.append(("model", str(run["model"])))
+    if run.get("thinking"):
+        rows.append(("thinking", str(run["thinking"])))
+    rows.append(("took", f"{run.get('duration', 0.0):.1f}s"))
+    if run.get("tools"):
+        detail = f"{run['tools']} tool" + ("" if run["tools"] == 1 else "s")
+        if run.get("subagents"):
+            detail += f" · subagent {run['subagents']}"
+        rows.append(("used", detail))
+    usage = run.get("usage") or {}
+    if usage.get("inputTokens") or usage.get("outputTokens"):
+        rows.append(("token", f"{int(usage.get('inputTokens') or 0):,} in · "
+                              f"{int(usage.get('outputTokens') or 0):,} out"))
+    rows.append(("sent to", f"{item.gateway} · {'ephemeral' if item.ephemeral else 'session'}"))
+    return rows
+
+
 async def _deliver(item: schedules.Schedule, text: str, files: list[attachments.Outgoing],
-                   rejected: list[str]) -> int:
+                   rejected: list[str], run: dict[str, Any] | None = None) -> int:
     from telegram import Bot
 
     token = gateways.token(gateways.get(item.gateway))
     bot = Bot(token)
-    header = f"schedule · {item.name}"
-    body = text.strip() or "(no output)"
+    run = run or {}
+    body = text.strip() or "(the agent returned no text)"
+    when = f"{schedules.describe(item)} · {item.timezone}"
+    if run.get("ok", True):
+        status = run_status(True, "done")
+    else:
+        status = run_status(False, str(run.get("word") or "failed"))
+    footer = f"{now_wib()} · {run.get('duration', 0.0):.1f}s · {item.name}"
+    if run.get("error"):
+        card_body = f"<pre>{run['error'][:400]}</pre>"
+    else:
+        card_body = to_html(body)
+    card = run_card(item.name, when, status, _meta(item, run), card_body, footer)
+
     chat = _chat_id(item)
-    chunks = _chunks(body)
+    chunks = _chunks(card, limit=MAX_MESSAGE)
     sent = 0
-    for index, chunk in enumerate(chunks):
-        await bot.send_message(chat_id=chat, text=f"{header}\n\n{chunk}" if index == 0 else chunk)
+    for chunk in chunks:
+        await bot.send_message(chat_id=chat, text=chunk, parse_mode="HTML",
+                               disable_web_page_preview=True)
         sent += 1
     for outgoing in files:
         with outgoing.path.open("rb") as handle:
@@ -107,6 +145,20 @@ def _chat_id(item: schedules.Schedule) -> int:
     return int(allowed[0])
 
 
+def _collector(run: dict[str, Any]):
+    """Count what the turn actually did, without rendering any of it."""
+    def on_update(update) -> None:
+        raw = update.raw or {}
+        if update.kind == "tool_call":
+            run["tools"] = int(run.get("tools") or 0) + 1
+            tasks = (raw.get("rawInput") or {}).get("tasks")
+            if isinstance(tasks, list) and tasks:
+                names = [f"{t.get('name', '?')} ({t.get('agent', 'task')})"
+                         for t in tasks if isinstance(t, dict)]
+                run["subagents"] = ", ".join(names)[:120]
+    return on_update
+
+
 def run(name: str) -> int:
     item = schedules.get(name)
     config = load_config()
@@ -116,42 +168,67 @@ def run(name: str) -> int:
         log.error("schedule %s: %s", name, exc)
         schedules.mark(name, f"failed: {exc}")
         return 2
-    log.info("schedule %s: start (gateway=%s chat=%s)", name, item.gateway, chat)
+    log.info("schedule %s: start (gateway=%s chat=%s approval=%s)", name, item.gateway, chat,
+             item.approval)
     client = _client(item, config)
+    run_meta: dict[str, Any] = {"ok": True}
+    started = time.monotonic()
     try:
         client.initialize()
         working_dir = str(client.cwd or ".")
         session = client.new_session(working_dir, [])
         session_id = str(session.get("sessionId") or session.get("session_id") or "")
+        options = {str(option.get("id")): option.get("currentValue")
+                   for option in (session.get("configOptions") or [])}
+        run_meta["model"] = options.get("model") or config.get("agent", "model") or ""
+        run_meta["thinking"] = options.get("thinking") or config.get("agent", "thinking") or ""
+        client.on_update = _collector(run_meta)
         result = client.prompt(session_id, item.prompt, timeout=item.timeout)
+        run_meta["duration"] = time.monotonic() - started
+        run_meta["usage"] = getattr(result, "usage", {}) or {}
         text = getattr(result, "text", "") or ""
         stop = getattr(result, "stop_reason", "") or ""
         _clean, files, rejected = attachments.extract(
             text, root=working_dir, max_mb=float(config.get("files", "max_mb", 20.0)))
-        import asyncio
-
-        sent = asyncio.run(_deliver(item, _clean, files, rejected))
+        sent = asyncio.run(_deliver(item, _clean, files, rejected, run_meta))
         status = f"ok {stop or 'end_turn'} · {sent} message(s)"
         schedules.mark(name, status)
         log.info("schedule %s: %s", name, status)
         return 0
     except AcpError as exc:
+        run_meta.update(ok=False, word="agent failed", error=str(exc),
+                        duration=time.monotonic() - started)
         log.error("schedule %s: agent failed: %s", name, exc)
         schedules.mark(name, f"failed: agent: {str(exc)[:120]}")
+        _report_failure(item, run_meta)
         return 1
     except Interrupted:
+        run_meta.update(ok=False, word="stopped", error="timeout, or systemd stopped the unit",
+                        duration=time.monotonic() - started)
         log.warning("schedule %s: stopped mid-turn", name)
         schedules.mark(name, "stopped: timeout or systemd stop")
+        _report_failure(item, run_meta)
         return 3
-    except Exception as exc:  # delivery problems must be visible, not swallowed
+    except Exception as exc:
+        run_meta.update(ok=False, word="failed", error=str(exc),
+                        duration=time.monotonic() - started)
         log.error("schedule %s: failed: %s", name, exc)
         schedules.mark(name, f"failed: {str(exc)[:120]}")
+        _report_failure(item, run_meta)
         return 1
     finally:
         try:
             client.close()
         except Exception:
             pass
+
+
+def _report_failure(item: schedules.Schedule, run_meta: dict[str, Any]) -> None:
+    """A run that fails at 04:00 must say so in the chat, not only in the journal."""
+    try:
+        asyncio.run(_deliver(item, "", [], [], run_meta))
+    except Exception as exc:  # the chat may be unreachable; the journal still has the reason
+        log.error("schedule %s: could not report the failure: %s", item.name, exc)
 
 
 def _terminate(_signum, _frame):

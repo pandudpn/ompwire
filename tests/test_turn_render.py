@@ -135,3 +135,27 @@ def test_a_long_reasoning_stream_is_cut_to_its_tail(rendered):
     thinking = [body for body in messages if "💭" in body][-1]
     assert "EKOR" in thinking
     assert len(thinking) < len(long)
+
+
+def test_a_scheduled_run_is_a_card_not_a_log_line():
+    """What the first version looked like: a bare "schedule · name" line above raw text."""
+    from ompwire.format import run_card, run_status
+
+    card = run_card("morning", "every day at 07:00", run_status(True, "done"),
+                    [("took", "12.4s"), ("sent to", "telegram · ephemeral")],
+                    "<b>All clear</b>", "20:20:00 WIB · 12.4s · morning")
+
+    assert card.startswith("🗓️ <b>morning</b>")
+    assert "✅ <b>done</b>" in card
+    assert "<pre>took" in card
+    assert card.endswith("</i>")
+    assert "schedule · " not in card
+
+
+def test_a_failed_run_says_so_in_the_card():
+    from ompwire.format import run_card, run_status
+
+    card = run_card("morning", "every day at 07:00", run_status(False, "agent failed"),
+                    [("took", "0.4s")], "<pre>ACP command not found: omp</pre>", "")
+    assert "⛔" in card and "agent failed" in card
+    assert "ACP command not found" in card

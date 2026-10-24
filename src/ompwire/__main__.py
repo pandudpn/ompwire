@@ -143,7 +143,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         for name in sorted(items):
             item = items[name]
             state = schedules.next_elapse(name) or "-"
-            print(f"{name.ljust(width)}  {item.cron:<15} {item.timezone:<13} "
+            print(f"{name.ljust(width)}  {schedules.describe(item):<34} {item.timezone:<13} "
                   f"-> {item.gateway:<12} next {state:<22} {item.last_status or 'never run'}")
         return 0
 

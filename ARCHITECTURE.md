@@ -120,6 +120,13 @@ nobody is watching.
 - `Environment=PATH=` on the unit. A user unit does not inherit the shell's PATH, and without this
   the timer fires, the process starts, and the turn dies hours later in a journal nobody reads.
 
+The run report is a card rather than a line of text: `format.run_card` takes the schedule in words
+(`schedules.describe`), the outcome as a badge, a grid of what the run cost (model, thinking,
+duration, tools, tokens) and the answer converted by the same markdown renderer the chat uses. The
+first version printed a `schedule · name` line above raw text, which read like a log tail; a run
+that happens while nobody is watching has to be worth reading in the morning. Failures use the same
+card with the reason, because a scheduled run that dies silently is worse than one that reports.
+
 Delivery goes straight to the Bot API with the destination gateway's token, so a result still
 arrives when that gateway's poller is stopped. Only the token has to be valid. The destination is
 stored on the schedule rather than chosen at run time: an unattended turn that picks its own

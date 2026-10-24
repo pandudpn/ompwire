@@ -192,3 +192,21 @@ def test_installing_writes_both_units(tmp_path, monkeypatch):
     assert service_unit.exists() and timer_unit.exists()
     assert "OnCalendar=*-*-* 07:00:00 Asia/Jakarta" in timer_unit.read_text()
     assert ["systemctl", "--user", "enable", "--now", "ompwire-schedule-morning.timer"] in calls
+
+
+@pytest.mark.parametrize(("cron", "words"), [
+    ("0 7 * * *", "every day at 07:00"),
+    ("30 6 * * 1-5", "weekdays at 06:30"),
+    ("*/15 * * * *", "every 15 minutes"),
+    ("0 */6 * * *", "every 6 hours"),
+    ("0 9 * * 0", "every Sunday at 09:00"),
+    ("0 9 1 * *", "day 1 of every month at 09:00"),
+    ("0 0 * * 0,6", "weekends at 00:00"),
+])
+def test_a_schedule_says_itself_in_words(cron, words):
+    assert schedules.describe(schedules.Schedule(name="x", cron=cron, prompt="p")) == words
+
+
+def test_an_explicit_calendar_is_shown_as_written():
+    item = schedules.Schedule(name="x", cron="", calendar="Mon..Fri 07:00", prompt="p")
+    assert schedules.describe(item) == "Mon..Fri 07:00"

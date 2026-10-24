@@ -119,3 +119,27 @@ def help_sections(sections: Iterable[tuple[str, Iterable[tuple[str, str]]]]) -> 
         out.extend(f"/{name} · <i>{esc(desc)}</i>" for name, desc in items)
         out.append("")
     return "\n".join(out).rstrip()
+
+
+def run_card(title: str, when: str, status: str, rows: Iterable[tuple[str, object]] = (),
+             body_html: str = "", footer: str = "") -> str:
+    """One scheduled run, as the chat should see it.
+
+    A bare "schedule · name" line above an unformatted answer reads like a log tail. The same turn
+    shown as a card, with what it cost and what it touched, is something worth waking up to.
+    """
+    head = f"🗓️ <b>{esc(title)}</b> · <i>{esc(when)}</i> · {status}"
+    parts = [head]
+    block = grid(rows)
+    if block:
+        parts.append(block)
+    if body_html.strip():
+        parts.append(body_html.strip())
+    if footer:
+        parts.append(f"<i>{esc(footer)}</i>")
+    return "\n\n".join(parts)
+
+
+def run_status(ok: bool, word: str) -> str:
+    """A status badge that survives being read at a glance."""
+    return f"{'✅' if ok else '⛔'} <b>{esc(word)}</b>"

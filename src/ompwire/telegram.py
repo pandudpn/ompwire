@@ -451,51 +451,51 @@ class ChatAgent:
             gateway = proposal.gateway or self.gateway_name
             problem = ""
             if known and gateway not in known:
-                problem = f"gateway '{gateway}' tidak dikenal"
+                problem = f"unknown gateway '{gateway}'"
             try:
                 expression = proposal.expression
                 schedule_lib.validate_calendar(f"{expression} {schedule_lib.DEFAULT_TIMEZONE}")
             except schedule_lib.ScheduleError as exc:
                 problem = str(exc)
             if problem:
-                await self.send_md(f"jadwal ditolak · {problem}")
+                await self.send_md(f"schedule rejected · {problem}")
                 continue
             name = self._schedule_name(proposal)
             self.pending_schedules[name] = proposal
             keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("Buat schedule", callback_data=f"sched:new:{name}"),
-                InlineKeyboardButton("Batal", callback_data=f"sched:cancel:{name}"),
+                InlineKeyboardButton("Create schedule", callback_data=f"sched:new:{name}"),
+                InlineKeyboardButton("Cancel", callback_data=f"sched:cancel:{name}"),
             ]])
-            body = card("jadwal", expression, [
-                ("kirim ke", gateway),
+            body = card("schedule", expression, [
+                ("delivers to", gateway),
                 ("prompt", proposal.prompt[:200]),
-            ], "tidak ada yang berjalan sampai kamu menekan Buat")
+            ], "nothing runs until you press Create")
             await self.app.bot.send_message(self.chat_id, body, parse_mode=ParseMode.HTML,
                                             reply_markup=keyboard)
 
     async def _schedule_run(self, name: str) -> None:
         from . import schedule_run
 
-        await self.send_md(f"menjalankan {name} sekarang…")
+        await self.send_md(f"running {name} now…")
         try:
             code = await asyncio.to_thread(schedule_run.run, name)
         except Exception as exc:
-            return await self.send_md(f"gagal menjalankan {name} · {exc}")
+            return await self.send_md(f"could not run {name} · {exc}")
         if code != 0:
-            await self.send_md(f"{name} selesai dengan kode {code}, lihat /schedule untuk status")
+            await self.send_md(f"{name} exited with code {code}; /schedule shows the status")
 
     async def _schedule_remove(self, name: str) -> None:
         try:
             schedule_lib.uninstall(name)
             item = schedule_lib.remove(name)
         except schedule_lib.ScheduleError as exc:
-            return await self.send_md(f"tidak bisa menghapus · {exc}")
-        await self.send_md(f"schedule {item.name} dihapus beserta timer-nya")
+            return await self.send_md(f"could not remove · {exc}")
+        await self.send_md(f"schedule {item.name} removed, timer included")
 
     async def _schedule_create(self, name: str) -> None:
         proposal = self.pending_schedules.pop(name, None)
         if proposal is None:
-            return await self.send_md("usulan itu sudah tidak ada; minta lagi saja")
+            return await self.send_md("that proposal is gone; ask again")
         gateway = proposal.gateway or self.gateway_name
         try:
             item = schedule_lib.Schedule(name=name, cron=proposal.cron, prompt=proposal.prompt,
@@ -505,9 +505,9 @@ class ChatAgent:
             schedule_lib.install(item)
             schedule_lib.enable(name)
         except schedule_lib.ScheduleError as exc:
-            return await self.send_md(f"gagal membuat schedule · {exc}")
-        nxt = schedule_lib.next_elapse(name) or "lihat systemctl --user list-timers"
-        await self.send_md(f"schedule {name} dibuat · {item.on_calendar} → {gateway}\nberikutnya: {nxt}")
+            return await self.send_md(f"could not create the schedule · {exc}")
+        nxt = schedule_lib.next_elapse(name) or "see systemctl --user list-timers"
+        await self.send_md(f"schedule {name} created · {item.on_calendar} → {gateway}\nnext: {nxt}")
 
     async def offer_options(self, options: list[str], chat_id: int | None = None) -> None:
         """Buttons for the answers the agent offered, plus a free-text escape hatch."""
@@ -890,20 +890,20 @@ class Transport:
         items = schedule_lib.load()
         if not items:
             return await self.send_md(
-                "belum ada schedule. Bilang saja, misal: \"tiap pagi jam 7 ringkas repo\".")
+                "no schedules yet. Just ask, for example: \"every morning at 7, summarise the repo\".")
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"▶ {name}", callback_data=f"sched:run:{name}"),
-             InlineKeyboardButton(f"hapus {name}", callback_data=f"sched:rm:{name}")]
+             InlineKeyboardButton(f"remove {name}", callback_data=f"sched:rm:{name}")]
             for name in sorted(items)
         ])
         rows = []
         for name in sorted(items):
             item = items[name]
             rows.append(f"{name} · {item.cron or item.calendar} · {item.timezone} → {item.gateway}"
-                        f" · {item.last_status or 'belum pernah jalan'}")
+                        f" · {item.last_status or 'never ran'}")
         await self.app.bot.send_message(
-            self.chat_id, card("schedules", f"{len(items)} buah", [("daftar", "\n".join(rows))],
-                               "jalankan sekarang atau hapus lewat tombol"),
+            self.chat_id, card("schedules", f"{len(items)}", [("scheduled", "\n".join(rows))],
+                               "run one now or remove it with the buttons"),
             parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     async def _deny(self, update: Update) -> None:
@@ -1706,7 +1706,7 @@ class Transport:
                                        f"reasoning: {'on' if value else 'off'}")
         await self.announce(
             update.effective_chat.id,
-            f"reasoning: {'on' if agent.reasoning else 'off'} · `/reasoning on` atau `off`")
+            f"reasoning: {'on' if agent.reasoning else 'off'} · `/reasoning on` or `off`")
 
     async def cmd_commands(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Search the slash commands the agent advertises (about a thousand)."""
@@ -1813,20 +1813,20 @@ class Transport:
         if data.startswith("sched:"):
             _, what, name = (data.split(":", 2) + ["", ""])[:3]
             if what == "new":
-                await query.answer("membuat…")
+                await query.answer("creating…")
                 await agent._schedule_create(name)
             elif what == "cancel":
                 agent.pending_schedules.pop(name, None)
-                await query.answer("dibatalkan")
+                await query.answer("cancelled")
                 try:
-                    await query.edit_message_text("usulan jadwal dibatalkan")
+                    await query.edit_message_text("schedule proposal cancelled")
                 except Exception as exc:
                     log.debug("could not rewrite the schedule prompt: %s", exc)
             elif what == "run":
-                await query.answer("menjalankan…")
+                await query.answer("running…")
                 await agent._schedule_run(name)
             elif what == "rm":
-                await query.answer("menghapus…")
+                await query.answer("removing…")
                 await agent._schedule_remove(name)
             return
 

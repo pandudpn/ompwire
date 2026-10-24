@@ -337,7 +337,7 @@ def render_service(item: Schedule, config_path: str, env_file: str, workdir: str
 def render_timer(item: Schedule) -> str:
     return "\n".join([
         "[Unit]",
-        f"Description=ompwire schedule {item.name} ({item.cron})",
+        f"Description=ompwire schedule {item.name} ({describe(item)})",
         "",
         "[Timer]",
         f"OnCalendar={item.on_calendar}",
@@ -484,3 +484,37 @@ def hide_partial(text: str, final: bool) -> str:
     if final:
         return MARKER_RE.sub("", text).strip()
     return PARTIAL_RE.sub("", text).rstrip()
+
+
+DAYS = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+
+
+def describe(item: Schedule) -> str:
+    """The schedule in words, because `0 7 * * *` is a puzzle at seven in the morning."""
+    if item.calendar:
+        return item.calendar
+    parts = " ".join((item.cron or "").split()).split(" ")
+    if len(parts) != 5:
+        return item.cron or ""
+    minute, hour, dom, month, dow = parts
+    clock = f"{int(hour):02d}:{int(minute):02d}" if hour.isdigit() and minute.isdigit() else ""
+    if minute.startswith("*/"):
+        return f"every {int(minute[2:])} minutes"
+    if hour.startswith("*/"):
+        base = f"every {int(hour[2:])} hours"
+        return base + (f" at :{int(minute):02d}" if minute.isdigit() and int(minute) else "")
+    if not clock:
+        return item.cron
+    if dow == "1-5" and dom == "*" and month == "*":
+        return f"weekdays at {clock}"
+    if dow == "0,6" and dom == "*" and month == "*":
+        return f"weekends at {clock}"
+    if dow.isdigit() and dom == "*" and month == "*":
+        return f"every {DAYS[_weekday_number(int(dow))]} at {clock}"
+    if dom.isdigit() and month == "*" and dow == "*":
+        return f"day {int(dom)} of every month at {clock}"
+    if month.isdigit() and dom == "*" and dow == "*":
+        return f"every day in month {int(month)} at {clock}"
+    if dom == "*" and month == "*" and dow == "*":
+        return f"every day at {clock}"
+    return f"{item.cron} ({clock} {item.timezone})"

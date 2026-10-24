@@ -148,7 +148,10 @@ ompwire schedule remove morning
 ```
 
 The cron fields are read on `Asia/Jakarta` by default, because that is the clock the bot shows,
-and the result goes to the gateway named in the schedule (default `telegram`). Each schedule is a
+and the result goes to the gateway named in the schedule (default `telegram`). Each run reports as
+a card: when it runs (in words, not cron), the model and thinking level, how long it took, which
+tools it used, the tokens it cost, and the answer rendered as markdown. A failed run reports the
+same way with the reason, so a 04:00 failure is visible in the chat instead of only in the journal. Each schedule is a
 `oneshot` unit capped at 1 GB and 200% CPU with a 30 minute timeout, so one runaway turn cannot
 disturb anything else on the machine. Runs are ephemeral and answer `cancelled` to any tool that
 would need a human approval; `--yolo` per schedule opts out, deliberately.
