@@ -115,10 +115,12 @@ jobs:
           version="${tag#v}"
           case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
           commit=$(git rev-parse "${tag}^{commit}")
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "commit=$commit"
+          } >> "$GITHUB_OUTPUT"
           echo "releasing ${tag} at ${commit} (prerelease=${prerelease})"
 
   verify:
@@ -202,7 +204,7 @@ jobs:
           "$RUNNER_TEMP/wheelcheck/bin/pip" install --quiet dist/*.whl
           "$RUNNER_TEMP/wheelcheck/bin/ompwire" --version
       - name: Checksums
-        run: cd dist && sha256sum * | tee SHA256SUMS
+        run: cd dist && sha256sum ./* | tee SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: dist

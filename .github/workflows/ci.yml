@@ -62,4 +62,5 @@ jobs:
       - name: help works both ways
         run: |
           ./install.sh --help | grep -q 'raw.githubusercontent.com/pandudpn/ompwire'
+          # shellcheck disable=SC2002  # the pipe is the point: it proves `curl ... | bash` works
           cat install.sh | bash -s -- --help | grep -q 'raw.githubusercontent.com/pandudpn/ompwire'
