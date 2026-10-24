@@ -134,3 +134,60 @@ def test_approval_keyboard_marks_current_policy():
     transport = Transport(load_config(env={}))
     rows = [[button.text for button in row] for row in transport.approval_keyboard("deny").inline_keyboard]
     assert rows == [["ask"], ["allow"], ["• deny"]]
+
+
+def test_model_picker_lays_out_two_columns_and_strips_prefix():
+    import asyncio
+    from types import SimpleNamespace
+
+    from ompwire.config import load_config
+    from ompwire.telegram import Transport
+
+    captured = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, reply_markup=None, **kw):
+            captured.append((text, reply_markup))
+            return SimpleNamespace(edit_text=lambda *a, **k: None)
+
+    transport = Transport(load_config(env={}))
+    transport.app = SimpleNamespace(bot=FakeBot())
+    agent = SimpleNamespace(
+        options={"model": {"currentValue": "zai/a", "options": [
+            {"value": f"zai/m{i}"} for i in range(18)]}},
+        session_id="01a16c67aa", cwd="/tmp",
+    )
+    asyncio.run(transport._show_config(agent, 1, "model", screen="l", provider=0, page=0))
+    text, keyboard = captured[-1]
+    rows = [[button.text for button in row] for row in keyboard.inline_keyboard]
+    # ten buttons over five rows, two per row, provider prefix stripped
+    assert len(rows) == 6  # 5 model rows + nav
+    assert rows[0] == ["m0", "m1"]
+    assert rows[4] == ["m8", "m9"]
+    assert "page 1/2" in text
+
+
+def test_mode_picker_stays_single_column():
+    import asyncio
+    from types import SimpleNamespace
+
+    from ompwire.config import load_config
+    from ompwire.telegram import Transport
+
+    captured = []
+
+    class FakeBot:
+        async def send_message(self, chat_id, text, reply_markup=None, **kw):
+            captured.append((text, reply_markup))
+            return SimpleNamespace(edit_text=lambda *a, **k: None)
+
+    transport = Transport(load_config(env={}))
+    transport.app = SimpleNamespace(bot=FakeBot())
+    agent = SimpleNamespace(
+        options={"mode": {"currentValue": "default",
+                          "options": [{"value": "default"}, {"value": "plan"}]}},
+        session_id="01a16c67aa", cwd="/tmp",
+    )
+    asyncio.run(transport._show_config(agent, 1, "mode"))
+    _, keyboard = captured[-1]
+    assert [[b.text for b in row] for row in keyboard.inline_keyboard] == [["• default"], ["plan"]]

@@ -730,7 +730,8 @@ class Transport:
         )
 
     # -------------------------------------------------- config pickers (UI)
-    PAGE_SIZE = 8
+    PAGE_SIZE = 8          # single-column configs (mode, thinking)
+    PAGE_SIZE_TWO_COL = 10  # two columns x five rows
 
     def _values(self, agent: ChatAgent, config_id: str) -> list[str]:
         option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
@@ -793,14 +794,27 @@ class Transport:
             else:
                 provider, provider_name, indices = 0, config_id, list(range(len(all_values)))
                 subset = all_values
-            window, page, pages = self._page_slice(subset, page, self.PAGE_SIZE)
-            start = page * self.PAGE_SIZE
+            columns = 2 if config_id == "model" else 1
+            per_page = self.PAGE_SIZE_TWO_COL if columns == 2 else self.PAGE_SIZE
+            window, page, pages = self._page_slice(subset, page, per_page)
+            start = page * per_page
             rows = []
+            pending: list[InlineKeyboardButton] = []
             for offset, value in enumerate(window):
                 global_index = indices[start + offset]
+                label = value.split("/", 1)[1] if (columns == 2 and "/" in value) else value
                 mark = "• " if value == current else ""
-                rows.append([InlineKeyboardButton(f"{mark}{value}"[:60],
-                                                  callback_data=f"o:{config_id}:s:{global_index}:0")])
+                button = InlineKeyboardButton(f"{mark}{label}"[:64],
+                                              callback_data=f"o:{config_id}:s:{global_index}:0")
+                if columns == 2:
+                    pending.append(button)
+                    if len(pending) == 2:
+                        rows.append(pending)
+                        pending = []
+                else:
+                    rows.append([button])
+            if pending:
+                rows.append(pending)
             nav: list[InlineKeyboardButton] = []
             if multi_provider:
                 nav.append(InlineKeyboardButton("◀ providers", callback_data=f"o:{config_id}:p:0:0"))
