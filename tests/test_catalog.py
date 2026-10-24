@@ -196,3 +196,35 @@ def test_skills_command_is_the_grid_not_the_command_search():
     assert "list_skills" in source and "InlineKeyboardMarkup" in source
     assert hasattr(Transport, "cmd_commands")   # the command search kept its own name
     assert "advertised_commands" in inspect.getsource(Transport.cmd_commands)
+
+
+def test_show_skill_sends_the_card_and_the_body(tmp_path):
+    """Regression: Transport once lacked the html helpers, so tapping a skill crashed."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from ompwire.config import load_config
+    from ompwire.telegram import Transport
+
+    folder = tmp_path / "demo"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: demo skill\n---\n\n## Heading\n\nbody text\n",
+        encoding="utf-8")
+
+    sent: list[tuple[str, dict]] = []
+
+    async def fake_send_message(chat_id, text, **kwargs):
+        sent.append((text, kwargs))
+        return SimpleNamespace(chat_id=chat_id)
+
+    transport = Transport(load_config(env={}))
+    transport.app = SimpleNamespace(bot=SimpleNamespace(send_message=fake_send_message))
+    transport._skills[42] = list_skills((str(tmp_path),), cwd=str(tmp_path))
+
+    asyncio.run(transport.show_skill(42, 0))
+
+    assert sent, "nothing was sent"
+    assert "demo" in sent[0][0]
+    assert sent[0][1].get("parse_mode") == "HTML"
+    assert any("Heading" in text for text, _ in sent[1:])

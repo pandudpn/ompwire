@@ -100,6 +100,24 @@ FORWARD_HINT = (
 )
 
 
+async def send_html(bot, chat_id: int, body: str):
+    """Send pre-rendered Telegram HTML, falling back to plain text."""
+    try:
+        return await bot.send_message(chat_id, body, parse_mode=ParseMode.HTML)
+    except BadRequest as exc:
+        log.warning("html send rejected (%s); falling back to plain text", exc)
+        return await bot.send_message(chat_id, strip_html(body))
+
+
+async def send_md(bot, chat_id: int, text: str):
+    """Send agent markdown as Telegram HTML, degrading to plain text on refusal."""
+    try:
+        return await bot.send_message(chat_id, to_html(text), parse_mode=ParseMode.HTML)
+    except BadRequest as exc:
+        log.warning("html send rejected (%s); falling back to plain text", exc)
+        return await bot.send_message(chat_id, to_plain(text))
+
+
 def _unique_commands() -> list[tuple[str, str]]:
     """Telegram rejects a duplicate command name, so the menu is deduped."""
     seen: set[str] = set()
@@ -508,21 +526,10 @@ class ChatAgent:
         return result.text
 
     async def send_html(self, body: str):
-        """Send pre-rendered Telegram HTML, falling back to plain text."""
-        try:
-            return await self.app.bot.send_message(self.chat_id, body, parse_mode=ParseMode.HTML)
-        except BadRequest as exc:
-            log.warning("html send rejected (%s); falling back to plain text", exc)
-            return await self.app.bot.send_message(self.chat_id, strip_html(body))
+        return await send_html(self.app.bot, self.chat_id, body)
 
     async def send_md(self, text: str):
-        """Send agent markdown as Telegram HTML, degrading to plain text on refusal."""
-        try:
-            return await self.app.bot.send_message(self.chat_id, to_html(text),
-                                                   parse_mode=ParseMode.HTML)
-        except BadRequest as exc:
-            log.warning("html send rejected (%s); falling back to plain text", exc)
-            return await self.app.bot.send_message(self.chat_id, to_plain(text))
+        return await send_md(self.app.bot, self.chat_id, text)
 
     async def edit_md(self, message: Any, text: str) -> None:
         try:
@@ -620,6 +627,12 @@ class Transport:
         self.workers: dict[int, asyncio.Task] = {}
 
     # ---------------------------------------------------------------- helpers
+    async def send_html(self, chat_id: int, body: str):
+        return await send_html(self.app.bot, chat_id, body)
+
+    async def send_md(self, chat_id: int, text: str):
+        return await send_md(self.app.bot, chat_id, text)
+
     def agent_for(self, chat_id: int) -> ChatAgent:
         agent = self.agents.get(chat_id)
         if agent is None:
@@ -862,10 +875,10 @@ class Transport:
         skill = skills[index]
         body = await asyncio.to_thread(skill_body, skill)
         log.info("skill opened chat=%s name=%s chars=%s", chat_id, skill.name, len(body))
-        await self.send_html(card("🧩 " + skill.name, skill.description[:160] or str(skill.path),
+        await self.send_html(chat_id, card("🧩 " + skill.name, skill.description[:160] or str(skill.path),
                                   [("file", str(skill.path)), ("size", f"{len(body)} chars")]))
         for chunk in _chunks(body, 3200)[:4]:
-            await self.send_md(chunk)
+            await self.send_md(chat_id, chunk)
         if len(body) > 3200:
             await self.app.bot.send_message(
                 chat_id, f"<i>truncated · full text in {esc(str(skill.path))}</i>",
