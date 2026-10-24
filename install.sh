@@ -17,7 +17,23 @@
 set -eu
 
 usage() {
-    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+    # static text, not a slice of $0: when this script arrives on stdin, $0 is "bash"
+    cat <<'USAGE'
+Install ompwire (and omp, if it is missing) with one command.
+
+  curl -fsSL https://raw.githubusercontent.com/pandudpn/ompwire/main/install.sh | bash
+  ./install.sh                                  # from a clone
+
+Flags:
+  --ref <main|vX.Y.Z>   what to install (default: newest release tag)
+  --no-setup            skip the interactive `ompwire setup` at the end
+  --no-omp              do not offer to install the agent
+  --no-path             leave the shell config alone
+  -h, --help            this text
+
+Environment equivalents: OMPWIRE_REF, OMPWIRE_NO_SETUP, OMPWIRE_NO_OMP,
+OMPWIRE_NO_PATH_EDIT.
+USAGE
 }
 
 while [ $# -gt 0 ]; do
