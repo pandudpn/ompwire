@@ -227,9 +227,10 @@ def _transport_command(pid: int, command: str) -> list[str]:
         if not part.endswith("ompwire"):
             continue
         rest = argv[index + 1:]
-        if rest[:2] == ["gateway", "run"] or rest[:1] == ["serve"]:
+        if rest[:2] in (["gateway", "_run"], ["gateway", "run"]) or rest[:1] == ["serve"]:
             return argv[index:]
-    return argv if ("gateway run" in command or "serve" in command) else []
+    return argv if ("gateway _run" in command or "gateway run" in command
+                    or "serve" in command) else []
 
 
 def restart_gateway(timeout: float = 20.0) -> str:

@@ -1,9 +1,9 @@
-"""`ompwire service`: run each gateway under systemd --user.
+"""Gateways under systemd --user: one gateway, one unit, one process.
 
-One gateway, one unit, one process. A gateway started from a shell dies with that shell,
-and `ompwire update` can only restart it through systemd when a unit exists. The unit is
-generated from the paths on this machine, because a checked-in one cannot know where the
-command or the `.env` live.
+A gateway only ever runs as a supervised service. There is no foreground mode to babysit,
+so `start` writes the unit if it is missing, enables it, and starts it in one step; `stop`
+turns it off again; `remove` takes the unit away. The unit is generated from the paths on
+this machine, because a checked-in one cannot know where the command or the `.env` live.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory={workdir}
 EnvironmentFile={env_file}
-ExecStart={exec_start} gateway run {gateway}
+ExecStart={exec_start} gateway _run {gateway}
 # Credentials live in {env_file} (chmod 600), loaded above rather than written
 # into this unit. One gateway per unit: stopping this one leaves the others alone.
 Restart=always
@@ -107,26 +107,27 @@ def _systemctl(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
                           timeout=timeout, check=False)
 
 
-def install(gateway: str = "telegram", *, force: bool = False, start: bool = True) -> int:
+def start(gateway: str = "telegram", *, force: bool = False, now: bool = True) -> int:
+    """Systemd owns the gateway: write the unit if needed, enable it, start it."""
     from .update import serving_processes
 
     if not _systemd_available():
-        print("FAIL systemd --user is not available here; run `ompwire gateway run "
-              f"{gateway}` under a supervisor of your choice instead")
+        print("FAIL systemd --user is not available on this machine, and a gateway only "
+              "runs as a service.\n"
+              "     On a machine without systemd --user, run it under whatever supervisor "
+              "you do have:\n"
+              f"       ompwire gateway _run {gateway}   # foreground, for a container or a "
+              f"process manager")
         return 1
 
     target = unit_path(gateway)
-    if target.is_file() and not force:
-        print(f"FAIL {target} already exists. Pass --force to rewrite it.")
-        return 1
 
     running = serving_processes()
     if running:
         pids = ", ".join(str(pid) for pid, _command in running)
-        print(f"FAIL a gateway is already running (pid {pids}). Two pollers make Telegram "
-              f"answer 409 Conflict and drop updates.\n"
-              f"     stop that process first (Ctrl-C in its terminal, or kill the pid),\n"
-              f"     then run `ompwire service install {gateway} --force` so systemd owns it")
+        print(f"FAIL a gateway process is already running outside systemd (pid {pids}). Two "
+              f"pollers make Telegram answer 409 Conflict and drop updates.\n"
+              f"     stop it first (kill the pid), then `ompwire gateway start {gateway}`")
         return 1
 
     env_file = _env_file()
@@ -145,14 +146,14 @@ def install(gateway: str = "telegram", *, force: bool = False, start: bool = Tru
                       encoding="utf-8")
     print(f"ok   unit written: {target}")
 
-    steps = (["daemon-reload"], ["enable"] + (["--now"] if start else []) + [unit_name(gateway)])
+    steps = (["daemon-reload"], ["enable"] + (["--now"] if now else []) + [unit_name(gateway)])
     for step in steps:
         result = _systemctl(*step)
         if result.returncode != 0:
             print(f"FAIL systemctl --user {' '.join(step)}: "
                   f"{(result.stderr or result.stdout).strip()}")
             return 1
-    print(f"ok   {'started and enabled' if start else 'enabled'}: {unit_name(gateway)}")
+    print(f"ok   {'started and enabled' if now else 'enabled'}: {unit_name(gateway)}")
     print(f"     logs:   journalctl --user -u {unit_name(gateway)} -f")
     print("     state:  ompwire gateway list")
 
@@ -160,12 +161,13 @@ def install(gateway: str = "telegram", *, force: bool = False, start: bool = Tru
     if legacy.is_file():
         print(f"--   {LEGACY_UNIT} was the single-gateway unit; removing it so only "
               f"per-gateway units remain")
-        uninstall(gateway, path=legacy, quiet=True)
+        remove(gateway, path=legacy, quiet=True)
     return 0
 
 
-def uninstall(gateway: str = "telegram", *, keep_unit_file: bool = False,
-              path: Path | None = None, quiet: bool = False) -> int:
+def remove(gateway: str = "telegram", *, keep_unit_file: bool = False,
+           path: Path | None = None, quiet: bool = False) -> int:
+    """Take the unit away: stop it, disable it, delete the file."""
     target = path or unit_path(gateway)
     name = target.name
     if not target.is_file():
@@ -186,17 +188,6 @@ def uninstall(gateway: str = "telegram", *, keep_unit_file: bool = False,
     return 0
 
 
-def show(gateway: str = "telegram") -> int:
-    target = unit_path(gateway)
-    if not target.is_file():
-        print(f"--   no unit at {target}: `ompwire service install {gateway}` writes one")
-        return 0
-    print(target.read_text(encoding="utf-8"))
-    if _systemd_available():
-        print(f"state: {state(gateway)}")
-    return 0
-
-
 def state(gateway: str = "telegram") -> str:
     """What systemd thinks: active, inactive, failed, or no unit at all."""
     if not unit_path(gateway).is_file():
@@ -207,30 +198,38 @@ def state(gateway: str = "telegram") -> str:
     return result.stdout.strip() or "unknown"
 
 
-def start(gateway: str = "telegram") -> int:
-    return _unit_action("start", gateway)
-
-
-def stop(gateway: str = "telegram") -> int:
-    return _unit_action("stop", gateway)
+def stop(gateway: str = "telegram", *, disable: bool = True) -> int:
+    """Off now, and off at the next boot: a gateway that comes back by itself is a surprise."""
+    if not _systemd_available():
+        print("FAIL systemd --user is not available on this machine; nothing is running "
+              "under it either")
+        return 1
+    if not unit_path(gateway).is_file():
+        print(f"--   no unit for {gateway!r}, nothing to stop")
+        return 0
+    steps = [["stop", unit_name(gateway)]]
+    if disable:
+        steps.append(["disable", unit_name(gateway)])
+    for step in steps:
+        result = _systemctl(*step, timeout=120)
+        if result.returncode != 0:
+            print(f"FAIL systemctl --user {' '.join(step)}: "
+                  f"{(result.stderr or result.stdout).strip()}")
+            return 1
+    print(f"ok   stopped{' and disabled' if disable else ''}: {unit_name(gateway)}")
+    return 0
 
 
 def restart(gateway: str = "telegram") -> int:
-    return _unit_action("restart", gateway)
-
-
-def _unit_action(action: str, gateway: str) -> int:
     if not _systemd_available():
-        print(f"FAIL systemd --user is not available; run `ompwire gateway run {gateway}`")
+        print("FAIL systemd --user is not available on this machine")
         return 1
     if not unit_path(gateway).is_file():
-        print(f"FAIL no unit for {gateway!r} yet. Install it first: "
-              f"`ompwire service install {gateway}`")
-        return 1
-    result = _systemctl(action, unit_name(gateway), timeout=120)
+        return start(gateway)
+    result = _systemctl("restart", unit_name(gateway), timeout=120)
     if result.returncode != 0:
-        print(f"FAIL systemctl --user {action} {unit_name(gateway)}: "
+        print(f"FAIL systemctl --user restart {unit_name(gateway)}: "
               f"{(result.stderr or result.stdout).strip()}")
         return 1
-    print(f"ok   {action}: {unit_name(gateway)} is {state(gateway)}")
+    print(f"ok   restarted: {unit_name(gateway)} is {state(gateway)}")
     return 0

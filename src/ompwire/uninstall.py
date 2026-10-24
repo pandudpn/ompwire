@@ -64,12 +64,12 @@ def human(size: int) -> str:
 def running_serves() -> list[tuple[int, str]]:
     """Find running gateways without always trusting pgrep to be installed.
 
-    Matches `gateway run` and the older `serve` spelling, so an upgrade cannot leave a
+    Matches `gateway _run` and the older `gateway run` / `serve` spellings, so an upgrade cannot leave a
     process behind that this code no longer recognises.
     """
     output = ""
     try:
-        result = subprocess.run(["pgrep", "-af", "ompwire (gateway run|serve)"], capture_output=True,
+        result = subprocess.run(["pgrep", "-af", "ompwire gateway (_run|run)|ompwire serve"], capture_output=True,
                                 text=True, timeout=10, check=False)
         output = result.stdout
     except (OSError, subprocess.SubprocessError):
@@ -93,7 +93,9 @@ def running_serves() -> list[tuple[int, str]]:
         pid, command = int(parts[0]), parts[1]
         if pid == os.getpid() or "pgrep" in command or "ompwire uninstall" in command:
             continue
-        if "ompwire" not in command or not ("gateway run" in command or "serve" in command):
+        if "ompwire" not in command:
+            continue
+        if not any(mark in command for mark in ("gateway _run", "gateway run", "serve")):
             continue
         found.append((pid, command.strip()))
     return found
@@ -138,7 +140,7 @@ def run(*, yes: bool = False, keep_config: bool = False, force: bool = False,
         if dry_run:
             print(f"--   systemd unit would be disabled and removed: {unit}")
         else:
-            service.uninstall()
+            service.remove()
 
     plan = targets(keep_config)
     serves = running_serves()

@@ -58,7 +58,7 @@ class TestUnit:
         body = service.render_unit("/home/you/.local/bin/ompwire",
                                    __import__("pathlib").Path("/home/you/.config/ompwire/.env"),
                                    "/home/you", "telegram")
-        assert "ExecStart=/home/you/.local/bin/ompwire gateway run telegram" in body
+        assert "ExecStart=/home/you/.local/bin/ompwire gateway _run telegram" in body
         assert "Description=ompwire gateway: telegram" in body
         assert "EnvironmentFile=/home/you/.config/ompwire/.env" in body
         assert "WorkingDirectory=/home/you" in body
@@ -68,26 +68,26 @@ class TestUnit:
         assert "TOKEN=" not in body
 
 
-def test_install_refuses_when_a_gateway_is_running(monkeypatch, capsys):
+def test_start_refuses_when_a_gateway_is_running(monkeypatch, capsys):
     monkeypatch.setattr(service, "_systemd_available", lambda: True)
     monkeypatch.setattr(service, "unit_path",
                         lambda gateway="telegram": __import__("pathlib").Path("/tmp/none.service"))
     monkeypatch.setattr("ompwire.update.serving_processes",
-                        lambda: [(4242, "python3 ompwire serve")])
+                        lambda: [(4242, "python3 ompwire gateway _run telegram")])
 
-    assert service.install("telegram") == 1
+    assert service.start("telegram") == 1
     out = capsys.readouterr().out
-    assert "already running (pid 4242)" in out
+    assert "already running outside systemd (pid 4242)" in out
     assert "409" in out
 
 
-def test_install_refuses_without_systemd(monkeypatch, capsys):
+def test_start_refuses_without_systemd(monkeypatch, capsys):
     monkeypatch.setattr(service, "_systemd_available", lambda: False)
-    assert service.install("telegram") == 1
+    assert service.start("telegram") == 1
     assert "systemd --user is not available" in capsys.readouterr().out
 
 
-def test_install_writes_the_unit_and_enables_it(monkeypatch, tmp_path, capsys):
+def test_start_writes_the_unit_and_enables_it(monkeypatch, tmp_path, capsys):
     unit = tmp_path / "ompwire.service"
     env = tmp_path / "ompwire.env"
     env.write_text("TELEGRAM_BOT_TOKEN=x\n", encoding="utf-8")
@@ -108,26 +108,41 @@ def test_install_writes_the_unit_and_enables_it(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(service.subprocess, "run",
                         lambda command, **kwargs: calls.append(command) or Result())
 
-    assert service.install("telegram") == 0
+    assert service.start("telegram") == 0
     body = unit.read_text(encoding="utf-8")
-    assert "ExecStart=/home/you/.local/bin/ompwire gateway run telegram" in body
+    assert "ExecStart=/home/you/.local/bin/ompwire gateway _run telegram" in body
     assert ["systemctl", "--user", "daemon-reload"] in calls
     assert ["systemctl", "--user", "enable", "--now", "ompwire-telegram.service"] in calls
     assert "journalctl --user -u ompwire-telegram.service -f" in capsys.readouterr().out
 
 
-def test_install_refuses_to_clobber_an_existing_unit(monkeypatch, tmp_path, capsys):
-    unit = tmp_path / "ompwire.service"
-    unit.write_text("mine\n", encoding="utf-8")
+def test_start_rewrites_a_stale_unit(monkeypatch, tmp_path, capsys):
+    """The unit is generated from this machine's paths, so start always refreshes it."""
+    unit = tmp_path / "ompwire-telegram.service"
+    unit.write_text("[Service]\nExecStart=/old ompwire serve\n", encoding="utf-8")
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=x\n", encoding="utf-8")
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
     monkeypatch.setattr(service, "_systemd_available", lambda: True)
     monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": unit)
+    monkeypatch.setattr(service, "_env_file", lambda: env)
+    monkeypatch.setattr(service, "_workdir", lambda: "/home/you")
+    monkeypatch.setattr(service, "_credential_works", lambda gateway: True)
+    monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
+    monkeypatch.setattr(service.subprocess, "run", lambda *a, **k: Result())
 
-    assert service.install("telegram") == 1
-    assert "--force" in capsys.readouterr().out
-    assert unit.read_text() == "mine\n"
+    assert service.start("telegram") == 0
+    body = unit.read_text()
+    assert "gateway _run telegram" in body
+    assert "ompwire serve" not in body
 
 
-def test_uninstall_disables_and_removes(monkeypatch, tmp_path, capsys):
+def test_remove_disables_and_removes(monkeypatch, tmp_path, capsys):
     unit = tmp_path / "ompwire-telegram.service"
     unit.write_text("unit\n", encoding="utf-8")
     calls: list[list[str]] = []
@@ -142,26 +157,26 @@ def test_uninstall_disables_and_removes(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(service.subprocess, "run",
                         lambda command, **kwargs: calls.append(command) or Result())
 
-    assert service.uninstall("telegram") == 0
+    assert service.remove("telegram") == 0
     assert not unit.exists()
     assert ["systemctl", "--user", "disable", "--now", "ompwire-telegram.service"] in calls
     assert "removed" in capsys.readouterr().out
 
 
-def test_uninstall_keeps_the_file_when_asked(monkeypatch, tmp_path):
+def test_remove_keeps_the_file_when_asked(monkeypatch, tmp_path):
     unit = tmp_path / "ompwire.service"
     unit.write_text("unit\n", encoding="utf-8")
     monkeypatch.setattr(service, "_systemd_available", lambda: False)
     monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": unit)
 
-    assert service.uninstall("telegram", keep_unit_file=True) == 0
+    assert service.remove("telegram", keep_unit_file=True) == 0
     assert unit.exists()
 
 
-def test_show_says_when_there_is_no_unit(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": tmp_path / "missing.service")
-    assert service.show("telegram") == 0
-    assert "service install" in capsys.readouterr().out
+def test_state_says_when_there_is_no_unit(monkeypatch, tmp_path):
+    monkeypatch.setattr(service, "unit_path",
+                        lambda gateway="telegram": tmp_path / "missing.service")
+    assert service.state("telegram") == "no unit"
 
 
 def test_pytest_is_importable_here():
@@ -184,7 +199,7 @@ class TestUninstallInteraction:
         assert "would be disabled and removed" in out
         assert unit.exists()
 
-    def test_a_real_uninstall_disables_the_unit_before_deleting_files(
+    def test_remove_disables_the_unit_before_deleting_files(
             self, monkeypatch, tmp_path):
         from ompwire import uninstall
 
@@ -192,7 +207,7 @@ class TestUninstallInteraction:
         unit.write_text("unit\n", encoding="utf-8")
         calls: list[str] = []
         monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": unit)
-        monkeypatch.setattr(service, "uninstall",
+        monkeypatch.setattr(service, "remove",
                             lambda *a, **kwargs: calls.append("service") or 0)
         monkeypatch.setattr(uninstall, "targets", lambda keep_config: [])
         monkeypatch.setattr(uninstall, "running_serves", lambda: [])
@@ -210,11 +225,11 @@ class TestOneGatewayOneUnit:
     def test_the_unit_runs_only_its_own_gateway(self):
         body = service.render_unit("/usr/bin/ompwire", __import__("pathlib").Path("/e"),
                                    "/w", "whatsapp")
-        assert "gateway run whatsapp" in body
+        assert "gateway _run whatsapp" in body
         assert "telegram" not in body
 
 
-def test_install_refuses_a_rejected_credential(monkeypatch, tmp_path, capsys):
+def test_start_refuses_a_rejected_credential(monkeypatch, tmp_path, capsys):
     """Restart=always on a revoked token is a crash loop, not a service."""
     from ompwire import gateways
 
@@ -226,12 +241,12 @@ def test_install_refuses_a_rejected_credential(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(gateways, "token", lambda item: "old:token")
     monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "")
 
-    assert service.install("telegram") == 1
+    assert service.start("telegram") == 1
     out = capsys.readouterr().out
     assert "not accepted" in out and "gateway add telegram --force" in out
 
 
-def test_install_proceeds_when_the_credential_verifies(monkeypatch, tmp_path, capsys):
+def test_start_proceeds_when_the_credential_verifies(monkeypatch, tmp_path, capsys):
     from ompwire import gateways
 
     unit = tmp_path / "ompwire-telegram.service"
@@ -254,7 +269,7 @@ def test_install_proceeds_when_the_credential_verifies(monkeypatch, tmp_path, ca
     monkeypatch.setattr(gateways, "token", lambda item: "good:token")
     monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "vidura_omp_bot")
 
-    assert service.install("telegram") == 0
+    assert service.start("telegram") == 0
     assert unit.exists()
 
 

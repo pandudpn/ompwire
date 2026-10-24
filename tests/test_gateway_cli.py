@@ -145,23 +145,24 @@ def test_start_without_a_unit_says_how_to_install_it(sandbox, capsys):
     assert "not available" in capsys.readouterr().out
 
 
-def test_run_refuses_a_gateway_that_does_not_exist(sandbox, capsys):
+def test_stop_refuses_a_gateway_that_does_not_exist(sandbox, capsys):
     gateways.add("telegram")
     gateways.add("telegram-2")
-    assert cli.main(["gateway", "run", "nope"]) == 1
+    assert cli.main(["gateway", "stop", "nope"]) == 1
     assert "no gateway named" in capsys.readouterr().err
 
 
-def test_run_refuses_an_unimplemented_transport(sandbox, capsys):
+def test_a_transport_that_does_not_exist_yet_is_refused(sandbox, capsys):
     gateways.add("whatsapp", "whatsapp")
-    assert cli.main(["gateway", "run", "whatsapp"]) == 1
+    assert cli.main(["gateway", "start", "whatsapp"]) == 1
     assert "not implemented" in capsys.readouterr().err
 
 
-def test_there_is_no_serve_command_any_more():
-    """One noun per concept: `gateway run`, not `serve`."""
-    with pytest.raises(SystemExit):
-        cli.main(["serve"])
+def test_there_is_no_serve_or_service_command_any_more():
+    """One noun per concept: `gateway`, with start/stop/restart inside it."""
+    for gone in ("serve", "service"):
+        with pytest.raises(SystemExit):
+            cli.main([gone])
 
 
 def test_status_reports_state_unit_and_logs(sandbox, capsys):
@@ -170,7 +171,7 @@ def test_status_reports_state_unit_and_logs(sandbox, capsys):
     out = capsys.readouterr().out
     assert "telegram  telegram  no unit" in out
     assert "ompwire-telegram.service" in out
-    assert "gateway install telegram" in out
+    assert "gateway start telegram" in out
 
 
 def test_status_for_one_gateway_only(sandbox, capsys):
@@ -181,19 +182,25 @@ def test_status_for_one_gateway_only(sandbox, capsys):
     assert "telegram-2" in out and "telegram  telegram" not in out
 
 
-def test_install_without_systemd_says_so(sandbox, capsys):
+def test_start_without_systemd_says_so(sandbox, capsys):
+    """A gateway only runs as a unit, so no systemd means no gateway. Say it plainly."""
     gateways.add("telegram")
-    assert cli.main(["gateway", "install", "telegram"]) == 1
-    assert "systemd --user is not available" in capsys.readouterr().out
+    assert cli.main(["gateway", "start", "telegram"]) == 1
+    out = capsys.readouterr().out
+    assert "systemd --user is not available" in out
+    assert "gateway _run telegram" in out
 
 
-def test_run_uses_the_named_gateway(sandbox, monkeypatch):
+def test_the_unit_entry_point_is_the_only_foreground_path(sandbox, monkeypatch):
+    """`_run` exists for systemd. It is not advertised: there is no foreground mode."""
     gateways.add("telegram")
     called: list[tuple[str, str, bool]] = []
     monkeypatch.setattr(cli, "_run_gateway",
                         lambda config, name, force: called.append((str(config), name, force)) or 0)
-    assert cli.main(["gateway", "run", "telegram"]) == 0
+    assert cli.main(["gateway", "_run", "telegram"]) == 0
     assert called == [("None", "telegram", False)]
+    out = cli.build_parser().format_help()
+    assert "_run" not in out
 
 
 def test_logs_falls_back_to_journalctl(sandbox, monkeypatch, capsys):

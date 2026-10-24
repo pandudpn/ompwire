@@ -47,5 +47,5 @@ def test_every_command_has_a_description_and_examples(capsys):
 
 def test_unknown_flag_exits_two(capsys):
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(["gateway", "run", "--nope"])
+        cli.main(["gateway", "start", "--nope"])
     assert excinfo.value.code == 2

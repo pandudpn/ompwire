@@ -84,7 +84,7 @@ generated with [archify](https://github.com/tt-a1i/archify)).
 | First token on screen | under a second after the agent starts answering | chunk batching on an interval, not per token |
 | Approval visibility | never silent | every permission request becomes a message that stays until answered |
 | Secret exposure | zero tokens in logs | redaction filter on every handler, `ompwire scrub-logs` for old files |
-| Agent reachability | fail loudly | `gateway run` checks the agent, the gateway and the token before polling |
+| Agent reachability | fail loudly | the gateway checks the agent, the bot and the token before polling |
 
 ### Decision record
 
@@ -218,9 +218,7 @@ ompwire --version        # or -V
 | `ompwire status` | what it is set to and whether the gateway is running: model, mode, thinking, approvals, cwd, allowed users, token, MCP, gateway, sessions, log |
 | `ompwire doctor` | verify agent, session store, bot token and allow list, one line per check |
 | `ompwire gateway list\|add\|remove` | one bot per definition: credential, allow list |
-| `ompwire gateway run NAME` | run it in this terminal |
-| `ompwire gateway install\|uninstall NAME` | keep it running under systemd --user (or `ompwire service`) |
-| `ompwire gateway start\|stop\|restart NAME` | control that unit |
+| `ompwire gateway start\|stop\|restart NAME` | start writes and enables the unit, stop disables it |
 | `ompwire gateway status\|logs NAME` | state, unit path, journal |
 | `ompwire chat` | talk to the agent from this terminal (`-q` for one-shot) |
 | `ompwire sessions` | the `chat_key → sessionId` map |
@@ -250,7 +248,7 @@ first:
 
 1. **Checks for `omp`.** If the agent is missing it prints the official installer
    (`curl -fsSL https://omp.sh/install | sh`) and offers to run it. Nothing else is
-   written until an agent is on disk — `ompwire gateway run` refuses to start otherwise.
+   written until an agent is on disk — `gateway start` refuses to start otherwise.
 2. **Writes `~/.config/ompwire/config.toml`** with the working directory, approval
    policy, MCP source and allowed Telegram user ids. An existing config is kept;
    `--force` moves it to `config.toml.bak` first.
@@ -272,7 +270,7 @@ provisioning script wants. Afterwards: `ompwire gateway add telegram`, then
 `ompwire doctor`.
 
 Working on ompwire itself: clone it, `uv venv && uv pip install -e '.[dev]'`, and
-run `.venv/bin/ompwire gateway run telegram` — the checkout keeps its own session store.
+run `.venv/bin/ompwire gateway start telegram` — the checkout keeps its own session store.
 
 ## Update
 
@@ -315,8 +313,7 @@ ok   token valid: @vidura_omp_bot
 allowed telegram user ids for @vidura_omp_bot (comma separated, blank = nobody): 749994884
 ok   allowed users: 749994884
 
-next:  ompwire gateway install telegram    # keep it running
-       ompwire gateway run telegram        # or run it in this terminal
+next:  ompwire gateway start telegram      # enable and start it under systemd
 ```
 
 The token is verified with `getMe` before anything is written, and it lives in `.env`
@@ -338,26 +335,39 @@ WhatsApp is named in the menu because the design is per-platform, but its transp
 not exist yet: `gateway add whatsapp` refuses and writes nothing, rather than storing a
 definition that could never start.
 
-### One gateway, one service
+### Start is the install
+
+There is no separate install step, and no foreground mode: a gateway runs as a systemd
+`--user` unit or it does not run. `start` writes the unit, enables it, and starts it — in
+that order, in one command. Running it a second time refreshes the unit from the paths on
+this machine, which is what you want after moving a checkout.
 
 ```bash
-$ ompwire gateway install telegram
+$ ompwire gateway start telegram
 ok   unit written: /home/you/.config/systemd/user/ompwire-telegram.service
 ok   started and enabled: ompwire-telegram.service
      logs:   journalctl --user -u ompwire-telegram.service -f
      state:  ompwire gateway list
 ```
 
+`stop` turns it off **and** disables it. A gateway that comes back on its own after you
+told it to stop is not a feature.
+
+`remove` takes the bot away completely: definition, unit file, and the process.
+
+On a machine without `systemd --user` (a container, a CI runner) there is nothing to
+pretend about — `start` says so instead of leaving an unsupervised process behind. The unit
+itself calls the internal `gateway _run <name>`, which is the process systemd supervises and
+is not a command to type.
+
 Each gateway gets its own unit (`ompwire-telegram.service`, `ompwire-whatsapp.service`),
 so stopping one leaves the others alone, and `ompwire update` restarts every active
 gateway separately.
 
 Everything about a bot lives under one verb, the way `hermes gateway` works: `add`,
-`list`, `run`, `install`, `start|stop|restart`, `status`, `logs`, `remove`. There is no
-`ompwire serve`: it was the same thing under a second name, and a name that means the same
-as another name is a coin flip every time someone types it. `ompwire service` survives only
-as the older spelling of `gateway install|uninstall`, and the installed unit calls
-`gateway run <name>`.
+`list`, `add`, `start|stop|restart`, `status`, `logs`, `remove`. There is no `ompwire serve`
+and no `ompwire service`: they were the same things under other names, and a name that means
+what another name means is a coin flip every time someone types it.
 
 ```bash
 $ ompwire gateway status
@@ -387,10 +397,9 @@ The unit is generated from this machine — the `ompwire` on your `PATH`, your
 cannot know any of that. The token stays in the `.env`, never in the unit file.
 
 It refuses to install while another gateway is running: two pollers make Telegram answer
-`409 Conflict` and drop updates. `ompwire service show` prints the unit and its state,
-`ompwire service uninstall [--keep-unit-file]` gives it back.
+`409 Conflict` and drop updates.
 
-`gateway run` holds the lock itself, so a second gateway process for the same bot fails
+The unit holds the lock itself, so a second gateway process for the same bot fails
 with the pid of the one that is already running instead of quietly splitting the bot's
 updates. The lock is an `flock`, so a crashed gateway never leaves a stale file to clean
 up. `--force` starts anyway, on purpose.
@@ -646,7 +655,7 @@ So a naive "just send the message" implementation silently kills the work in pro
 
 ## Roadmap
 
-- [x] Telegram transport (`ompwire gateway run`): long polling, allowlist, edit-in-place streaming, inline-keyboard approvals
+- [x] Telegram transport (`ompwire gateway start`): long polling, allowlist, edit-in-place streaming, inline-keyboard approvals
 - [x] queue and steer plumbing per the section above
 - [x] idle eviction so an unused conversation releases its subprocess
 - [ ] photo and document input (ACP advertises image + embeddedContext, not wired yet)

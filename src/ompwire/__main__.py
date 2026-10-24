@@ -162,9 +162,8 @@ def cmd_gateway(args: argparse.Namespace) -> int:
         except gateways.GatewayError as exc:
             print(f"FAIL {exc}", file=sys.stderr)
             return 1
-        if service.state(item.name) not in ("no unit", "no systemd"):
-            service.uninstall(item.name)
-        print(f"ok   removed gateway {item.name!r} (credential left in .env: "
+        service.remove(item.name, quiet=True)
+        print(f"ok   removed gateway {item.name!r} and its unit (credential left in .env: "
               f"{item.token_var()})")
         return 0
 
@@ -177,25 +176,23 @@ def cmd_gateway(args: argparse.Namespace) -> int:
             print(f"FAIL {exc}", file=sys.stderr)
             return 1
         return _gateway_logs(item, service)
-    if action in ("run", "install", "uninstall"):
-        try:
-            item = gateways.selected(load_config(args.config), getattr(args, "name", "") or "")
-        except gateways.GatewayError as exc:
-            print(f"FAIL {exc}", file=sys.stderr)
-            return 1
-        if action == "run":
-            return _run_gateway(args.config, item.name, args.force)
-        if action == "install":
-            return service.install(item.name, force=args.force)
-        return service.uninstall(item.name)
-
-    # start / stop / restart act on the unit, because one gateway is one service
     try:
-        item = gateways.selected(load_config(args.config), getattr(args, "name", "") or "")
+        gateway = gateways.selected(load_config(args.config), getattr(args, "name", "") or "")
     except gateways.GatewayError as exc:
         print(f"FAIL {exc}", file=sys.stderr)
         return 1
-    return getattr(service, action)(item.name)
+
+    if action in ("start", "stop", "restart", "_run") and not gateway.implemented:
+        print(f"FAIL the {gateway.kind!r} transport is not implemented yet; "
+              f"`ompwire gateway types` shows what can run today", file=sys.stderr)
+        return 1
+    if action == "_run":
+        # what the unit calls. Not a user-facing mode: systemd needs a foreground process,
+        # the CLI does not offer one.
+        return _run_gateway(args.config, gateway.name, args.force)
+    if action == "start":
+        return service.start(gateway.name, force=args.force)
+    return getattr(service, action)(gateway.name)
 
 
 def _gateway_status(args: argparse.Namespace, gateways, service) -> int:
@@ -221,8 +218,7 @@ def _gateway_status(args: argparse.Namespace, gateways, service) -> int:
         print(f"  unit   {service.unit_path(item.name)}")
         print(f"  logs   journalctl --user -u {unit} -f")
         if state in ("inactive", "failed", "no unit"):
-            print(f"  start  ompwire gateway install {item.name}"
-                  if state == "no unit" else f"  start  ompwire gateway start {item.name}")
+            print(f"  start  ompwire gateway start {item.name}")
     return 0
 
 
@@ -327,8 +323,7 @@ def _gateway_add(args: argparse.Namespace, gateways, service, bot_identity) -> i
         else:
             print("warn no allowed users: nobody can talk to this bot yet")
 
-    print(f"\nnext:  ompwire gateway install {name}    # keep it running")
-    print(f"       ompwire gateway run {name}        # or run it in this terminal")
+    print(f"\nnext:  ompwire gateway start {name}      # enable and start under systemd")
     return 0
 
 
@@ -425,17 +420,6 @@ def cmd_update(args: argparse.Namespace) -> int:
                restart=not args.no_restart)
 
 
-def cmd_service(args: argparse.Namespace) -> int:
-    from . import service
-
-    action = getattr(args, "service_action", "show")
-    if action == "install":
-        return service.install(args.name, force=args.force, start=not args.no_start)
-    if action == "uninstall":
-        return service.uninstall(args.name, keep_unit_file=args.keep_unit_file)
-    return service.show(args.name)
-
-
 def cmd_status(args: argparse.Namespace) -> int:
     from .status import run
 
@@ -514,8 +498,8 @@ common flows:
   ompwire doctor                    verify agent, store and each gateway credential
   ompwire gateway list              bots, credentials and whether they run
   ompwire gateway add telegram      add one bot: token, allow list
-  ompwire gateway install telegram  keep it running under systemd --user
-  ompwire gateway run telegram      run it in this terminal
+  ompwire gateway start telegram    enable and start it under systemd --user
+  ompwire gateway logs telegram     follow its journal
   ompwire update [--edge]           newest release, or the tip of main (restarts gateways)
   ompwire restart                   restart the gateway without updating
   ompwire status                    settings and whether the gateway is running
@@ -607,15 +591,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="stop a running gateway before removing")
     un.set_defaults(func=cmd_uninstall)
 
-    gw = _sub(sub, "gateway", "add, inspect and control gateway bots",
-              "A gateway is one bot on one platform: its own credential, its own allow "
-              "list, its own service. Types: telegram (works today), whatsapp (not yet).",
-              "  ompwire gateway list\n"
+    gw = _sub(sub, "gateway", "add, start and inspect gateway bots",
+              "A gateway is one bot on one platform: its own credential, its own allow list, "
+              "its own systemd unit. It only ever runs as that unit, so `start` writes and "
+              "enables it. Types: telegram (works today), whatsapp (not yet).",
               "  ompwire gateway add telegram --token-stdin < token.txt\n"
-              "  ompwire gateway start telegram")
-    gw.add_argument("gateway_action", nargs="?", default="list",
+              "  ompwire gateway start telegram\n"
+              "  ompwire gateway status")
+    gw.add_argument("gateway_action", nargs="?", default="list", metavar="action",
                     choices=["list", "add", "remove", "rm", "start", "stop", "restart",
-                             "run", "install", "uninstall", "status", "logs", "types"])
+                             "status", "logs", "types", "_run"])
     gw.add_argument("name", nargs="?", default="", help="gateway name")
     gw.add_argument("--kind", default="", help="add: telegram | whatsapp")
     gw.add_argument("--allowed", default="", help="add: comma separated user ids")
@@ -625,20 +610,6 @@ def build_parser() -> argparse.ArgumentParser:
     gw.add_argument("--force", action="store_true", help="add: replace an existing credential")
     gw.add_argument("--yes", action="store_true", help="add: take the defaults, no prompts")
     gw.set_defaults(func=cmd_gateway)
-
-    svc = _sub(sub, "service", "(older name) same as `ompwire gateway install`",
-               "Kept so existing units and scripts keep working. `ompwire gateway "
-               "install|uninstall|show` is the command to use.",
-               "  ompwire gateway install telegram\n  ompwire service install telegram")
-    svc.add_argument("service_action", nargs="?", default="show",
-                     choices=["install", "uninstall", "show"])
-    svc.add_argument("--force", action="store_true", help="rewrite an existing unit file")
-    svc.add_argument("--no-start", action="store_true",
-                     help="enable the unit without starting it now")
-    svc.add_argument("--keep-unit-file", action="store_true",
-                     help="uninstall: disable, but leave the unit file in place")
-    svc.add_argument("name", nargs="?", default="telegram", help="gateway name")
-    svc.set_defaults(func=cmd_service)
 
     st = _sub(sub, "status", "what this installation is set to, and whether it is running",
               "One screen: version and how it was installed, agent, model/mode/thinking, "
