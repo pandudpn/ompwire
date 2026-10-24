@@ -147,6 +147,13 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return run(yes=args.yes, force=args.force, install_omp=args.install_omp)
 
 
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    from .uninstall import run
+
+    return run(yes=args.yes, keep_config=args.keep_config, force=args.force,
+               dry_run=args.dry_run)
+
+
 def cmd_scrub(args: argparse.Namespace) -> int:
     from .logs import scrub_file
 
@@ -206,6 +213,15 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--install-omp", action="store_true",
                        help="run the official omp installer without asking")
     setup.set_defaults(func=cmd_setup)
+
+    un = sub.add_parser("uninstall", help="remove ompwire: config, state, data, package")
+    un.add_argument("--yes", action="store_true", help="remove without asking")
+    un.add_argument("--dry-run", action="store_true", help="show what would be removed")
+    un.add_argument("--keep-config", action="store_true",
+                    help="leave config.toml and .env (bot token) in place")
+    un.add_argument("--force", action="store_true",
+                    help="stop a running `ompwire serve` before removing")
+    un.set_defaults(func=cmd_uninstall)
 
     scrub = sub.add_parser("scrub-logs", help="replace bot tokens already written to a log file")
     scrub.add_argument("--file", help="log file to clean (default: logging.file from config)")

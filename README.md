@@ -227,6 +227,30 @@ ok   session/new: 01a16c3e · config options ['mode', 'model', 'thinking']
 ready · ompwire 0.1.0
 ```
 
+## Uninstall
+
+```bash
+ompwire uninstall --dry-run     # list what would go, remove nothing
+ompwire uninstall               # ask, then remove
+ompwire uninstall --yes         # no prompt
+ompwire uninstall --keep-config # keep config.toml and .env (the bot token)
+ompwire uninstall --force       # stop a running `ompwire serve` first
+```
+
+It removes exactly what ompwire created and nothing else:
+
+| Path | Holds |
+|---|---|
+| `~/.config/ompwire/` | `config.toml`, `.env` with the bot token (skipped by `--keep-config`) |
+| `~/.local/state/ompwire/` | `sessions.db`, per-chat prefs, approval override, logs |
+| `~/.local/share/ompwire/` | MCP server installs ompwire set up |
+| the installed package | `uv tool uninstall` or `pipx uninstall`, whichever owns it |
+
+`~/.omp` is never touched — agent sessions, credentials and MCP config survive, so
+reinstalling ompwire picks the conversation history back up. A live `ompwire serve` is
+refused by default because it rewrites its state on exit; `--force` stops it first.
+Removing the bot from Telegram itself is done in @BotFather, not here.
+
 ## Use
 
 ```bash
