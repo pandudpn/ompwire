@@ -6,7 +6,7 @@ import logging
 
 from ompwire import logs
 
-TOKEN = "8384807287:AAEwqLnY-ucV5IsQy_xMSXJuIOabcdefghij"
+TOKEN = "123456789:AAtest-only-not-a-real-token_abcdefghij"
 LINE = ("HTTP Request: POST https://api.telegram.org/bot"
         + TOKEN + "/getUpdates \"HTTP/1.1 200 OK\"")
 
@@ -14,7 +14,7 @@ LINE = ("HTTP Request: POST https://api.telegram.org/bot"
 def test_redact_replaces_the_secret_and_keeps_the_bot_id():
     cleaned = logs.redact(LINE)
     assert TOKEN not in cleaned
-    assert "bot8384807287:***" in cleaned
+    assert "bot123456789:***" in cleaned
 
 
 def test_filter_cleans_both_message_and_arguments():
@@ -23,7 +23,7 @@ def test_filter_cleans_both_message_and_arguments():
                                None)
     logs.RedactTokens().filter(record)
     rendered = record.getMessage()
-    assert TOKEN not in rendered and "bot8384807287:***" in rendered
+    assert TOKEN not in rendered and "bot123456789:***" in rendered
 
 
 def test_scrub_rewrites_an_existing_file(tmp_path):
@@ -32,6 +32,6 @@ def test_scrub_rewrites_an_existing_file(tmp_path):
     assert logs.scrub_file(path) == 2
     text = path.read_text(encoding="utf-8")
     assert TOKEN not in text
-    assert text.count("bot8384807287:***") == 2
+    assert text.count("bot123456789:***") == 2
     assert logs.scrub_file(path) == 0          # idempotent
     assert logs.scrub_file(tmp_path / "missing.log") == 0
