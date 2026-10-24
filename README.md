@@ -106,6 +106,7 @@ TOML at `~/.config/ompwire/config.toml` (fallback `~/.ompwire/config.toml`). Sec
 | `[agent]` | `cwd`, `model`, `mode`, `approval_mode`, `permission_policy` |
 | `[session]` | `store`, `idle_timeout` |
 | `[stream]` | `enabled`, `edit_interval`, `show_tool_calls`, `show_usage` |
+| `[mcp]` | `source` (`none`/`inline`/`mcp-hub`), `hub_path`, `include`, `exclude`, `overrides` |
 | `[[mcp.servers]]` | `name`, `command`, `args`, forwarded to `session/new` |
 | `[telegram]` | `bot_token` (env), `allowed_users`, `home_channel` |
 
@@ -141,6 +142,7 @@ These are the sharp edges found while building it. They are the reason `tests/` 
 - **Model selection is a config option.** There is no ACP-level model field; it is `configOptions` entry `id = "model"`, set through `session/set_config_option`.
 - **Keep the process warm.** A turn costs a large baseline of input tokens (OMP's own prompt), most of it cache-served on later turns. Spawning per message throws that away.
 - **One subprocess per conversation** is the whole concurrency model. That is enough for a personal assistant and not enough for a public bot.
+- **mcp-hub is supported directly.** `[mcp] source = "mcp-hub"` reads `~/mcp-hub/servers.yaml` and converts each entry: stdio argv is split, env/headers mappings become arrays, remote transports become `type = "http"`. Per-server `[mcp.overrides.<name>]` patches one entry without editing the shared hub file.
 - **`mcpServers` needs `env` as a list.** `session/new` with an entry whose `env` is an object, or missing, fails with `Internal error / undefined is not an object`. `{"name": "x", "type": "stdio", "command": "npx", "args": [...], "env": []}` is the shape omp 18.12.6 accepts; dict-shaped env config is converted automatically, and a failure falls back to a session without MCP servers instead of blocking the chat.
 
 ## Development
@@ -186,6 +188,7 @@ Agent prose and tool activity are kept apart, because they are different things.
 
 - Answers render as markdown: headings, bold, italic, links, bullets and fenced code blocks become Telegram HTML (`mdrender.py`), and bar-chart lines (as printed by the agent's own `/context`) are kept in a monospace block so the bars stay aligned. A half-streamed message still produces valid HTML, and a rejected parse falls back to plain text instead of dropping the reply.
 - Tool calls stream into a separate trace message, shell-styled: the command in `<code>`, its output in a `<pre>` block, status while it runs. `/verbose` toggles it.
+- Approval prompts name the tool, show the exact command in a monospace block, and offer labelled buttons (allow once / always / deny). The prompt is then rewritten in place with the decision, so no stale keyboard is left behind. Photos sent to the chat are forwarded to the agent as ACP image blocks.
 - Session changes (`/new`, `/fork`, `/resume`, `/cwd`) answer with a card showing session id, model, mode, thinking level, approval policy, yolo state and cwd.
 - Token usage is not posted per turn (`stream.show_usage = false`); `/usage` reports the session totals.
 

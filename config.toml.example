@@ -41,10 +41,25 @@ edit_interval = 1.0        # seconds between message edits (Telegram edit-in-pla
 show_tool_calls = true
 show_usage = false       # per-turn token line; use /usage instead
 
+[mcp]
+# Where the session's MCP servers come from:
+#   none    = no MCP servers
+#   inline  = the [[mcp.servers]] entries below
+#   mcp-hub = an mcp-hub servers.yaml (needs PyYAML: pip install ompwire[hub])
+source = "inline"
+hub_path = "~/mcp-hub/servers.yaml"
+include = []      # empty = every enabled server in the hub
+exclude = []      # names to leave out
+
+# Patch one hub entry without editing the shared hub file, e.g. point a server at
+# a working binary when its npx cache is broken:
+# [mcp.overrides.mongo-nonprod]
+# command = "/home/pandu/.local/share/ompwire/mcp/mongo/node_modules/.bin/mongodb-mcp-server"
+# args = []
+
 [[mcp.servers]]
-# Tools the agent should have for the whole session, passed straight through to
-# session/new. Anything the agent needs — memory, database, issue tracker — is an
-# MCP server here, not code in this repo.
+# Inline MCP server, passed straight through to session/new. Anything the agent
+# needs — memory, database, issue tracker — belongs here, not in this repo.
 name = "context7"
 command = "npx"
 args = ["-y", "@upstash/context7-mcp"]

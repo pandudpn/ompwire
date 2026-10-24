@@ -13,6 +13,7 @@ block the reader thread until the user taps a button.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import logging.handlers
@@ -32,6 +33,7 @@ from .acp import AcpClient, AcpError, Update as AcpUpdate, pick_permission_optio
 from . import __version__
 from .config import Config, approval_policy, save_override
 from .format import card, change, esc, help_sections, now_wib, tool_block
+from .mcp_hub import hub_servers, normalize
 from .mdrender import to_html, to_plain
 from .format import uptime as fmt_uptime
 from .store import SessionStore
@@ -68,27 +70,8 @@ COMMANDS: list[tuple[str, str]] = [
 ]
 
 def normalize_mcp_servers(servers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Shape MCP entries the way omp 18.12.6 accepts them.
-
-    Measured: `env` must be a list. An object, or a missing env, makes
-    `session/new` fail with "Internal error / undefined is not an object".
-    """
-    out: list[dict[str, Any]] = []
-    for server in servers or []:
-        env = server.get("env", [])
-        if isinstance(env, dict):
-            env = [{"name": str(k), "value": str(v)} for k, v in env.items()]
-        elif env is None:
-            env = []
-        entry = {
-            "name": str(server.get("name", "mcp")),
-            "type": str(server.get("type", "stdio")),
-            "command": str(server.get("command", "")),
-            "args": [str(a) for a in (server.get("args") or [])],
-            "env": list(env),
-        }
-        out.append(entry)
-    return out
+    """Backwards-compatible alias for `mcp_hub.normalize`."""
+    return normalize(list(servers or []))
 
 
 FORWARD_HINT = (
@@ -192,7 +175,21 @@ class ChatAgent:
         await self._apply_preferences()
 
     def _mcp_servers(self) -> list[dict[str, Any]]:
-        return normalize_mcp_servers(self.config.get("mcp", "servers", []) or [])
+        source = str(self.config.get("mcp", "source", "inline") or "inline").lower()
+        if source == "none":
+            return []
+        if source == "mcp-hub":
+            entries = hub_servers(
+                self.config.get("mcp", "hub_path", "~/mcp-hub/servers.yaml"),
+                include=self.config.get("mcp", "include", []) or [],
+                exclude=self.config.get("mcp", "exclude", []) or [],
+            )
+            overrides = self.config.get("mcp", "overrides", {}) or {}
+            for entry in entries:
+                patch = overrides.get(entry.get("name")) or {}
+                entry.update({key: value for key, value in patch.items() if value not in (None, "")})
+            return normalize(entries)
+        return normalize(self.config.get("mcp", "servers", []) or [])
 
     async def _apply_preferences(self) -> None:
         for config_id in ("model", "mode"):
@@ -232,43 +229,99 @@ class ChatAgent:
                 self._pending_perm.pop(token, None)
                 return slot["optionId"]
             time.sleep(0.2)
-        self._pending_perm.pop(token, None)
         log.warning("permission timed out chat=%s tool=%s (denied)", self.chat_id, title)
+        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._expire_permission(token)))
         return None
+
+    OPTION_LABELS = {
+        "allow_once": "✅ Allow once",
+        "allow_always": "✅ Always allow",
+        "reject_once": "⛔ Deny",
+        "reject_always": "⛔ Always deny",
+    }
+
+    @staticmethod
+    def _permission_detail(params: dict[str, Any]) -> tuple[str, str]:
+        """Split a permission request into (headline, monospace body)."""
+        tool_call = params.get("toolCall") or {}
+        raw_input = tool_call.get("rawInput") or {}
+        kind = str(tool_call.get("kind") or params.get("kind") or "tool")
+        command = str(raw_input.get("command") or "").strip()
+        title = str(params.get("title") or tool_call.get("title") or "").strip()
+        if command:
+            return kind, command
+        if title:
+            return kind, title
+        return kind, ""
+
+    def _option_label(self, option: dict[str, Any]) -> str:
+        kind = str(option.get("kind") or "")
+        known = self.OPTION_LABELS.get(kind)
+        if known:
+            return known
+        return str(option.get("name") or kind or "option")
 
     async def _ask_permission(self, token: str, params: dict[str, Any]) -> None:
         options = params.get("options") or []
-        title = params.get("title") or (params.get("toolCall") or {}).get("title") or "tool call"
-        rows = [
-            [InlineKeyboardButton(str(option.get("name") or option.get("kind") or "option"),
-                                  callback_data=f"{token}:{index}")]
-            for index, option in enumerate(options)
-        ]
-        text = f"*Approval needed*\n{title}"
-        if params.get("toolCall", {}).get("input"):
-            text += f"\n```\n{str(params['toolCall']['input'])[:800]}\n```"
+        kind, detail = self._permission_detail(params)
+        rows = [[InlineKeyboardButton(self._option_label(option), callback_data=f"{token}:{index}")]
+                for index, option in enumerate(options)]
+        head = card("🛡️ approval needed", kind, [],
+                    "pick one · the run is paused until you answer")
+        body = head + (f"\n<pre>{esc(detail[:1200])}</pre>" if detail else "")
+        slot = self._pending_perm.get(token)
         try:
-            await self.app.bot.send_message(
-                self.chat_id, text, reply_markup=InlineKeyboardMarkup(rows),
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            sent = await self.app.bot.send_message(self.chat_id, body,
+                                                   reply_markup=InlineKeyboardMarkup(rows),
+                                                   parse_mode=ParseMode.HTML)
+            if slot is not None:
+                slot["message"] = sent
         except TelegramError as exc:
             log.warning("could not send approval prompt: %s", exc)
 
-    async def handle_permission_callback(self, token: str, index: int) -> bool:
+    async def handle_permission_callback(self, token: str, index: int) -> str | None:
+        """Record the user's choice, then rewrite the prompt into the decision."""
         slot = self._pending_perm.get(token)
         if slot is None:
-            return False
+            return None
         options = slot["params"].get("options") or []
-        if 0 <= index < len(options):
-            slot["optionId"] = options[index].get("optionId")
-            log.info("permission answered chat=%s choice=%s", self.chat_id,
-                     options[index].get("kind") or options[index].get("name"))
-            return True
-        return False
+        if not (0 <= index < len(options)):
+            return None
+        option = options[index]
+        slot["optionId"] = option.get("optionId")
+        label = self._option_label(option)
+        log.info("permission answered chat=%s choice=%s", self.chat_id, label)
+        kind, detail = self._permission_detail(slot["params"])
+        body = card("🛡️ approval", f"{label} · {now_wib()}", [("tool", kind)],
+                    "decision recorded")
+        if detail:
+            body += f"\n<pre>{esc(detail[:800])}</pre>"
+        message = slot.get("message")
+        if message is not None:
+            try:
+                await message.edit_text(body, parse_mode=ParseMode.HTML)
+            except BadRequest as exc:
+                log.debug("approval edit failed: %s", exc)
+        return label
+
+    async def _expire_permission(self, token: str) -> None:
+        slot = self._pending_perm.get(token)
+        if slot is None:
+            return
+        kind, detail = self._permission_detail(slot["params"])
+        body = card("🛡️ approval", f"expired · {now_wib()}", [("tool", kind)],
+                    "no answer in time, the tool call was denied")
+        if detail:
+            body += f"\n<pre>{esc(detail[:800])}</pre>"
+        message = slot.get("message")
+        if message is not None:
+            try:
+                await message.edit_text(body, parse_mode=ParseMode.HTML)
+            except BadRequest:
+                pass
 
     # ------------------------------------------------------------------ turn
-    async def ask(self, text: str, message=None) -> str:
+    async def ask(self, text: str, message=None, images: list[dict[str, Any]] | None = None) -> str:
         await self.ensure()
         self.busy = True
         self.last_used = time.time()
@@ -352,6 +405,7 @@ class ChatAgent:
             async with self.typing():
                 result = await asyncio.to_thread(
                     self.client.prompt, self.session_id, text,
+                    images=images or None,
                     timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
                 )
         except AcpError as exc:
@@ -531,7 +585,8 @@ class Transport:
                 if kind == "prompt":
                     message = payload
                     try:
-                        await agent.ask(message.text, message=message)
+                        await agent.ask(message.text, message=message,
+                                        images=getattr(payload, "images", None))
                     except AcpError as exc:
                         await message.reply_text(f"agent error: {exc}")
                     except Exception as exc:  # noqa: BLE001 - a turn must never kill the worker
@@ -639,6 +694,39 @@ class Transport:
                  "counters reset when the agent process restarts"),
             parse_mode=ParseMode.HTML,
         )
+
+    async def on_photo(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Forward a Telegram photo to the agent as an ACP image block."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        message = update.effective_message
+        if message is None:
+            return
+        chat_id = update.effective_chat.id
+        source = None
+        mime = "image/jpeg"
+        if message.photo:
+            source = message.photo[-1]
+        elif message.document and (message.document.mime_type or "").startswith("image/"):
+            source = message.document
+            mime = message.document.mime_type or mime
+        if source is None:
+            return
+        try:
+            telegram_file = await source.get_file()
+            raw = bytes(await telegram_file.download_as_bytearray())
+        except TelegramError as exc:
+            log.warning("photo download failed chat=%s: %s", chat_id, exc)
+            return await message.reply_text(f"could not fetch the image: {exc}")
+        block = {"type": "image", "mimeType": mime, "data": base64.b64encode(raw).decode("ascii")}
+        caption = (message.caption or "").strip() or "Describe this image."
+        log.info("photo chat=%s bytes=%s caption=%r", chat_id, len(raw), caption[:120])
+        payload = _TextOnly(caption, message, images=[block])
+        if self.agent_for(chat_id).busy:
+            depth = self.enqueue(chat_id, "prompt", payload)
+            await message.reply_text(f"queued (position {depth})")
+        else:
+            self.enqueue(chat_id, "prompt", payload)
 
     async def cmd_context(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """The agent renders a better context report than we could, so ask it."""
@@ -1085,10 +1173,8 @@ class Transport:
 
         try:
             token, index = data.rsplit(":", 1)
-            ok = await agent.handle_permission_callback(token, int(index))
-            await query.answer("recorded" if ok else "expired")
-            if ok:
-                await query.edit_message_text(f"{query.message.text}\n\n→ selected")
+            label = await agent.handle_permission_callback(token, int(index))
+            await query.answer(label or "expired")
         except (ValueError, AttributeError):
             await query.answer("bad callback")
 
@@ -1139,6 +1225,7 @@ class Transport:
         app.add_handler(CallbackQueryHandler(self.on_callback))
         app.add_error_handler(self.on_error)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
+        app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self.on_photo))
         app.add_handler(MessageHandler(filters.ALL, self.log_update), group=-1)
 
         await app.initialize()
@@ -1239,10 +1326,11 @@ async def app_send(app: Application, chat_id: int, text: str) -> None:
 
 
 class _TextOnly:
-    """Payload wrapper for /queue, which has text but no message object."""
+    """Payload wrapper for queued prompts: text, plus optional image blocks."""
 
-    def __init__(self, text: str, message: Any) -> None:
+    def __init__(self, text: str, message: Any, images: list[dict[str, Any]] | None = None) -> None:
         self.text = text
+        self.images = images or []
         self._message = message
 
     async def reply_text(self, text: str) -> Any:
