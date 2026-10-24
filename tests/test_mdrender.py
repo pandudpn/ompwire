@@ -73,5 +73,6 @@ def test_strip_html_unwraps_a_rendered_tool_block():
 
     body = tool_block("execute", "", command="ls | head -1", output="a<b")
     plain = strip_html(body)
-    assert "<" not in plain and "a<b" in plain
+    assert "<pre>" not in plain and "<code>" not in plain
+    assert "a<b" in plain  # escaped in HTML, restored by the plain-text fallback
     assert plain.splitlines()[0] == "🔧 execute"
