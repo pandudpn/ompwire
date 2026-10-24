@@ -28,11 +28,6 @@ ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "OMPWIRE_APPROVAL": ("agent", "approval_mode"),
     "OMPWIRE_STREAM_EDIT_INTERVAL": ("stream", "edit_interval"),
     "OMPWIRE_IDLE_TIMEOUT": ("session", "idle_timeout"),
-    "OMPWIRE_MEMORY_ENABLED": ("memory", "enabled"),
-    "OMPWIRE_HONCHO_URL": ("memory", "honcho_url"),
-    "OMPWIRE_HONCHO_WORKSPACE": ("memory", "honcho_workspace"),
-    "OMPWIRE_HONCHO_OBSERVER": ("memory", "honcho_observer"),
-    "OMPWIRE_HONCHO_TARGET": ("memory", "honcho_target"),
     "TELEGRAM_BOT_TOKEN": ("telegram", "bot_token"),
 }
 
@@ -60,16 +55,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "edit_interval": 1.0,
         "show_tool_calls": True,
         "show_usage": True,
-    },
-    "memory": {
-        "enabled": False,
-        "prefetch": True,
-        "honcho_url": "http://127.0.0.1:8000",
-        "honcho_workspace": "ompwire",
-        "honcho_observer": "ompwire",
-        "honcho_target": "user",
-        "honcho_api_key": "",  # secret: env only
-        "timeout": 8.0,
     },
     "mcp": {
         "servers": [],  # list of {name, command, args, env} passed to session/new
@@ -160,10 +145,7 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
             merged.setdefault(section, {})[key] = _coerce(env[env_name])
 
     # Scalar env names people already have exported share names with config keys.
-    for section, key, env_name in (
-        ("memory", "honcho_api_key", "HONCHO_API_KEY"),
-        ("telegram", "bot_token", "TELEGRAM_BOT_TOKEN"),
-    ):
+    for section, key, env_name in (("telegram", "bot_token", "TELEGRAM_BOT_TOKEN"),):
         if merged.get(section, {}).get(key, "") == "" and env.get(env_name):
             merged.setdefault(section, {})[key] = env[env_name]
 

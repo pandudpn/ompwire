@@ -5,7 +5,9 @@ build-backend = "hatchling.build"
 [project]
 name = "ompwire"
 version = "0.1.0"
-description = "Chat harness that drives an OMP agent over the Agent Client Protocol"
+description = "Transport-only chat bridge for OMP agents over the Agent Client Protocol"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = []
 

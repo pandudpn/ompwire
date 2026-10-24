@@ -9,7 +9,6 @@ from dataclasses import dataclass
 
 from .acp import AcpClient, AcpError, Update, pick_permission_option
 from .config import Config
-from .memory import build_preamble, fetch_prefetch
 from .store import SessionStore
 
 
@@ -144,26 +143,10 @@ class ChatSession:
             return None
 
     # ------------------------------------------------------------------ turn
-    def preamble(self) -> str:
-        if not self.config.get("memory", "enabled", False):
-            return ""
-        if not self.config.get("memory", "prefetch", True):
-            return ""
-        text = fetch_prefetch(
-            base_url=str(self.config.get("memory", "honcho_url", "")),
-            workspace=str(self.config.get("memory", "honcho_workspace", "")),
-            observer=str(self.config.get("memory", "honcho_observer", "")),
-            target=str(self.config.get("memory", "honcho_target", "")),
-            api_key=str(self.config.get("memory", "honcho_api_key", "") or ""),
-            timeout=float(self.config.get("memory", "timeout", 8.0)),
-        )
-        return build_preamble(text)
-
     def ask(self, text: str) -> str:
-        payload = self.preamble() + text
         result = self.client.prompt(
             self.session_id,
-            payload,
+            text,
             timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
         )
         self.printer.end_turn()

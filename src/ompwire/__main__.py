@@ -102,23 +102,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     finally:
         client.close()
 
-    if config.get("memory", "enabled", False):
-        from .memory import fetch_prefetch
-
-        text = fetch_prefetch(
-            base_url=str(config.get("memory", "honcho_url", "")),
-            workspace=str(config.get("memory", "honcho_workspace", "")),
-            observer=str(config.get("memory", "honcho_observer", "")),
-            target=str(config.get("memory", "honcho_target", "")),
-            api_key=str(config.get("memory", "honcho_api_key", "") or ""),
-            timeout=float(config.get("memory", "timeout", 8.0)),
-        )
-        if text:
-            print(f"ok   honcho prefetch: {len(text)} chars")
-        else:
-            print("warn honcho prefetch returned nothing (key/workspace/peer?)")
-    else:
-        print("--   honcho prefetch disabled (memory.enabled = false)")
+    if config.get("mcp", "servers"):
+        names = [str(server.get("name", "?")) for server in config.get("mcp", "servers", [])]
+        print(f"      mcp servers passed to session/new: {', '.join(names)}")
 
     token = str(config.get("telegram", "bot_token", "") or "")
     print(f"{'ok  ' if token else '--  '} telegram token {'set' if token else 'missing'}")
@@ -139,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--key", help="session key (default: cli:<cwd>)")
     chat.set_defaults(func=cmd_chat)
 
-    doctor = sub.add_parser("doctor", help="verify agent, store, memory and token")
+    doctor = sub.add_parser("doctor", help="verify the agent, the session store and the bot token")
     doctor.set_defaults(func=cmd_doctor)
 
     sessions = sub.add_parser("sessions", help="list recorded sessions")

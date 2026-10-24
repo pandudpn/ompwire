@@ -1,65 +1,167 @@
 # ompwire
 
-Chat harness that drives an [OMP](https://omp.sh) agent over the **Agent Client Protocol** instead of shipping its own agent loop. Telegram is the target front-end; the CLI in this repo is the same harness without the chat transport, so the agent path can be tested without a bot token.
+Drive an [OMP](https://omp.sh) agent from any chat surface over the **Agent Client Protocol**.
 
-## Why this shape
+`ompwire` is a transport. It moves messages between a chat interface and an OMP agent, renders what the agent streams back, answers its permission prompts, and remembers which ACP session belongs to which conversation. Everything else (agent loop, tools, MCP servers, context compaction, skills, memory, system prompt) stays inside the agent where it belongs.
 
-OMP already owns the expensive half: agent loop, tools, compaction, subagents, MCP sessions, permission prompts, usage accounting. What a chat front-end needs is a transport shell around `omp --mode acp`. Verified against **omp 18.12.6**:
+> Status: early. The CLI transport works and is covered by tests against the real agent binary. The Telegram transport is not written yet.
 
-- `initialize` → `agentInfo.name = "omp"`, `loadSession: true`, session `list/fork/resume/close`, MCP `http/sse`, prompt `image`
-- `session/new` → `sessionId` + `configOptions` (`model`, `mode`)
-- `session/prompt` → streams `session/update` (`agent_message_chunk`, `tool_call`, `usage_update`, `available_commands_update`), returns `{stopReason, usage}`
-- `session/load` → a **new** process resumes an existing conversation; the harness stores only `chat_key → sessionId`, never the transcript. It also **replays the transcript** as `session/update` frames, so a resumed chat must mute updates while loading or it dumps every prior answer into the room (implemented in `cli.ChatSession.open`).
-- `session/request_permission` (server → client) → reply `{outcome: {outcome, optionId}}`
+## Why
 
-`--mode acp` is not advertised in `omp --help`. That makes `tests/test_acp_contract.py` load-bearing: it asserts the wire shapes above against the real binary and fails on upstream drift. Pin the agent version you tested against.
+Most chat frontends for coding agents reimplement the agent: their own loop, their own tool registry, their own compaction, their own prompt. That duplication is where they rot.
+
+OMP already ships that machinery and speaks ACP over stdio. So a frontend only needs the parts a chat client actually owns: transport, streaming, approvals, session routing. That is what this repo is, and it is deliberately small enough to read in one sitting.
+
+## How it works
+
+```
+Telegram / CLI
+      │  text, images, commands
+      ▼
+   ompwire ──── session/prompt ──────────────▶ omp --mode acp
+      ▲   ◀─── session/update (stream) ───────┐   │
+      │   ◀─── session/request_permission ───┘   │  agent loop, tools,
+      │                                          │  MCP, compaction
+      ▼                                          │
+  sqlite: chat_key → sessionId ──────────────────┘
+```
+
+The harness keeps one row per conversation and nothing else. Conversation history lives inside the agent's own session, so a restart costs one `session/load` call instead of a transcript replay.
+
+## What it does
+
+- spawns and supervises one `omp --mode acp` subprocess per conversation
+- streams `agent_message_chunk` to the user as it arrives
+- turns `session/request_permission` into an answer (`allow`, `deny`, or an interactive prompt)
+- maps `chat_key → sessionId` in sqlite, and resumes with `session/load`
+- switches model and mode through the agent's own `configOptions`
+- passes through any MCP servers you list in config, per session
+
+## What it deliberately does not do
+
+- no memory layer (OMP owns `memory.backend`)
+- no tool registry, no skills loader, no system prompt, no compaction
+- no second agent loop competing with the one inside OMP
+- no model provider keys: the agent authenticates itself
+
+If a feature needs agent state, it belongs upstream in OMP, not here.
+
+## Requirements
+
+- `omp` on `PATH` (tested against 18.12.6; `--mode acp` is undocumented, see [Compatibility](#compatibility))
+- Python 3.11 or newer
+- No Python dependencies for the CLI
 
 ## Install
 
 ```bash
-cd ~/ompwire
+git clone https://github.com/pandudpn/ompwire
+cd ompwire
 uv venv && source .venv/bin/activate
 uv pip install -e .
 cp config.toml.example ~/.config/ompwire/config.toml
-cp .env.example .env && chmod 600 .env    # fill TELEGRAM_BOT_TOKEN later
-ompwire doctor
+```
+
+Verify the wire before using it:
+
+```bash
+$ ompwire doctor
+ok   agent command: /home/pandu/.local/bin/omp
+ok   session store writable: /home/pandu/.local/state/ompwire/sessions.db
+ok   ACP handshake: omp 18.12.6 (protocol 1)
+     capabilities: loadSession=True sessions=['close', 'fork', 'list', 'resume']
+ok   session/new: 01a16c3e · config options ['mode', 'model', 'thinking']
+     model now: omniroute/chat (174 available)
+--   telegram token missing
+ready · ompwire 0.1.0
 ```
 
 ## Use
 
 ```bash
-ompwire chat                       # interactive, resumes the session for this cwd
+ompwire chat                        # interactive; resumes this cwd's session
 ompwire chat -q "explain this repo" # one-shot
-ompwire chat --new                 # handled in-session with /new
-ompwire sessions                   # recorded chat_key -> sessionId rows
-ompwire config                     # resolved config, secrets redacted
+ompwire sessions                    # recorded chat_key → sessionId
+ompwire config                      # resolved config, secrets redacted
 ```
 
-In-session: `/new`, `/model <id>`, `/mode <default|plan>`, `/exit`.
+In session: `/new`, `/model <id>`, `/mode <default|plan>`, `/help`, `/exit`.
 
-## Layout
+A resumed turn looks like this. The process is new, the conversation is not:
 
 ```
-src/ompwire/acp.py       JSON-RPC/stdio ACP client (no dependencies)
-src/ompwire/cli.py       turn loop, streaming printer, permission prompts
-src/ompwire/memory.py    optional Honcho prefetch preamble
-src/ompwire/store.py     sqlite chat_key -> sessionId
-src/ompwire/config.py    TOML + env merge, defaults, redaction
-tests/                   live contract tests against `omp --mode acp`
+$ ompwire chat -q "what did I ask you to remember?"
+ompwire · omp 18.12.6 · session resumed 01a16c3e · cwd /home/pandu
+OMPWIRE-OK
+  [turn] end_turn · in 114 out 7 cached 45952
 ```
 
-## Config format
+## Configuration
 
-TOML, not YAML: Python 3.11+ reads it with stdlib `tomllib` (no PyYAML dependency), it cannot express the indentation traps that bite YAML, and secrets live in `.env` rather than in the config file — so the config stays safe to commit as `config.toml.example`.
+TOML at `~/.config/ompwire/config.toml` (fallback `~/.ompwire/config.toml`). Secrets live in `.env`, not in the config, so the file is safe to commit as `config.toml.example`.
 
-## Not built yet
+| Section | Keys |
+|---|---|
+| `[acp]` | `command`, `args`, `startup_timeout`, `turn_timeout` |
+| `[agent]` | `cwd`, `model`, `mode`, `approval_mode`, `permission_policy` |
+| `[session]` | `store`, `idle_timeout` |
+| `[stream]` | `enabled`, `edit_interval`, `show_tool_calls`, `show_usage` |
+| `[[mcp.servers]]` | `name`, `command`, `args`, forwarded to `session/new` |
+| `[telegram]` | `bot_token` (env), `allowed_users`, `home_channel` |
 
-- Telegram transport (`telegram.py`) — needs its own bot token; sharing the Hermes bot token would make two pollers fight over the same updates
-- cron/webhook triggers
-- multi-platform adapters
+Every key can be set through an `OMPWIRE_*` environment variable; `ompwire config` prints the merged result with secrets masked.
 
-## Honest limits
+TOML rather than YAML: Python 3.11+ parses it with stdlib `tomllib` (no PyYAML), and it has no indentation traps.
 
-- One ACP subprocess per conversation: fine for personal use, ~44k baseline input tokens per turn (OMP's system prompt), so keep the process warm instead of spawning per message.
-- Honcho prefetch is one HTTP call with defensive parsing; it is not yet exercised against a live key.
-- OMP memory (`mnemopi`/`hindsight`) and Honcho can both be active and will drift apart. Pick one owner for long-term memory.
+## The ACP contract
+
+What ompwire relies on, verified against the live binary:
+
+| Method | Direction | Used for |
+|---|---|---|
+| `initialize` | → | handshake; assert agent name, `loadSession`, capabilities |
+| `session/new` | → | open a conversation; read `configOptions` |
+| `session/load` | → | resume after a restart (agent replays the transcript, see below) |
+| `session/prompt` | → | one turn; returns `stopReason` and `usage` |
+| `session/update` | ← | `agent_message_chunk`, `tool_call`, `usage_update`, `available_commands_update` |
+| `session/request_permission` | ← | approval request; answered with an `optionId` |
+| `session/set_config_option` | → | switch model, mode, thinking |
+| `session/cancel` | → | stop a running turn |
+| `session/close` | → | release the session |
+
+## Design notes
+
+These are the sharp edges found while building it. They are the reason `tests/` runs against the real binary rather than a mock.
+
+- **`session/load` replays the transcript.** A resumed session re-emits prior assistant messages as `session/update` frames. A frontend that keeps its update handler attached dumps every old answer into the chat. `ChatSession.open` mutes updates while loading.
+- **Permissions are option ids, not booleans.** `session/request_permission` returns options with `kind` (`allow_once`, `reject_once`, ...); the reply is `{outcome: {outcome: "selected", optionId}}`. Always pick from what the agent offered.
+- **Model selection is a config option.** There is no ACP-level model field; it is `configOptions` entry `id = "model"`, set through `session/set_config_option`.
+- **Keep the process warm.** A turn costs a large baseline of input tokens (OMP's own prompt), most of it cache-served on later turns. Spawning per message throws that away.
+- **One subprocess per conversation** is the whole concurrency model. That is enough for a personal assistant and not enough for a public bot.
+
+## Development
+
+```bash
+make install   # venv + editable install + telegram extra
+make test      # contract tests against the real agent
+make doctor
+```
+
+Tests skip cleanly when `omp` is absent from `PATH`. They never mock the wire: their job is to fail when the agent changes shape.
+
+## Roadmap
+
+- [ ] Telegram transport (`ompwire serve`): long polling, allowlist, edit-in-place streaming, inline-keyboard approvals
+- [ ] idle eviction so an unused conversation releases its subprocess
+- [ ] cron or webhook triggers for unattended turns
+- [ ] more transports (the CLI and Telegram paths already share one interface)
+
+## Compatibility
+
+`omp --mode acp` is not listed in `omp --help`. It works, and it is what this project is built on, but undocumented modes can change without a deprecation cycle.
+
+Pin the agent version you tested against, and run `ompwire doctor` after an agent upgrade. `tests/test_acp_contract.py` asserts the shapes above so drift shows up as a failing test rather than a broken chat.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
