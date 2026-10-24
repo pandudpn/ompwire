@@ -82,3 +82,32 @@ def test_pick_indices_map_to_the_full_option_list():
     zai_indices = providers["zai"]
     assert [values[i] for i in zai_indices] == ["zai/a", "zai/b"]
     assert zai_indices == [1, 2]
+
+
+def test_uptime_is_compact():
+    from ompwire.format import uptime
+
+    assert uptime(8) == "8s"
+    assert uptime(72) == "1m 12s"
+    assert uptime(3725) == "1h 02m"
+    assert uptime(90_000) == "1d 01h"
+
+
+def test_grid_pads_labels_and_escapes_values():
+    from ompwire.format import grid
+
+    block = grid([("cwd", "/home/pandu"), ("model", "a<b")])
+    assert block.startswith("<pre>") and block.endswith("</pre>")
+    assert "cwd    /home/pandu" in block
+    assert "a&lt;b" in block
+
+
+def test_card_and_change_render_html():
+    from ompwire.format import card, change
+
+    rendered = card("🟢 ompwire", "0.1.0", [("agent", "omp 18.12.6")], "footer")
+    assert "<b>🟢 ompwire</b>" in rendered
+    assert "<pre>" in rendered and "footer" in rendered
+    line = change("model", "old/model", "new/model", "note")
+    assert "<s>old/model</s>" in line and "<code>new/model</code>" in line
+    assert "note" in line

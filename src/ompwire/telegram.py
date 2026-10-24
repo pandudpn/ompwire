@@ -31,6 +31,9 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
 from .acp import AcpClient, AcpError, Update as AcpUpdate, pick_permission_option
 from . import __version__
 from .config import Config, approval_policy, save_override
+from .format import card, change, esc, help_sections, now_wib, tool_block
+from .mdrender import to_html, to_plain
+from .format import uptime as fmt_uptime
 from .store import SessionStore
 
 log = logging.getLogger("ompwire.telegram")
@@ -272,7 +275,7 @@ class ChatAgent:
         log.info("turn start chat=%s session=%s input_chars=%s", self.chat_id,
                  self.session_id[:8], len(text))
         text_buffer: list[str] = []
-        tool_buffer: list[str] = []
+        trace: dict[str, dict[str, str]] = {}
         sent: list[Any] = []
         state = {"text_msg": None, "tool_msg": None, "last_edit": 0.0, "text": "", "tools": 0}
 
@@ -285,24 +288,26 @@ class ChatAgent:
             if not force and now - state["last_edit"] < interval:
                 return
             state["last_edit"] = now
-            parts = _chunks(joined)
+            parts = _chunks(joined, 3600)
             if state["text_msg"] is None:
-                state["text_msg"] = await self.app.bot.send_message(self.chat_id, parts[0])
+                state["text_msg"] = await self.send_md(parts[0])
                 sent.append(state["text_msg"])
             elif joined != state["text"]:
-                try:
-                    await state["text_msg"].edit_text(parts[0])
-                except BadRequest as exc:
-                    if "not modified" not in str(exc).lower():
-                        log.debug("text edit failed: %s", exc)
+                await self.edit_md(state["text_msg"], parts[0])
                 for extra in parts[1:]:
-                    sent.append(await self.app.bot.send_message(self.chat_id, extra))
+                    sent.append(await self.send_md(extra))
             state["text"] = joined
 
         async def flush_tools() -> None:
-            if not tool_buffer:
+            if not trace:
                 return
-            body = "\n".join(tool_buffer)[:TELEGRAM_LIMIT]
+            blocks = [
+                tool_block(entry.get("kind", "tool"), entry.get("title", ""),
+                           entry.get("command", ""), entry.get("output", ""),
+                           entry.get("status", ""))
+                for entry in trace.values()
+            ]
+            body = "\n".join(blocks)[-TELEGRAM_LIMIT:]
             if state["tool_msg"] is None:
                 state["tool_msg"] = await self.app.bot.send_message(self.chat_id, body)
                 sent.append(state["tool_msg"])
@@ -320,11 +325,24 @@ class ChatAgent:
                 if update.kind == "agent_message_chunk" and update.text:
                     text_buffer.append(update.text)
                     await flush_text()
-                elif update.kind == "tool_call" and self.verbose:
-                    state["tools"] += 1
-                    self.tools_used += 1
-                    tool_buffer.append(f"🔧 {update.tool_title or 'tool'}")
-                    log.info("tool call chat=%s title=%s", self.chat_id, update.tool_title)
+                elif update.kind in {"tool_call", "tool_call_update"} and self.verbose:
+                    raw = update.raw
+                    call_id = str(raw.get("toolCallId") or f"anon{len(trace)}")
+                    entry = trace.setdefault(call_id, {"kind": "tool"})
+                    if update.kind == "tool_call":
+                        state["tools"] += 1
+                        self.tools_used += 1
+                        entry["kind"] = str(raw.get("kind") or "tool")
+                        entry["title"] = str(raw.get("title") or "")
+                        entry["command"] = str((raw.get("rawInput") or {}).get("command") or "")
+                        log.info("tool call chat=%s kind=%s command=%r", self.chat_id,
+                                 entry["kind"], entry["command"][:120] or entry["title"][:120])
+                    entry["status"] = str(raw.get("status") or entry.get("status", ""))
+                    output = raw.get("rawOutput") or {}
+                    chunks = [item.get("text", "") for item in (output.get("content") or [])
+                              if isinstance(item, dict)]
+                    if any(chunks):
+                        entry["output"] = "\n".join(chunks)
                     await flush_tools()
 
         drain_task = asyncio.create_task(drain())
@@ -365,6 +383,24 @@ class ChatAgent:
             except TelegramError:
                 pass
         return result.text
+
+    async def send_md(self, text: str):
+        """Send agent markdown as Telegram HTML, degrading to plain text on refusal."""
+        try:
+            return await self.app.bot.send_message(self.chat_id, to_html(text),
+                                                   parse_mode=ParseMode.HTML)
+        except BadRequest as exc:
+            log.warning("html send rejected (%s); falling back to plain text", exc)
+            return await self.app.bot.send_message(self.chat_id, to_plain(text))
+
+    async def edit_md(self, message: Any, text: str) -> None:
+        try:
+            await message.edit_text(to_html(text), parse_mode=ParseMode.HTML)
+        except BadRequest as exc:
+            if "not modified" in str(exc).lower():
+                return
+            log.warning("html edit rejected (%s); falling back to plain text", exc)
+            await message.edit_text(to_plain(text))
 
     @contextlib.asynccontextmanager
     async def typing(self):
@@ -502,7 +538,11 @@ class Transport:
                     message, session_id = payload
                     try:
                         await agent.load(session_id)
-                        await message.reply_text(f"resumed {session_id[:8]}")
+                        log.info("resume chat=%s session=%s", chat_id, session_id[:8])
+                        await message.reply_text(
+                            self.session_card(agent, "⏪ resumed", "history lives in the agent session"),
+                            parse_mode=ParseMode.HTML,
+                        )
                     except AcpError as exc:
                         await message.reply_text(f"resume failed: {exc}")
             finally:
@@ -522,12 +562,28 @@ class Transport:
             return
         self.enqueue(update.effective_chat.id, "prompt", message)
 
+    def session_card(self, agent: ChatAgent, title: str, note: str = "") -> str:
+        options = getattr(agent, "options", {}) or {}
+        rows = [
+            ("session", agent.session_id[:8]),
+            ("model", (options.get("model") or {}).get("currentValue", "?")),
+            ("mode", (options.get("mode") or {}).get("currentValue", "?")),
+            ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
+            ("approval", approval_policy(self.config)),
+            ("cwd", agent.cwd),
+        ]
+        return card(title, now_wib(), rows, note)
+
     async def cmd_new(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
-        session_id = await agent.new_session()
-        await update.effective_message.reply_text(f"new session {session_id[:8]} in {agent.cwd}")
+        await agent.new_session()
+        log.info("new session chat=%s session=%s", update.effective_chat.id, agent.session_id[:8])
+        await update.effective_message.reply_text(
+            self.session_card(agent, "🆕 new session", "old sessions stay resumable with /sessions"),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def cmd_stop(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -543,25 +599,40 @@ class Transport:
         queue = self.queues.get(update.effective_chat.id)
         alive = agent.client is not None and agent.client.alive
         options = getattr(agent, "options", {}) or {}
-        model = (options.get("model") or {}).get("currentValue", "?")
-        mode = (options.get("mode") or {}).get("currentValue", "?")
-        thinking = (options.get("thinking") or {}).get("currentValue", "-")
-        uptime = int(time.time() - agent.started_at) if alive else 0
+        rows = [
+            ("session", agent.session_id[:8] or "-"),
+            ("process", f"{'alive' if alive else 'stopped'} · {fmt_uptime(time.time() - agent.started_at)}"),
+            ("state", "busy" if agent.busy else "idle"),
+            ("queue", queue.qsize() if queue else 0),
+            ("model", (options.get("model") or {}).get("currentValue", "?")),
+            ("mode", (options.get("mode") or {}).get("currentValue", "?")),
+            ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
+            ("cwd", agent.cwd),
+            ("approval", approval_policy(self.config)),
+            ("trace", "verbose" if agent.verbose else "quiet"),
+            ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
+            ("clock", now_wib()),
+        ]
         await update.effective_message.reply_text(
-            f"ompwire {__version__} · session {agent.session_id[:8] or '-'}\n"
-            f"cwd {agent.cwd}\n"
-            f"model {model} · mode {mode} · thinking {thinking}\n"
-            f"process {'alive' if alive else 'stopped'} ({uptime}s) · busy={agent.busy}\n"
-            f"queue {queue.qsize() if queue else 0} · verbose={agent.verbose}\n"
-            f"approval {approval_policy(self.config)} · turns {agent.turns} · tools {agent.tools_used}"
+            card("📊 status", "", rows), parse_mode=ParseMode.HTML
         )
 
     async def cmd_usage(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
-        u = self.agent_for(update.effective_chat.id).usage
+        agent = self.agent_for(update.effective_chat.id)
+        usage = agent.usage
+        rows = [
+            ("turns", usage["turns"]),
+            ("input", f"{usage['input']:,}"),
+            ("output", f"{usage['output']:,}"),
+            ("cached", f"{usage['cached']:,}"),
+            ("tools", agent.tools_used),
+        ]
         await update.effective_message.reply_text(
-            f"turns {u['turns']} · input {u['input']} · output {u['output']} · cached {u['cached']}"
+            card("🧮 usage", f"session {agent.session_id[:8]}", rows,
+                 "counters reset when the agent process restarts"),
+            parse_mode=ParseMode.HTML,
         )
 
     async def cmd_sessions(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -573,13 +644,15 @@ class Transport:
         rows = (data.get("sessions") or [])[:10]
         if not rows:
             return await update.effective_message.reply_text("no sessions recorded")
-        lines = []
-        for row in rows:
-            sid = str(row.get("sessionId") or "")
-            meta = row.get("_meta") or {}
-            lines.append(f"{sid[:8]}  {row.get('updatedAt', '')[:16]}  {meta.get('size', '?')}B")
-        lines.append("\n/resume <id> to continue one")
-        await update.effective_message.reply_text("\n".join(lines))
+        table = "\n".join(
+            f"{str(row.get('sessionId') or '')[:8]}  {str(row.get('updatedAt') or '')[:16]}  "
+            f"{((row.get('_meta') or {}).get('size') or '?')}B"
+            for row in rows
+        )
+        body = card("🗂 sessions", f"{len(rows)} of {len(data.get('sessions') or [])} · {agent.cwd}",
+                    [], "/resume <id> to continue one")
+        body = body.replace("</i>", "</i>\n<pre>" + esc(table) + "</pre>")
+        await update.effective_message.reply_text(body, parse_mode=ParseMode.HTML)
 
     async def cmd_resume(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -610,8 +683,12 @@ class Transport:
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
         try:
-            new_id = await agent.fork()
-            await update.effective_message.reply_text(f"forked into {new_id[:8]}")
+            await agent.fork()
+            log.info("fork chat=%s session=%s", update.effective_chat.id, agent.session_id[:8])
+            await update.effective_message.reply_text(
+                self.session_card(agent, "🌿 forked", "context copied into a new session id"),
+                parse_mode=ParseMode.HTML,
+            )
         except AcpError as exc:
             await update.effective_message.reply_text(f"fork failed: {exc}")
 
@@ -627,8 +704,13 @@ class Transport:
             return await update.effective_message.reply_text(f"not a directory: {target}")
         agent = self.agent_for(update.effective_chat.id)
         agent.cwd = target
-        session_id = await agent.new_session()
-        await update.effective_message.reply_text(f"cwd {target}, new session {session_id[:8]}")
+        await agent.new_session()
+        log.info("cwd change chat=%s cwd=%s session=%s", update.effective_chat.id, target,
+                 agent.session_id[:8])
+        await update.effective_message.reply_text(
+            self.session_card(agent, "📁 cwd changed", "a new session starts in that directory"),
+            parse_mode=ParseMode.HTML,
+        )
 
     # -------------------------------------------------- config pickers (UI)
     PAGE_SIZE = 8
@@ -734,7 +816,8 @@ class Transport:
         current = self._current(agent, config_id)
         log.info("config change %s: %s -> %s (chat=%s)", config_id, previous, current, chat_id)
         if current != previous:
-            await self.announce(chat_id, f"{config_id}: {previous} → {current}")
+            await self.announce(chat_id, change(config_id, previous, current,
+                                                f"session {agent.session_id[:8]}"))
 
     async def cmd_model(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -761,7 +844,7 @@ class Transport:
         """Post a one-line status/config notice and mirror it into the log."""
         log.info("notice chat=%s %s", chat_id, line.replace("\n", " | "))
         try:
-            await self.app.bot.send_message(chat_id, line)
+            await self.app.bot.send_message(chat_id, line, parse_mode=ParseMode.HTML)
         except TelegramError as exc:
             log.warning("notice send failed chat=%s: %s", chat_id, exc)
 
@@ -774,9 +857,14 @@ class Transport:
             rows = [[InlineKeyboardButton(("• " if value == policy else "") + value,
                                           callback_data=f"ap:{value}")]
                     for value in ("ask", "allow", "deny")]
+            body = card("🛡️ approval", policy, [
+                ("ask", "buttons in chat, then allow or reject"),
+                ("allow", "every tool call auto-approved"),
+                ("deny", "every tool call auto-rejected"),
+                ("timeout", f"{float(self.config.get('approval', 'timeout', 120)):.0f}s, then deny"),
+            ])
             return await update.effective_message.reply_text(
-                f"approval: {policy}\nask = buttons · allow = auto-approve · deny = auto-reject",
-                reply_markup=InlineKeyboardMarkup(rows),
+                body, reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML
             )
         value = ctx.args[0].lower()
         if value not in {"ask", "allow", "deny"}:
@@ -788,7 +876,8 @@ class Transport:
         self.config.data.setdefault("approval", {})["policy"] = value
         path = save_override("approval", "policy", value)
         log.info("config change approval.policy %s -> %s (persisted to %s)", previous, value, path)
-        await self.announce(chat_id, f"approval policy: {previous} → {value}")
+        await self.announce(chat_id, change("approval.policy", previous, value,
+                                            "ask = buttons · allow = auto-approve · deny = auto-reject"))
 
     async def cmd_verbose(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -873,8 +962,17 @@ class Transport:
     async def cmd_help(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
-        lines = [f"/{name} — {desc}" for name, desc in COMMANDS]
-        await update.effective_message.reply_text("\n".join(lines) + "\n\n" + FORWARD_HINT)
+        names = dict(COMMANDS)
+        groups = [
+            ("session", ["new", "sessions", "resume", "continue", "fork", "cwd", "kill"]),
+            ("agent", ["model", "mode", "thinking", "approve", "trace", "verbose", "yolo", "skills"]),
+            ("running", ["stop", "queue", "steer", "status", "usage"]),
+            ("info", ["whoami", "help"]),
+        ]
+        sections = [(heading, [(name, names[name]) for name in wanted if name in names])
+                    for heading, wanted in groups]
+        body = help_sections(sections) + "\n\n<i>" + esc(FORWARD_HINT) + "</i>"
+        await update.effective_message.reply_text(body, parse_mode=ParseMode.HTML)
 
     async def on_callback(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -1016,32 +1114,33 @@ class Transport:
         chat_id = self._home_chat()
         if chat_id is None:
             return
-        lines = [f"ompwire {__version__} online as @{username}"]
+        rows: list[tuple[str, object]] = []
         try:
             agent = self.agent_for(chat_id)
             await agent.ensure()
-            info = agent.client.initialize() if not agent.info else agent.info
-        except Exception as exc:  # noqa: BLE001 - a banner must never block startup
-            lines.append(f"agent: failed to start ({exc})")
-            log.warning("startup banner agent probe failed: %s", exc)
-        else:
             options = getattr(agent, "options", {}) or {}
-            lines += [
-                f"agent: omp {agent.agent_version or '?'} · session {agent.session_id[:8]}",
-                f"model: {(options.get('model') or {}).get('currentValue', '?')}"
-                f" · mode {(options.get('mode') or {}).get('currentValue', '?')}"
-                f" · thinking {(options.get('thinking') or {}).get('currentValue', '-')}",
-                f"cwd: {agent.cwd}",
+            rows += [
+                ("agent", f"omp {agent.agent_version or '?'}"),
+                ("session", agent.session_id[:8]),
+                ("model", (options.get("model") or {}).get("currentValue", "?")),
+                ("mode", f"{(options.get('mode') or {}).get('currentValue', '?')}"
+                         f" · thinking {(options.get('thinking') or {}).get('currentValue', '-')}"),
+                ("cwd", agent.cwd),
             ]
-        servers = [str(s.get("name")) for s in (self.config.get("mcp", "servers") or [])]
-        lines += [
-            f"approval: {approval_policy(self.config)}",
-            f"mcp: {', '.join(servers) if servers else 'none'}",
-            f"allowed users: {', '.join(str(u) for u in sorted(self.allowed))}",
-            f"store: {self.config.get('session', 'store')}",
+        except Exception as exc:  # noqa: BLE001 - a banner must never block startup
+            rows.append(("agent", f"failed: {exc}"))
+            log.warning("startup banner agent probe failed: %s", exc)
+        servers = [str(server.get("name")) for server in (self.config.get("mcp", "servers") or [])]
+        rows += [
+            ("approval", f"{approval_policy(self.config)} · {float(self.config.get('approval', 'timeout', 120)):.0f}s"),
+            ("mcp", ", ".join(servers) if servers else "none"),
+            ("users", ", ".join(str(u) for u in sorted(self.allowed)) or "none"),
+            ("store", self.config.get("session", "store", "")),
+            ("clock", now_wib()),
         ]
-        body = "\n".join(lines)
-        log.info("startup banner: %s", body.replace("\n", " | "))
+        body = card("🟢 ompwire", f"{__version__} · @{username}", rows,
+                    "send /help for commands · /status for live state")
+        log.info("startup banner: %s", " | ".join(f"{k}={v}" for k, v in rows))
         try:
             await app_send(self.app, chat_id, body)
         except TelegramError as exc:
@@ -1051,10 +1150,17 @@ class Transport:
         chat_id = self._home_chat()
         if chat_id is None:
             return
-        uptime = int(time.time() - self.started_at)
-        active = [cid for cid, a in self.agents.items() if a.client is not None and a.client.alive]
-        body = (f"ompwire stopping · uptime {uptime}s · {len(active)} agent process(es) closed")
-        log.info("shutdown notice: %s", body)
+        active = [cid for cid, agent in self.agents.items()
+                  if agent.client is not None and agent.client.alive]
+        rows = [
+            ("uptime", fmt_uptime(time.time() - self.started_at)),
+            ("agents", f"{len(active)} process(es) closed"),
+            ("turns", sum(agent.turns for agent in self.agents.values())),
+            ("tools", sum(agent.tools_used for agent in self.agents.values())),
+        ]
+        body = card("🔴 ompwire stopping", now_wib(), rows,
+                    "state is persisted, the next start resumes the same sessions")
+        log.info("shutdown notice: %s", " | ".join(f"{k}={v}" for k, v in rows))
         try:
             await app_send(self.app, chat_id, body)
         except TelegramError as exc:
@@ -1062,7 +1168,7 @@ class Transport:
 
 
 async def app_send(app: Application, chat_id: int, text: str) -> None:
-    await app.bot.send_message(chat_id, text)
+    await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
 
 
 class _TextOnly:
