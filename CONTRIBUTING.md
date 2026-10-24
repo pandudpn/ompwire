@@ -67,18 +67,39 @@ that is not in `IMPLEMENTED`.
 
 ## Releases
 
-Releases are tags, because the install path is a git install:
+Nobody types a version three times. `scripts/release/version.py` owns it, and it is the only
+place a version is written:
 
 ```bash
-# bump pyproject.toml and src/ompwire/__init__.py together, then
-git tag -a vX.Y.Z -m "ompwire X.Y.Z"
-git push origin vX.Y.Z
+python -m scripts.release.version show            # what the files say
+python -m scripts.release.version bump minor      # write 1.5.0 into both files
+python -m scripts.release.version check v1.5.0    # the guard the workflow runs
 ```
 
-The tag triggers `.github/workflows/release.yml`, which refuses to publish if the tag and the
-two version strings disagree, runs the suite, builds `sdist` and wheel, and creates the GitHub
-release with generated notes and the artifacts attached. `install.sh` resolves the newest
-`vX.Y.Z` tag, so a bad tag is an install-time bug for everyone.
+Two ways to cut a release, both from the Actions tab or the terminal:
+
+```bash
+# 1. the button computes the tag for you
+gh workflow run release -f bump=patch
+
+# 2. or tag it yourself, after bumping
+python -m scripts.release.version bump patch
+git commit -am "chore(release): v$(python -m scripts.release.version show)"
+git tag -a v1.5.0 -m "ompwire 1.5.0" && git push origin v1.5.0
+```
+
+Either way one workflow run does the rest: refuse a tag that disagrees with `pyproject.toml` or
+`src/ompwire/__init__.py`, run lint and the suite, install from the tag with `install.sh` and
+compare the reported version, build `sdist` and wheel once, `twine check` them, install the wheel
+in a clean venv, publish the checksums, and create the GitHub release with generated notes.
+Artifacts are attached, so the release page has the exact files that were checked.
+
+A version with a suffix (`v1.5.0-rc.1`) is published as a prerelease. `install.sh` only resolves
+`^vX.Y.Z$`, so a prerelease is never what `curl … | bash` picks up.
+
+`gh workflow run release -f bump=patch` commits the bump and the tag itself. That push does not
+trigger a second run, which is why the same run also builds and publishes: the alternative is a
+version bump sitting on `main` with no release behind it.
 
 ## Questions
 

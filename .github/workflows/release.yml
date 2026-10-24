@@ -1,102 +1,215 @@
 name: release
 
-# A tag is the release. This workflow exists to make that tag trustworthy: the version has to
-# agree everywhere, the suite has to pass, and the tag has to install as a real user would.
+# A release starts either from a tag someone pushed, or from the Actions button that computes
+# the tag and commits the bump. Both paths run the same gates, in the same run: a tag pushed by
+# GITHUB_TOKEN does not trigger a second workflow, so a workflow that relied on that would leave
+# a bumped version with no release behind it.
+#
+# The version is decided in one place, scripts/release/version.py, which writes pyproject.toml
+# and src/ompwire/__init__.py together. A tag that disagrees with either file is refused before
+# anything is built.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: Existing tag to (re)build and publish
-        required: true
+      bump:
+        description: "Bump the version and tag it"
+        required: false
+        type: choice
+        default: none
+        options: [none, patch, minor, major]
+      version:
+        description: "Explicit version instead of a bump (for example 1.4.0-rc.1)"
+        required: false
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
-  verify:
+  prepare:
+    name: Resolve the version
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
-      - name: Tag and version must agree
-        # Two version strings and a tag that drift apart is the failure this guards: the tag
-        # is what install.sh resolves, so a mismatch installs something nobody meant to ship.
+
+      - name: Refuse a tag that disagrees with the files
+        if: github.event_name == 'push'
+        run: python -m scripts.release.version check "${GITHUB_REF_NAME}"
+
+      - name: Compute the next version, commit it, tag it
+        if: github.event_name == 'workflow_dispatch' && (inputs.version != '' || inputs.bump != 'none')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WANTED: ${{ inputs.version }}
+          KIND: ${{ inputs.bump }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          [ -n "${{ inputs.tag }}" ] && tag="${{ inputs.tag }}"
-          pyproject=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
-          module=$(python -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/ompwire/__init__.py').read_text()).group(1))")
-          echo "tag=${tag#v}  pyproject=${pyproject}  module=${module}"
-          if [ "${tag#v}" != "$pyproject" ] || [ "$pyproject" != "$module" ]; then
-            echo "::error::tag ${tag} does not match pyproject ${pyproject} / module ${module}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$WANTED" ]; then
+            version=$(python -m scripts.release.version bump "$WANTED")
+          else
+            version=$(python -m scripts.release.version bump "$KIND")
+          fi
+          git add pyproject.toml src/ompwire/__init__.py
+          git commit -m "chore(release): v${version}"
+          git tag -a "v${version}" -m "ompwire ${version}"
+          git push origin "HEAD:${GITHUB_REF_NAME}" --follow-tags
+          echo "TAG=v${version}" >> "$GITHUB_ENV"
+
+      - name: Report what this run releases
+        id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${TAG:-}"
+            if [ -z "$tag" ]; then
+              # Dispatch with no bump and no version: release whatever HEAD is tagged with.
+              tag=$(git describe --tags --exact-match 2>/dev/null || true)
+            fi
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::nothing to release. Push a vX.Y.Z tag, or dispatch with a bump."
             exit 1
           fi
+          version="${tag#v}"
+          case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "releasing ${tag} (prerelease=${prerelease})"
+
+  verify:
+    name: Tests and lint
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
       - name: ruff
         run: ruff check src tests
       - name: pytest
         run: python -m pytest -q
+      - name: The tag still matches the files it ships
+        run: python -m scripts.release.version check "${{ needs.prepare.outputs.tag }}"
 
   install-smoke:
-    needs: verify
+    name: The tag installs the way a user installs it
+    needs: [prepare, verify]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
-      - name: The tag installs and reports its own version
-        # install.sh is the path every user takes, so it is tested against the tag, not HEAD.
-        # The repository may be private, so git gets the workflow token instead.
+      - name: install.sh resolves this tag
+        # install.sh is the path every user takes, so it runs against the tag itself and not
+        # against HEAD. The repository may be private, so git gets the workflow token.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
           python -m pip install --quiet uv
           export UV_TOOL_DIR="$RUNNER_TEMP/tools" UV_TOOL_BIN_DIR="$RUNNER_TEMP/bin"
           export OMPWIRE_NO_PATH_EDIT=1 OMPWIRE_NO_SETUP=1 OMPWIRE_NO_OMP=1
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          ./install.sh --ref "${GITHUB_REF_NAME}"
+          ./install.sh --ref "$TAG"
           got=$(ompwire --version | awk '{print $2}')
-          want="${GITHUB_REF_NAME#v}"
-          echo "installed ${got}, tag ${want}"
-          [ "$got" = "$want" ] || { echo "::error::installed $got, expected $want"; exit 1; }
+          echo "installed ${got}, tag ${VERSION}"
+          [ "$got" = "$VERSION" ] || { echo "::error::installed $got, expected $VERSION"; exit 1; }
           ompwire help | grep -q 'ompwire gateway start'
 
-  publish:
-    needs: [verify, install-smoke]
+  build:
+    name: Build sdist and wheel
+    needs: [prepare, verify]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip build
-      - name: Build sdist and wheel
+      - run: python -m pip install --upgrade pip build twine
+      - name: Build once
+        # Built here and promoted by the publish job, so what gets attached is the artifact that
+        # was checked, not a second build of the same commit.
         run: python -m build
-      - name: Publish
-        # Generated notes come from the commits; no hand-written summary to drift or mangle.
+      - name: twine check
+        run: python -m twine check dist/*
+      - name: Install the wheel in a clean venv
+        run: |
+          python -m venv "$RUNNER_TEMP/wheelcheck"
+          "$RUNNER_TEMP/wheelcheck/bin/pip" install --quiet dist/*.whl
+          "$RUNNER_TEMP/wheelcheck/bin/ompwire" --version
+      - name: Checksums
+        run: cd dist && sha256sum * | tee SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish
+    needs: [prepare, build, install-smoke]
+    runs-on: ubuntu-latest
+    # An environment lets the repository require a human approval before anything is published.
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: dist
+          path: dist
+      - name: Create or update the release
+        # Generated notes come from the commits, so there is no hand-written summary to drift or
+        # to mangle. Re-running replaces the assets instead of failing.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          [ -n "${{ inputs.tag }}" ] && tag="${{ inputs.tag }}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/* --clobber
-          else
-            gh release create "$tag" dist/* --title "ompwire ${tag#v}" --generate-notes
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "$PRERELEASE" = "true" ]; then
+              gh release create "$TAG" --title "ompwire ${VERSION}" --generate-notes --prerelease
+            else
+              gh release create "$TAG" --title "ompwire ${VERSION}" --generate-notes
+            fi
           fi
-          gh release view "$tag" --json url --jq .url
+          gh release upload "$TAG" dist/* --clobber
+          gh release view "$TAG" --json url,isPrerelease,assets \
+            --jq '"\(.url)  prerelease=\(.isPrerelease)  assets=\([.assets[].name] | join(", "))"'
