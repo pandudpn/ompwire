@@ -157,9 +157,13 @@ gh api repos/pandudpn/ompwire/contents/scripts/install.sh \
 ```
 
 It installs `omp` if it is missing (official installer, after asking), installs ompwire
-from the newest release tag, checks that the `ompwire` command is reachable, and hands
-over to `ompwire setup`. The repo is private, so the entry point goes through your own
-`gh` auth instead of an anonymous `curl`.
+from the newest release tag, **puts `~/.local/bin` on `PATH` for your shell** (zsh, bash,
+fish or plain sh — one guarded line, written once), and hands over to `ompwire setup`. So
+`ompwire` works in the next shell without a manual `export`. Set `OMPWIRE_NO_PATH_EDIT=1`
+to leave your shell config alone.
+
+The repo is private, so the entry point goes through your own `gh` auth instead of an
+anonymous `curl`.
 
 From a clone, the same script runs directly:
 

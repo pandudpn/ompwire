@@ -66,20 +66,62 @@ else
     exit 1
 fi
 
-# 3. the command has to be reachable for the rest of this script and afterwards
+# 3. the command has to be reachable now and in every future shell
 BIN_DIR="${HOME}/.local/bin"
 case ":${PATH}:" in
     *":${BIN_DIR}:"*) ;;
     *) PATH="${BIN_DIR}:${PATH}"; export PATH ;;
 esac
+
+shell_rc() {
+    # the file an interactive shell of this user will actually read
+    shell_name=$(basename "${SHELL:-sh}")
+    case "${shell_name}" in
+        zsh)  printf '%s\n' "${ZDOTDIR:-${HOME}}/.zshrc" ;;
+        bash) if [ -f "${HOME}/.bashrc" ]; then printf '%s\n' "${HOME}/.bashrc";
+              else printf '%s\n' "${HOME}/.bash_profile"; fi ;;
+        fish) printf '%s\n' "${HOME}/.config/fish/config.fish" ;;
+        *)    printf '%s\n' "${HOME}/.profile" ;;
+    esac
+}
+
+ensure_path() {
+    [ "${OMPWIRE_NO_PATH_EDIT:-0}" = "1" ] && {
+        say "--   OMPWIRE_NO_PATH_EDIT=1: not touching your shell config"
+        return 0
+    }
+    rc=$(shell_rc)
+    case "${rc}" in
+        *config.fish) line='fish_add_path $HOME/.local/bin' ;;
+        *)            line='export PATH="$HOME/.local/bin:$PATH"' ;;
+    esac
+    if [ -f "${rc}" ] && grep -qF '.local/bin' "${rc}" 2>/dev/null; then
+        say "ok   PATH already set in ${rc}"
+        return 0
+    fi
+    mkdir -p "$(dirname "${rc}")" 2>/dev/null || true
+    {
+        printf '\n# ompwire: put ~/.local/bin on PATH (added by the ompwire installer)\n'
+        printf '%s\n' "${line}"
+    } >> "${rc}" || {
+        say "FAIL could not write ${rc}; add this line yourself:"
+        say "     ${line}"
+        return 1
+    }
+    say "ok   added ~/.local/bin to PATH in ${rc}"
+}
+
+ensure_path || true
 if ! have ompwire; then
-    say "--   ompwire was installed but is not on PATH yet."
-    say "     add this to your shell config:  export PATH=\"\$HOME/.local/bin:\$PATH\""
-    say "     then open a new shell and run:  ompwire setup"
-    exit 0
+    say "FAIL ompwire was installed but the command is still not reachable."
+    say "     open a new shell, then run:  ompwire setup"
+    exit 1
 fi
 
 say "ok   ompwire $(ompwire -V 2>/dev/null | awk '{print $2}') at $(command -v ompwire)"
+if [ "${OMPWIRE_NO_PATH_EDIT:-0}" != "1" ]; then
+    say "     this shell picks it up after:  hash -r   (or open a new shell)"
+fi
 
 if [ "${OMPWIRE_NO_SETUP:-0}" = "1" ]; then
     say ""
