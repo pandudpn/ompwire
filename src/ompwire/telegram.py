@@ -37,7 +37,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, gateways
+from . import __version__, allowlist, gateways
 from . import schedules as schedule_lib
 from .acp import AcpClient, AcpError, pick_permission_option
 from .acp import Update as AcpUpdate
@@ -370,6 +370,12 @@ class ChatAgent:
         if policy in {"allow", "deny"}:
             log.info("permission auto-%s chat=%s tool=%s", policy, self.chat_id, title)
             return pick_permission_option(params, policy)
+        # A read-only command is not worth a button. Asking for `git log` teaches the habit of
+        # tapping Allow without reading, which is exactly what the gate exists to prevent.
+        command = str(((params.get("toolCall") or {}).get("rawInput") or {}).get("command") or "")
+        if command and allowlist.is_read_only(command):
+            log.info("permission auto-allow chat=%s (read-only): %s", self.chat_id, command[:120])
+            return pick_permission_option(params, "allow")
         token = f"perm-{int(time.time() * 1000)}"
         slot: dict[str, Any] = {"optionId": None, "params": params}
         self._pending_perm[token] = slot

@@ -322,3 +322,69 @@ def test_the_tool_trace_is_throttled_without_a_flood(monkeypatch):
 
     asyncio.run(go())
     assert edits["count"] <= 3  # inside one interval only the final flush renders
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    # reads that real turns ask for, and that nobody should have to approve
+    ("ls -d ~/ompwire ~/*/ompwire 2>/dev/null", True),
+    ("find src -name '*.py' -printf '%s %p\\n' | sort -n | awk '{print}'", True),
+    ("git log --oneline -5 && git status --short", True),
+    ("git log --oneline 2>&1 | head", True),
+    ("gh repo view noovoleum/infra-deploy-prod", True),
+    ("gh api repos/noovoleum/infra-deploy-prod", True),
+    ("kubectl get pods -n ucollect", True),
+    ("cat README.md | head -20", True),
+    # anything that writes, deletes, deploys, or hides a second command
+    ("gh repo clone noovoleum/x ~/x", False),
+    ("rm -rf /tmp/x", False),
+    ("echo hi > hasil.txt", False),
+    ("cat a > b.txt", False),
+    ("find . -name x -delete", False),
+    ("find . -name x -exec rm {} +", False),
+    ("git log && git checkout main", False),
+    ("sed -i s/a/b/ file", False),
+    ("kubectl apply -f x.yaml", False),
+    ("docker run -d nginx", False),
+    ("gh api -X POST repos/x", False),
+    ("ls | xargs rm", False),
+    ("cat x | sh", False),
+    ("git log & sleep 1", False),
+    ("sudo systemctl restart x", False),
+    ("ls $(rm -rf /tmp/x)", False),
+])
+def test_only_commands_that_cannot_change_anything_run_without_a_button(command, expected):
+    from ompwire.allowlist import is_read_only
+
+    assert is_read_only(command) is expected
+
+
+def test_a_read_only_command_does_not_wait_for_a_click(rendered):
+    """Forty approvals for `git log` trains the tap-without-reading habit the gate exists to stop."""
+    import types as _types
+
+    from ompwire.config import load_config
+
+    class Bot(FakeBot):
+        async def send_message(self, chat_id, text, **kw):
+            self.messages.append(text)
+            return None
+
+    config = load_config(env={})
+    config.data.setdefault("stream", {}).update({"edit_interval": 0.0})
+    config.data.setdefault("agent", {})["yolo"] = False
+    config.data.setdefault("approval", {})["timeout"] = 3.0
+    bot = Bot()
+    answered: list[str] = []
+
+    async def go():
+        agent = telegram.ChatAgent(config, chat_id=1, key="readonly",
+                                   app=_types.SimpleNamespace(bot=bot))
+        params = {"toolCall": {"kind": "execute", "title": "git log",
+                              "rawInput": {"command": "git log --oneline -3"}},
+                  "options": [{"optionId": "allow_once", "kind": "allow_once"},
+                              {"optionId": "reject_once", "kind": "reject_once"}]}
+        answered.append(agent._on_permission(params))
+        return agent
+
+    asyncio.run(go())
+    assert answered == ["allow_once"]

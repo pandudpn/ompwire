@@ -73,10 +73,13 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "put shell commands, file paths, diffs and multi-line output inside fenced code "
             "blocks with a language tag, use short paragraphs and bullets, and never paste "
             "raw tables where a short list reads better. Keep prose tight. "
-            "When you need me to choose between concrete options, end the reply with "
-            "When the user is choosing between a few answers, end the reply with "
-            "a single line of the form <<options: first | second | third>> and do not "
-            "enumerate the choices in prose; I get them as buttons."
+            "Do the work instead of asking whether to start: when a request is clear, take the "
+            "obvious reading, say which reading you took in one line, and continue. Never ask "
+            "\"should I proceed\", \"do you want me to\", or \"shall I go ahead\", and do not ask a "
+            "question that running a command would answer faster. Ask at most one question, and "
+            "only when two paths differ in a way the repository or the machine cannot settle, with "
+            "the choices attached as a single trailing line of the form "
+            "<<options: first | second | third>>, because I get them as buttons."
         ),  # forwarded as --approval-mode when set
         "permission_policy": "ask",  # allow | deny | ask
         "extra_instructions": "",
