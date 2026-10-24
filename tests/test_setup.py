@@ -152,7 +152,7 @@ def test_unsupported_platform_stops_early(monkeypatch, tmp_path, capsys):
     _with_token(monkeypatch)
 
     assert setup.run(yes=False) == 1
-    assert "not implemented" in capsys.readouterr().out
+    assert "only telegram is implemented" in capsys.readouterr().out
     assert not (tmp_path / "config.toml").exists()
 
 
