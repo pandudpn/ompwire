@@ -119,12 +119,6 @@ class ChatAgent:
         self.session_id = ""
         self.cwd = str(config.get("agent", "cwd") or "~")
         self.started_at = time.time()
-        self._login_cache: list[Any] = []
-        self._login_cache_at = 0.0
-        self._skills: dict[int, list[Any]] = {}
-        self.logins: dict[int, Any] = {}
-        self._login_before: dict[int, dict[str, str]] = {}
-        self.credential_db = str(self.config.get("agent", "credential_db", "~/.omp/agent/agent.db"))
         self.last_used = time.time()
         self.busy = False
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
@@ -598,6 +592,13 @@ class Transport:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.started_at = time.time()
+        # per-chat catalogs and the live `omp login` processes
+        self._login_cache: list[Any] = []
+        self._login_cache_at = 0.0
+        self._skills: dict[int, list[Any]] = {}
+        self.logins: dict[int, Any] = {}
+        self._login_before: dict[int, dict[str, str]] = {}
+        self.credential_db = str(config.get("agent", "credential_db", "~/.omp/agent/agent.db"))
         self.token = str(config.get("telegram", "bot_token", "") or "")
         self.allowed = {int(str(u)) for u in (config.get("telegram", "allowed_users") or []) if str(u).strip()}
         self.agents: dict[int, ChatAgent] = {}

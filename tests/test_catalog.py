@@ -72,3 +72,57 @@ def test_credentials_in_db_tolerates_missing_or_foreign_files(tmp_path):
     empty = tmp_path / "empty.db"
     empty.write_bytes(b"")
     assert credentials_in_db(str(empty)) == {}
+
+
+def test_skill_grid_is_two_columns_and_clickable(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from ompwire.config import load_config
+    from ompwire.telegram import Transport
+
+    class Message:
+        async def edit_text(self, text, reply_markup=None, parse_mode=None):
+            Message.text, Message.keyboard = text, reply_markup
+
+    for index in range(4):
+        folder = tmp_path / f"skill-{index}"
+        folder.mkdir()
+        (folder / "SKILL.md").write_text(
+            f"---\nname: skill-{index}\ndescription: demo {index}\n---\nbody\n", encoding="utf-8")
+
+    transport = Transport(load_config(env={}))
+    transport._skills[1] = list_skills((str(tmp_path),), cwd=str(tmp_path))
+    asyncio.run(transport._render_skills(1, 1, Message()))
+
+    rows = Message.keyboard.inline_keyboard
+    skill_rows = [row for row in rows if row[0].callback_data.startswith("skv:")]
+    assert [len(row) for row in skill_rows] == [2, 2]          # two per row
+    assert [b.callback_data for b in skill_rows[0]] == ["skv:0", "skv:1"]
+    assert rows[-1][0].text == "1/2"                           # nav row
+
+
+def test_login_grid_marks_signed_in_providers():
+    import asyncio
+    from types import SimpleNamespace
+
+    from ompwire.catalog import Provider
+    from ompwire.config import load_config
+    from ompwire.telegram import Transport
+
+    class Message:
+        async def edit_text(self, text, reply_markup=None, parse_mode=None):
+            Message.text, Message.keyboard = text, reply_markup
+
+    transport = Transport(load_config(env={}))
+    transport._login_cache = [
+        Provider(1, "Anthropic (Claude Pro/Max)", "anthropic", True),
+        Provider(2, "OpenRouter", "openrouter", False),
+        Provider(3, "Mystery", "", False),
+    ]
+    asyncio.run(transport._render_login(1, 1, Message()))
+    labels = [b.text for row in Message.keyboard.inline_keyboard for b in row]
+    assert labels[0].startswith("✅")
+    assert labels[1].startswith("⚪")
+    assert labels[2].startswith("❔")
+    assert Message.keyboard.inline_keyboard[0][0].callback_data == "lgv:1"
