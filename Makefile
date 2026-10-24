@@ -1,4 +1,4 @@
-.PHONY: install doctor lint serve test chat
+.PHONY: install doctor lint run test chat
 
 install:
 	uv venv --allow-existing && uv pip install -e ".[dev]"
@@ -9,8 +9,8 @@ doctor:
 lint:
 	.venv/bin/ruff check src tests
 
-serve:
-	.venv/bin/ompwire serve
+run:
+	.venv/bin/ompwire gateway run telegram
 
 test:
 	.venv/bin/python -m pytest tests/ -q
