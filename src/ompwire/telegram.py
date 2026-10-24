@@ -31,7 +31,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
 
 from .acp import AcpClient, AcpError, Update as AcpUpdate, pick_permission_option
 from . import __version__
-from .catalog import list_providers, list_skills, skill_body
+from .catalog import credentials_in_db, list_providers, list_skills, skill_body
 from .config import Config, approval_policy, save_override
 from .format import card, change, esc, help_sections, now_wib, tool_block
 from .login import LoginSession
@@ -123,6 +123,8 @@ class ChatAgent:
         self._login_cache_at = 0.0
         self._skills: dict[int, list[Any]] = {}
         self.logins: dict[int, Any] = {}
+        self._login_before: dict[int, dict[str, str]] = {}
+        self.credential_db = str(self.config.get("agent", "credential_db", "~/.omp/agent/agent.db"))
         self.last_used = time.time()
         self.busy = False
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
@@ -977,7 +979,9 @@ class Transport:
             menu_index=None if target else provider.index,
         )
         self.logins[chat_id] = session
-        log.info("login started chat=%s provider=%s target=%s", chat_id, provider.label, target)
+        self._login_before[chat_id] = await asyncio.to_thread(credentials_in_db, self.credential_db)
+        log.info("login started chat=%s provider=%s target=%s (credentials before: %s)",
+                 chat_id, provider.label, target, len(self._login_before[chat_id]))
         await self.app.bot.send_message(
             chat_id,
             card("🔐 login started", provider.label,
@@ -1010,13 +1014,33 @@ class Transport:
     async def _login_done(self, chat_id: int, label: str, ok: bool, output: str) -> None:
         self.logins.pop(chat_id, None)
         self._login_cache_at = 0.0  # force a status refresh on the next /login
-        tail = esc(output[-400:]) if output else ""
-        log.info("login finished chat=%s provider=%s ok=%s", chat_id, label, ok)
-        body = card("✅ login selesai" if ok else "⛔ login gagal", label, [],
-                    "status provider di /login sudah diperbarui" if ok else "lihat detail di bawah")
-        await self.app.bot.send_message(chat_id, body, parse_mode=ParseMode.HTML)
-        if tail:
-            await self.app.bot.send_message(chat_id, f"<pre>{tail}</pre>", parse_mode=ParseMode.HTML)
+        before = self._login_before.pop(chat_id, {})
+        after = await asyncio.to_thread(credentials_in_db, self.credential_db)
+        stored = sorted(set(after) - set(before))
+        log.info("login finished chat=%s provider=%s ok=%s stored=%s total=%s", chat_id, label,
+                 ok, stored or "-", len(after))
+        rows = [
+            ("provider", label),
+            ("result", "ok" if ok else "failed"),
+            ("stored", ", ".join(stored) if stored else f"no new credential ({len(after)} in store)"),
+            ("db", self.credential_db),
+        ]
+        note = ("credential tertulis ke store omp; agent akan di-restart supaya model baru muncul"
+                if ok else "lihat detail di bawah")
+        await self.app.bot.send_message(
+            chat_id, card("✅ login selesai" if ok else "⛔ login gagal", now_wib(), rows, note),
+            parse_mode=ParseMode.HTML,
+        )
+        if output and not ok:
+            await self.app.bot.send_message(
+                chat_id, f"<pre>{esc(output[-400:])}</pre>", parse_mode=ParseMode.HTML)
+        if ok:
+            agent = self.agent_for(chat_id)
+            try:
+                await agent.respawn(yolo=agent.yolo)
+                log.info("agent respawned after login chat=%s", chat_id)
+            except Exception as exc:  # noqa: BLE001 - a failed respawn must not hide the login result
+                log.warning("respawn after login failed chat=%s: %s", chat_id, exc)
 
     def close_login(self, chat_id: int) -> None:
         session = self.logins.pop(chat_id, None)

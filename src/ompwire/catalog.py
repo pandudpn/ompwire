@@ -119,6 +119,30 @@ def logged_in_providers(command: str = "omp", timeout: float = 30.0) -> set[str]
             if item.get("provider")}
 
 
+def credentials_in_db(db_path: str = "~/.omp/agent/agent.db") -> dict[str, str]:
+    """provider -> credential type, read straight from omp's own store.
+
+    `omp login` is what writes here; this only confirms the write landed, so it
+    opens the database read-only and never selects the credential payload.
+    """
+    import sqlite3
+
+    path = Path(db_path).expanduser()
+    if not path.is_file():
+        return {}
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return {}
+    try:
+        rows = con.execute("SELECT provider, credential_type FROM auth_credentials").fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        con.close()
+    return {str(provider): str(kind) for provider, kind in rows}
+
+
 def list_providers(command: str = "omp") -> list[Provider]:
     """The login menu plus which entries already hold credentials."""
     menu = parse_menu(run_pty([command, "login"], timeout=9.0))
