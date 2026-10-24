@@ -21,26 +21,33 @@ import pathlib
 import signal
 import time
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, ClassVar
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, TelegramError
-from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes,
-                          MessageHandler, filters)
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-from .acp import AcpClient, AcpError, Update as AcpUpdate, pick_permission_option
 from . import __version__
-from .catalog import (credential_snapshot, credentials_in_db, list_providers, list_skills,
-                     skill_body)
+from .acp import AcpClient, AcpError, pick_permission_option
+from .acp import Update as AcpUpdate
+from .catalog import credential_snapshot, list_providers, list_skills, skill_body
 from .config import Config, approval_policy, save_override
 from .format import card, change, esc, help_sections, now_wib, tool_block
-from .login import LoginSession
-from .mcp_hub import hub_servers, merge_entry as merge_mcp_entry, normalize
-from .mdrender import (split_blocks, strip_agent_noise, strip_html, to_html,
-                       to_plain)
-from .questions import extract as extract_options, hide_partial
 from .format import uptime as fmt_uptime
+from .login import LoginSession
+from .mcp_hub import hub_servers, normalize
+from .mcp_hub import merge_entry as merge_mcp_entry
+from .mdrender import split_blocks, strip_agent_noise, strip_html, to_html, to_plain
+from .questions import extract as extract_options
+from .questions import hide_partial
 from .store import SessionStore
 
 log = logging.getLogger("ompwire.telegram")
@@ -311,7 +318,7 @@ class ChatAgent:
         self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._expire_permission(token)))
         return None
 
-    OPTION_LABELS = {
+    OPTION_LABELS: ClassVar[dict[str, str]] = {
         "allow_once": "✅ Allow once",
         "allow_always": "✅ Always allow",
         "reject_once": "⛔ Deny",
@@ -412,7 +419,7 @@ class ChatAgent:
                 await message.edit_text(body, parse_mode=ParseMode.HTML)
             except BadRequest:
                 pass
-            except Exception as exc:  # noqa: BLE001 - expiry must never crash the loop
+            except Exception as exc:
                 log.debug("could not rewrite the expired approval prompt: %s", exc)
 
     # ------------------------------------------------------------------ turn
@@ -525,7 +532,7 @@ class ChatAgent:
                     images=images or None,
                     timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
                 )
-        except AcpError as exc:
+        except AcpError:
             self._updates.put_nowait(None)
             await drain_task
             self.busy = False
@@ -585,7 +592,7 @@ class ChatAgent:
                     pass
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=4.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
 
         task = asyncio.create_task(loop())
@@ -701,7 +708,7 @@ class Transport:
         while True:
             try:
                 kind, payload = await asyncio.wait_for(queue.get(), timeout=IDLE_CHECK_INTERVAL)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 idle = float(self.config.get("session", "idle_timeout", 1800))
                 if not agent.busy and time.time() - agent.last_used > idle and agent.client is not None:
                     log.info("idle eviction for chat %s", chat_id)
@@ -717,7 +724,7 @@ class Transport:
                                         images=getattr(payload, "images", None))
                     except AcpError as exc:
                         await message.reply_text(f"agent error: {exc}")
-                    except Exception as exc:  # noqa: BLE001 - a turn must never kill the worker
+                    except Exception as exc:
                         log.exception("turn failed")
                         await message.reply_text(f"turn failed: {exc}")
                 elif kind == "resume":
@@ -988,7 +995,6 @@ class Transport:
     async def cmd_login(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
-        chat_id = update.effective_chat.id
         message = await update.effective_message.reply_text("reading the provider list from omp…")
         providers = await self._provider_list(force=True)
         if not providers:
@@ -1111,7 +1117,7 @@ class Transport:
             try:
                 await agent.respawn(yolo=agent.yolo)
                 log.info("agent respawned after login chat=%s", chat_id)
-            except Exception as exc:  # noqa: BLE001 - a failed respawn must not hide the login result
+            except Exception as exc:
                 log.warning("respawn after login failed chat=%s: %s", chat_id, exc)
 
     def close_login(self, chat_id: int) -> None:
@@ -1735,7 +1741,7 @@ class Transport:
                          f" · thinking {(options.get('thinking') or {}).get('currentValue', '-')}"),
                 ("cwd", agent.cwd),
             ]
-        except Exception as exc:  # noqa: BLE001 - a banner must never block startup
+        except Exception as exc:
             rows.append(("agent", f"failed: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
         servers = [str(server.get("name")) for server in (self.config.get("mcp", "servers") or [])]

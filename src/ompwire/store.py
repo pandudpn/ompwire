@@ -6,7 +6,6 @@ harness only has to remember *which* session belongs to a conversation.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from dataclasses import dataclass

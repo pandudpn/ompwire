@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 from ompwire import __main__ as cli
 from ompwire import config as config_module
 from ompwire import status

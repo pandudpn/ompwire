@@ -45,7 +45,7 @@ def _split_command(raw: Any) -> tuple[str, list[str]]:
         parts = [str(part) for part in raw]
         return (parts[0], parts[1:]) if parts else ("", [])
     if isinstance(raw, str) and raw.strip():
-        return raw.strip(), [str(a) for a in ([] if raw else [])]
+        return raw.strip(), []
     return "", []
 
 
@@ -60,7 +60,7 @@ def hub_servers(
         log.warning("mcp hub file not found: %s", target)
         return []
     try:
-        import yaml  # noqa: PLC0415 - optional dependency, only needed here
+        import yaml
     except ImportError:
         log.warning("PyYAML missing: install ompwire[hub] to load %s", target)
         return []

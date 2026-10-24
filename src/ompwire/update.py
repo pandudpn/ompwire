@@ -230,7 +230,7 @@ def restart_gateway(timeout: float = 20.0) -> str:
 
     try:
         log_target = str(load_config().get("logging", "file", "") or "")
-    except Exception:  # noqa: BLE001 - a broken config must not block a restart
+    except Exception:
         log_target = ""
     log_path = Path(log_target).expanduser() if log_target else None
 

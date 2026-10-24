@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ompwire"
-version = "0.8.0"
+version = "0.9.0"
 description = "Transport-only chat bridge for OMP agents over the Agent Client Protocol"
 readme = "README.md"
 license = "MIT"
@@ -16,10 +16,26 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.17"]
 
 [project.scripts]
 ompwire = "ompwire.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ompwire"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Deliberate subset: bugs, imports, modernisation, simplification. Anything that only
+# argues about style is left out, so a red CI means something.
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# "·" is used on purpose in the chat cards and the CLI labels.
+# SIM105/SIM108/RUF005 only reshuffle shapes that are already readable; they would add
+# churn without changing behaviour. Everything still enabled is a bug or a real smell.
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "SIM105", "SIM108", "RUF005"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

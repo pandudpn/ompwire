@@ -19,6 +19,7 @@ from .cli import run_chat
 from .config import config_search_paths, load_config
 from .store import SessionStore
 
+
 def _chat_key() -> str:
     return f"cli:{os.getcwd()}"
 
@@ -78,9 +79,28 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print("FAIL telegram bot token missing. Run `ompwire setup` or set TELEGRAM_BOT_TOKEN.",
               file=sys.stderr)
         return 1
+    from . import lock
+
+    if args.force:
+        print("warn: --force skips the single-instance lock; two pollers make Telegram "
+              "answer 409 Conflict and drop updates", file=sys.stderr)
+        handle = None
+    else:
+        try:
+            handle = lock.acquire()
+        except lock.AlreadyRunning as busy:
+            print(f"FAIL another gateway is already running (pid {busy.pid}).\n"
+                  f"     stop it, or use `ompwire restart`; `ompwire status` shows it.\n"
+                  f"     --force starts anyway, at the risk of Telegram 409 Conflict.",
+                  file=sys.stderr)
+            return 1
+
     from .telegram import serve
 
-    return serve(config)
+    try:
+        return serve(config)
+    finally:
+        lock.release(handle)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -99,7 +119,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         probe = SessionStore(store_path)
         probe.close()
         print(f"ok   session store writable: {store_path}")
-    except Exception as exc:  # noqa: BLE001 - doctor reports, never raises
+    except Exception as exc:
         print(f"FAIL session store: {exc}")
         failures += 1
 
@@ -151,6 +171,17 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     return run(edge=args.edge, check=args.check, force=args.force,
                restart=not args.no_restart)
+
+
+def cmd_service(args: argparse.Namespace) -> int:
+    from . import service
+
+    action = getattr(args, "service_action", "show")
+    if action == "install":
+        return service.install(force=args.force, start=not args.no_start)
+    if action == "uninstall":
+        return service.uninstall(keep_unit_file=args.keep_unit_file)
+    return service.show()
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -227,6 +258,7 @@ common flows:
   ompwire update [--edge]           newest release, or the tip of main (restarts the gateway)
   ompwire restart                   restart the gateway without updating
   ompwire status                    settings and whether the gateway is running
+  ompwire service install           keep the gateway running under systemd --user
   ompwire uninstall --dry-run       see what uninstalling would remove
 
 config: ~/.config/ompwire/config.toml (+ .env for the bot token)
@@ -278,8 +310,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve_p = _sub(sub, "serve", "run the Telegram transport",
                    "Start the gateway. Refuses to start without an agent, a supported platform "
-                   "and a verified bot token.",
-                   "  ompwire serve\n  ompwire serve --config ~/.config/ompwire/config.toml")
+                   "and a verified bot token, and refuses to start twice: a second poller makes "
+                   "Telegram answer 409 Conflict and drop updates.",
+                   "  ompwire serve\n  ompwire serve --force   # skip the lock, on purpose")
+    serve_p.add_argument("--force", action="store_true",
+                         help="start even if another gateway holds the lock")
     serve_p.set_defaults(func=cmd_serve)
 
     cfg = _sub(sub, "config", "show resolved configuration",
@@ -319,6 +354,21 @@ def build_parser() -> argparse.ArgumentParser:
     un.add_argument("--force", action="store_true",
                     help="stop a running `ompwire serve` before removing")
     un.set_defaults(func=cmd_uninstall)
+
+    svc = _sub(sub, "service", "run the gateway under systemd --user",
+               "A gateway started from a shell dies with that shell. This writes a user unit "
+               "from the paths on this machine, then enables it.",
+               "  ompwire service install\n"
+               "  ompwire service show\n"
+               "  ompwire service uninstall")
+    svc.add_argument("service_action", nargs="?", default="show",
+                     choices=["install", "uninstall", "show"])
+    svc.add_argument("--force", action="store_true", help="rewrite an existing unit file")
+    svc.add_argument("--no-start", action="store_true",
+                     help="enable the unit without starting it now")
+    svc.add_argument("--keep-unit-file", action="store_true",
+                     help="uninstall: disable, but leave the unit file in place")
+    svc.set_defaults(func=cmd_service)
 
     st = _sub(sub, "status", "what this installation is set to, and whether it is running",
               "One screen: version and how it was installed, agent, model/mode/thinking, "

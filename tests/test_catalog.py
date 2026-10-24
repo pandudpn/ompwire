@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from ompwire.catalog import (Skill, list_skills, parse_menu, skill_body,
-                            strip_ansi)
+from ompwire.catalog import Skill, list_skills, parse_menu, skill_body, strip_ansi
 
 
 def test_menu_parsing_keeps_order_and_drops_stray_numbers():
@@ -76,7 +73,6 @@ def test_credentials_in_db_tolerates_missing_or_foreign_files(tmp_path):
 
 def test_skill_grid_is_two_columns_and_clickable(tmp_path):
     import asyncio
-    from types import SimpleNamespace
 
     from ompwire.config import load_config
     from ompwire.telegram import Transport
@@ -104,7 +100,6 @@ def test_skill_grid_is_two_columns_and_clickable(tmp_path):
 
 def test_login_grid_marks_signed_in_providers():
     import asyncio
-    from types import SimpleNamespace
 
     from ompwire.catalog import Provider
     from ompwire.config import load_config

@@ -217,7 +217,8 @@ ompwire --version        # or -V
 | `ompwire setup` | first machine: agent, provider and model, thinking, mode, yolo, cwd, MCP, gateway |
 | `ompwire status` | what it is set to and whether the gateway is running: model, mode, thinking, approvals, cwd, allowed users, token, MCP, gateway, sessions, log |
 | `ompwire doctor` | verify agent, session store, bot token and allow list, one line per check |
-| `ompwire serve` | run the Telegram transport |
+| `ompwire serve` | run the Telegram transport (refuses to start twice: one lock per bot) |
+| `ompwire service install` | keep the gateway running under systemd --user |
 | `ompwire chat` | talk to the agent from this terminal (`-q` for one-shot) |
 | `ompwire sessions` | the `chat_key → sessionId` map |
 | `ompwire config` | merged config with secrets masked |
@@ -287,6 +288,44 @@ code in memory and an update that is not picked up is an update that did not hap
   not respawned, since that would stack a second `tee`.
 
 `--no-restart` leaves it running. `ompwire restart` does the same thing without updating.
+
+## Keep it running
+
+A gateway started from a shell dies with that shell. One command hands it to systemd:
+
+```bash
+$ ompwire service install
+ok   unit written: /home/you/.config/systemd/user/ompwire.service
+ok   started and enabled: ompwire.service
+     logs:  journalctl --user -u ompwire -f
+     status: ompwire status
+```
+
+The unit is generated from this machine — the `ompwire` on your `PATH`, your
+`~/.config/ompwire/.env`, your configured working directory — because a checked-in unit
+cannot know any of that. The token stays in the `.env`, never in the unit file.
+
+It refuses to install while another gateway is running: two pollers make Telegram answer
+`409 Conflict` and drop updates. `ompwire service show` prints the unit and its state,
+`ompwire service uninstall [--keep-unit-file]` gives it back.
+
+`serve` holds the same lock itself, so a second `ompwire serve` in another terminal fails
+with the pid of the one that is already running instead of quietly splitting the bot's
+updates. The lock is an `flock`, so a crashed gateway never leaves a stale file to clean
+up. `--force` starts anyway, on purpose.
+
+## Development
+
+```bash
+make lint      # ruff
+make test      # pytest
+```
+
+`.github/workflows/ci.yml` runs both on Python 3.11, 3.12 and 3.13, plus a shell check on
+`install.sh` in both invocation styles. The ACP contract tests need the real `omp` binary
+and skip themselves when it is absent, so CI stays meaningful without an agent. Ruff is
+configured as a deliberate subset: bugs, imports, modernisation, simplification. Rules
+that only argue about shape are off, so red means something.
 
 
 ```bash

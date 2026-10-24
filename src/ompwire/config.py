@@ -151,6 +151,11 @@ def find_config_path(explicit: str | Path | None = None) -> Path | None:
 OVERRIDES_PATH = Path("~/.local/state/ompwire/overrides.json")
 
 
+def default_state_dir() -> Path:
+    """Where runtime files live: sessions, overrides, the serve lock."""
+    return Path("~/.local/state/ompwire").expanduser()
+
+
 def load_overrides(path: Path | None = None) -> dict[str, dict[str, Any]]:
     target = path or OVERRIDES_PATH.expanduser()
     try:

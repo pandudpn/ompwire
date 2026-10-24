@@ -96,7 +96,7 @@ class AcpClient:
         if self._proc is not None:
             return
         try:
-            self._proc = subprocess.Popen(  # noqa: S603 - command comes from local config
+            self._proc = subprocess.Popen(
                 [self.command, *self.args],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,

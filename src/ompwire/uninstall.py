@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 CONFIG_DIR = Path("~/.config/ompwire")
@@ -127,6 +126,15 @@ def run(*, yes: bool = False, keep_config: bool = False, force: bool = False,
     print("ompwire uninstall\n")
     if not dry_run and not yes:
         print("Pass --yes to actually remove, or --dry-run to only look.\n")
+
+    from . import service
+
+    unit = service.unit_path()
+    if unit.is_file():
+        if dry_run:
+            print(f"--   systemd unit would be disabled and removed: {unit}")
+        else:
+            service.uninstall()
 
     plan = targets(keep_config)
     serves = running_serves()

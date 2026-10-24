@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from ompwire import uninstall
 
 
@@ -60,7 +58,7 @@ def test_yes_removes_everything_ompwire_created(monkeypatch, tmp_path, capsys):
 
 
 def test_declining_the_prompt_removes_nothing(monkeypatch, tmp_path, capsys):
-    config, state, data = _layout(monkeypatch, tmp_path)
+    config, state, _data = _layout(monkeypatch, tmp_path)
     monkeypatch.setattr("builtins.input", lambda prompt="": "n")
     assert uninstall.run(yes=False) == 0
     assert config.is_dir() and state.is_dir()

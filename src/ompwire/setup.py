@@ -159,7 +159,7 @@ def providers() -> dict[str, tuple[str, str]]:
 
     try:
         return credential_snapshot()
-    except Exception:  # noqa: BLE001 - a broken credential db must not stop setup
+    except Exception:
         return {}
 
 
@@ -193,7 +193,7 @@ def agent_catalog(cwd: str, command: str = "omp") -> dict[str, Any]:
         session_id = str(session.get("sessionId") or "")
         if session_id:
             client.close_session(session_id)
-    except Exception:  # noqa: BLE001 - setup degrades to empty choices
+    except Exception:
         return {"models": [], "modes": [], "thinking": [], "current": {}}
     finally:
         client.close()
@@ -361,7 +361,7 @@ def pick_provider_and_model(catalog_values: dict[str, Any],
     pool = [model for model in models if provider_of(model) == provider] or models
     default_model = current if current in pool else pool[0]
     model = choose(f"model ({provider})", pool, default_model, yes=yes)
-    return model if provider_of(model) else model
+    return model
 
 
 def _gateway_step(yes: bool, env_file: Path, replace_prompt: bool = False) -> tuple[bool, str]:
@@ -553,9 +553,9 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
     mcp_source = str(current_settings.get("mcp_source") or "none")
     if mcp_source == "mcp-hub":
         print(f"     merging {hub} at runtime (from the existing config)")
-    elif not yes and hub.is_file():
-        if _confirm(f"     merge servers from {hub} at runtime too? [y/N]: ") in ("y", "yes"):
-            mcp_source = "mcp-hub"
+    elif (not yes and hub.is_file()
+          and _confirm(f"     merge servers from {hub} at runtime too? [y/N]: ") in ("y", "yes")):
+        mcp_source = "mcp-hub"
 
     # 8. gateway: platform, credential, and who may talk to it
     ok, username = _gateway_step(yes, env_file, replace_prompt=bool(current_settings))

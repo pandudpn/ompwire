@@ -52,7 +52,7 @@ def _sessions(store_path: str) -> str:
 
     try:
         store = SessionStore(store_path)
-    except Exception as exc:  # noqa: BLE001 - status must not raise
+    except Exception as exc:
         return f"{store_path} (unreadable: {exc})"
     try:
         records = store.all()
@@ -82,7 +82,7 @@ def collect(config_path: str | None = None) -> list[tuple[str, str]]:
         from .update import install_mode
 
         rows.append(("installed", install_mode()))
-    except Exception:  # noqa: BLE001
+    except Exception:
         rows.append(("installed", "unknown"))
 
     config_file = Path(config_path) if config_path else _config_file()
@@ -129,7 +129,7 @@ def collect(config_path: str | None = None) -> list[tuple[str, str]]:
                 exclude=config.get("mcp", "exclude", []) or [],
             )
             detail += f" · {len(merged)} server(s) from the hub"
-        except Exception as exc:  # noqa: BLE001 - a broken hub is a status fact, not a crash
+        except Exception as exc:
             detail += f" · hub unreadable: {exc}"
     if excludes:
         detail += f" · excluded: {', '.join(excludes)}"

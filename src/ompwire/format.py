@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import html
 from collections.abc import Iterable
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 WIB = timezone(timedelta(hours=7))
 BAR = "─" * 18
