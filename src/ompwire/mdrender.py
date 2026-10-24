@@ -25,6 +25,8 @@ STRIKE_RE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~", re.DOTALL)
 LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
 BULLET_RE = re.compile(r"^[ \t]*[-+*][ \t]+", re.MULTILINE)
 QUOTE_RE = re.compile(r"^[ \t]*(?:&gt;|>)[ \t]?(.+)$", re.MULTILINE)
+TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+TABLE_SEP_RE = re.compile(r"^\s*\|[\s:\-|]+\|\s*$")
 BAR_CHARS = "█▓▒░▏▎▍▌▋▊▉"
 BAR_LINE_RE = re.compile(r"^\s*\S.*[" + BAR_CHARS + r"]")
 
@@ -46,6 +48,50 @@ def _fence(block: str) -> str:
     tag = f'<pre><code class="language-{_escape(language)}">' if language else "<pre>"
     closing = "</code></pre>" if language else "</pre>"
     return f"{tag}{_escape(body)}{closing}"
+
+
+def _plain_cell(cell: str) -> str:
+    return re.sub(r"\*\*|~~|`", "", cell).strip()
+
+
+def _table_block(rows: list[str]) -> str:
+    """A markdown table becomes a fenced block: pipes and padding need a mono font."""
+    grid: list[list[str]] = []
+    for row in rows:
+        if TABLE_SEP_RE.match(row):
+            continue
+        cells = [_plain_cell(cell) for cell in row.strip().strip("|").split("|")]
+        grid.append(cells)
+    if not grid:
+        return ""
+    width = max(len(cells) for cells in grid)
+    grid = [cells + [""] * (width - len(cells)) for cells in grid]
+    sizes = [max(len(cells[i]) for cells in grid) for i in range(width)]
+    lines = []
+    for index, cells in enumerate(grid):
+        line = "  ".join(cell.ljust(sizes[i]) for i, cell in enumerate(cells)).rstrip()
+        lines.append(line)
+        if index == 0:
+            lines.append("  ".join("-" * sizes[i] for i in range(width)))
+    return "```text\n" + "\n".join(lines) + "\n```"
+
+
+def _tables_to_fences(text: str) -> str:
+    """Rewrite tables as fences before inline handling, so `code` inside a cell survives."""
+    lines = text.split("\n")
+    out: list[str] = []
+    block: list[str] = []
+    for line in lines:
+        if TABLE_ROW_RE.match(line):
+            block.append(line)
+            continue
+        if block:
+            out.append(_table_block(block) if len(block) > 1 else block[0])
+            block = []
+        out.append(line)
+    if block:
+        out.append(_table_block(block) if len(block) > 1 else block[0])
+    return "\n".join(out)
 
 
 def _monospace_runs(text: str) -> str:
@@ -89,6 +135,7 @@ def to_html(text: str) -> str:
     """Convert agent markdown to Telegram-safe HTML."""
     if not text:
         return ""
+    text = _tables_to_fences(text)
     parts: list[str] = []
     for chunk in FENCE_RE.split(text):
         if not chunk:

@@ -76,3 +76,21 @@ def test_strip_html_unwraps_a_rendered_tool_block():
     assert "<pre>" not in plain and "<code>" not in plain
     assert "a<b" in plain  # escaped in HTML, restored by the plain-text fallback
     assert plain.splitlines()[0] == "🔧 execute"
+
+
+def test_markdown_table_becomes_a_monospace_block():
+    """Tables in SKILL.md files are full of pipes; a mono block keeps them readable."""
+    from ompwire.mdrender import to_html
+
+    html = to_html("| Provider | Status |\n|---|---|\n| **Z.AI** | `ok` |\n")
+    assert "<pre>" in html and "</pre>" in html
+    assert "|" not in html                      # the pipes are gone
+    assert "<b>" not in html and "<code>Provider" not in html
+    assert "Z.AI" in html and "Provider" in html
+    assert html.startswith("<pre>") and not html.startswith("<pre>\n")
+
+
+def test_single_pipe_line_is_left_alone():
+    from ompwire.mdrender import to_html
+
+    assert "<pre>" not in to_html("| not a table")
