@@ -43,7 +43,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "model": "",  # empty => whatever the ACP session defaults to
         "mode": "",  # default | plan
         "approval_mode": "always-ask",  # forwarded as --approval-mode when set
-        "permission_policy": "allow",  # allow | deny (non-interactive default)
+        "permission_policy": "ask",  # allow | deny | ask
         "extra_instructions": "",
     },
     "session": {
@@ -123,8 +123,36 @@ def find_config_path(explicit: str | Path | None = None) -> Path | None:
     return None
 
 
+DEFAULT_ENV_PATHS = (
+    Path("~/.config/ompwire/.env"),
+    Path("~/.ompwire/.env"),
+    Path(".env"),
+)
+
+
+def _load_env_files(env: dict[str, str]) -> None:
+    """Fill missing keys from .env files. Real environment variables win."""
+    for candidate in DEFAULT_ENV_PATHS:
+        path = candidate.expanduser()
+        if not path.is_file():
+            continue
+        try:
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip().removeprefix("export ").strip()
+                value = value.strip().strip('"').strip("'")
+                if key and value and key not in env:
+                    env[key] = value
+        except OSError:
+            continue
+
+
 def load_config(explicit: str | Path | None = None, env: dict[str, str] | None = None) -> Config:
     env = dict(os.environ if env is None else env)
+    _load_env_files(env)
     path = find_config_path(explicit)
     warnings: list[str] = []
 

@@ -4,7 +4,7 @@ Drive an [OMP](https://omp.sh) agent from any chat surface over the **Agent Clie
 
 `ompwire` is a transport. It moves messages between a chat interface and an OMP agent, renders what the agent streams back, answers its permission prompts, and remembers which ACP session belongs to which conversation. Everything else (agent loop, tools, MCP servers, context compaction, skills, memory, system prompt) stays inside the agent where it belongs.
 
-> Status: early. The CLI transport works and is covered by tests against the real agent binary. The Telegram transport is not written yet.
+> Status: early but usable. The CLI and the Telegram transport both drive the same agent path; the Telegram side covers sessions, model/mode/thinking switching, approvals, queueing and cost reporting.
 
 ## Why
 
@@ -194,9 +194,10 @@ So a naive "just send the message" implementation silently kills the work in pro
 
 ## Roadmap
 
-- [ ] Telegram transport (`ompwire serve`): long polling, allowlist, edit-in-place streaming, inline-keyboard approvals
-- [ ] queue and steer plumbing per the section above
-- [ ] idle eviction so an unused conversation releases its subprocess
+- [x] Telegram transport (`ompwire serve`): long polling, allowlist, edit-in-place streaming, inline-keyboard approvals
+- [x] queue and steer plumbing per the section above
+- [x] idle eviction so an unused conversation releases its subprocess
+- [ ] photo and document input (ACP advertises image + embeddedContext, not wired yet)
 - [ ] cron or webhook triggers for unattended turns
 - [ ] more transports (the CLI and Telegram paths already share one interface)
 

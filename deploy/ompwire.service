@@ -1,6 +1,4 @@
 [Unit]
-# NOT ACTIVE YET: `ompwire serve` (Telegram transport) is not implemented.
-# Enable this unit only after that subcommand lands.
 Description=ompwire — OMP agent over ACP for chat platforms
 After=network-online.target
 Wants=network-online.target
@@ -10,6 +8,7 @@ Type=simple
 WorkingDirectory=%h/ompwire
 EnvironmentFile=%h/ompwire/.env
 ExecStart=%h/ompwire/.venv/bin/ompwire serve
+# token lives in %h/ompwire/.env (chmod 600); EnvironmentFile loads it
 Restart=on-failure
 RestartSec=5
 # One ACP subprocess per conversation plus the poller; keep the cgroup honest.

@@ -18,7 +18,7 @@ cwd = "~"                  # working directory handed to the agent
 model = ""                 # empty = whatever the ACP session defaults to
 mode = ""                  # "" | "default" | "plan"
 approval_mode = "always-ask"       # forwarded to the agent as --approval-mode
-permission_policy = "allow"        # answer to session/request_permission: allow | deny | ask
+permission_policy = "ask"          # allow | deny | ask (Telegram shows buttons)
 
 [session]
 store = "~/.local/state/ompwire/sessions.db"

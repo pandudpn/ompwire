@@ -14,7 +14,6 @@ from .cli import run_chat
 from .config import config_search_paths, load_config
 from .store import SessionStore
 
-
 def _chat_key() -> str:
     return f"cli:{os.getcwd()}"
 
@@ -54,6 +53,15 @@ def cmd_config(args: argparse.Namespace) -> int:
             shown = "***" if (redacted and value) else value
             print(f"  {key} = {shown!r}")
     return 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    for warning in config.warnings:
+        print(f"warn: {warning}", file=sys.stderr)
+    from .telegram import serve
+
+    return serve(config)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -130,6 +138,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sessions = sub.add_parser("sessions", help="list recorded sessions")
     sessions.set_defaults(func=cmd_sessions)
+
+    serve_p = sub.add_parser("serve", help="run the Telegram transport")
+    serve_p.set_defaults(func=cmd_serve)
 
     cfg = sub.add_parser("config", help="show resolved configuration")
     cfg.set_defaults(func=cmd_config)

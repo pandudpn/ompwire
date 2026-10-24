@@ -128,9 +128,12 @@ class ChatSession:
                 print(f"warn: could not set {config_id}={value}: {exc}")
 
     def ask_permission(self, params: dict) -> str | None:
-        policy = str(self.config.get("agent", "permission_policy", "allow"))
+        policy = str(self.config.get("agent", "permission_policy", "ask"))
         if policy in {"allow", "deny"}:
             return pick_permission_option(params, policy)
+        if not sys.stdin.isatty():
+            # one-shot runs cannot answer a prompt; approve rather than hang
+            return pick_permission_option(params, "allow")
         options = params.get("options") or []
         title = params.get("title") or (params.get("toolCall") or {}).get("title") or "tool call"
         print(f"\npermission requested: {title}")
