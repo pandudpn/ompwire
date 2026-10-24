@@ -84,7 +84,7 @@ generated with [archify](https://github.com/tt-a1i/archify)).
 | First token on screen | under a second after the agent starts answering | chunk batching on an interval, not per token |
 | Approval visibility | never silent | every permission request becomes a message that stays until answered |
 | Secret exposure | zero tokens in logs | redaction filter on every handler, `ompwire scrub-logs` for old files |
-| Agent reachability | fail loudly | `serve` checks the agent, the platform and the token before polling |
+| Agent reachability | fail loudly | `gateway run` checks the agent, the gateway and the token before polling |
 
 ### Decision record
 
@@ -218,7 +218,7 @@ ompwire --version        # or -V
 | `ompwire status` | what it is set to and whether the gateway is running: model, mode, thinking, approvals, cwd, allowed users, token, MCP, gateway, sessions, log |
 | `ompwire doctor` | verify agent, session store, bot token and allow list, one line per check |
 | `ompwire gateway list\|add\|remove` | one bot per definition: credential, allow list |
-| `ompwire gateway run NAME` | run it in this terminal (`ompwire serve` is the same thing) |
+| `ompwire gateway run NAME` | run it in this terminal |
 | `ompwire gateway install\|uninstall NAME` | keep it running under systemd --user (or `ompwire service`) |
 | `ompwire gateway start\|stop\|restart NAME` | control that unit |
 | `ompwire gateway status\|logs NAME` | state, unit path, journal |
@@ -250,7 +250,7 @@ first:
 
 1. **Checks for `omp`.** If the agent is missing it prints the official installer
    (`curl -fsSL https://omp.sh/install | sh`) and offers to run it. Nothing else is
-   written until an agent is on disk — `ompwire serve` refuses to start otherwise.
+   written until an agent is on disk — `ompwire gateway run` refuses to start otherwise.
 2. **Writes `~/.config/ompwire/config.toml`** with the working directory, approval
    policy, MCP source and allowed Telegram user ids. An existing config is kept;
    `--force` moves it to `config.toml.bak` first.
@@ -272,7 +272,7 @@ provisioning script wants. Afterwards: `ompwire gateway add telegram`, then
 `ompwire doctor`.
 
 Working on ompwire itself: clone it, `uv venv && uv pip install -e '.[dev]'`, and
-run `.venv/bin/ompwire serve` — the checkout keeps its own session store.
+run `.venv/bin/ompwire gateway run telegram` — the checkout keeps its own session store.
 
 ## Update
 
@@ -353,9 +353,11 @@ so stopping one leaves the others alone, and `ompwire update` restarts every act
 gateway separately.
 
 Everything about a bot lives under one verb, the way `hermes gateway` works: `add`,
-`list`, `run`, `install`, `start|stop|restart`, `status`, `logs`, `remove`. `ompwire serve`
-and `ompwire service` still work — they are aliases, kept because older unit files and
-muscle memory point at them.
+`list`, `run`, `install`, `start|stop|restart`, `status`, `logs`, `remove`. There is no
+`ompwire serve`: it was the same thing under a second name, and a name that means the same
+as another name is a coin flip every time someone types it. `ompwire service` survives only
+as the older spelling of `gateway install|uninstall`, and the installed unit calls
+`gateway run <name>`.
 
 ```bash
 $ ompwire gateway status
@@ -388,7 +390,7 @@ It refuses to install while another gateway is running: two pollers make Telegra
 `409 Conflict` and drop updates. `ompwire service show` prints the unit and its state,
 `ompwire service uninstall [--keep-unit-file]` gives it back.
 
-`serve` holds the same lock itself, so a second `ompwire serve` in another terminal fails
+`gateway run` holds the lock itself, so a second gateway process for the same bot fails
 with the pid of the one that is already running instead of quietly splitting the bot's
 updates. The lock is an `flock`, so a crashed gateway never leaves a stale file to clean
 up. `--force` starts anyway, on purpose.
@@ -461,7 +463,7 @@ ompwire uninstall --dry-run     # list what would go, remove nothing
 ompwire uninstall               # ask, then remove
 ompwire uninstall --yes         # no prompt
 ompwire uninstall --keep-config # keep config.toml and .env (the bot token)
-ompwire uninstall --force       # stop a running `ompwire serve` first
+ompwire uninstall --force       # stop a running gateway first
 ```
 
 It removes exactly what ompwire created and nothing else:
@@ -474,7 +476,7 @@ It removes exactly what ompwire created and nothing else:
 | the installed package | `uv tool uninstall` or `pipx uninstall`, whichever owns it |
 
 `~/.omp` is never touched — agent sessions, credentials and MCP config survive, so
-reinstalling ompwire picks the conversation history back up. A live `ompwire serve` is
+reinstalling ompwire picks the conversation history back up. A live gateway is
 refused by default because it rewrites its state on exit; `--force` stops it first.
 Removing the bot from Telegram itself is done in @BotFather, not here.
 
@@ -644,7 +646,7 @@ So a naive "just send the message" implementation silently kills the work in pro
 
 ## Roadmap
 
-- [x] Telegram transport (`ompwire serve`): long polling, allowlist, edit-in-place streaming, inline-keyboard approvals
+- [x] Telegram transport (`ompwire gateway run`): long polling, allowlist, edit-in-place streaming, inline-keyboard approvals
 - [x] queue and steer plumbing per the section above
 - [x] idle eviction so an unused conversation releases its subprocess
 - [ ] photo and document input (ACP advertises image + embeddedContext, not wired yet)

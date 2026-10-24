@@ -145,16 +145,23 @@ def test_start_without_a_unit_says_how_to_install_it(sandbox, capsys):
     assert "not available" in capsys.readouterr().out
 
 
-def test_serve_refuses_a_gateway_that_does_not_exist(sandbox, capsys):
+def test_run_refuses_a_gateway_that_does_not_exist(sandbox, capsys):
     gateways.add("telegram")
-    assert cli.main(["serve", "--gateway", "nope"]) == 1
+    gateways.add("telegram-2")
+    assert cli.main(["gateway", "run", "nope"]) == 1
     assert "no gateway named" in capsys.readouterr().err
 
 
-def test_serve_refuses_an_unimplemented_transport(sandbox, monkeypatch, capsys):
+def test_run_refuses_an_unimplemented_transport(sandbox, capsys):
     gateways.add("whatsapp", "whatsapp")
-    assert cli.main(["serve", "--gateway", "whatsapp"]) == 1
+    assert cli.main(["gateway", "run", "whatsapp"]) == 1
     assert "not implemented" in capsys.readouterr().err
+
+
+def test_there_is_no_serve_command_any_more():
+    """One noun per concept: `gateway run`, not `serve`."""
+    with pytest.raises(SystemExit):
+        cli.main(["serve"])
 
 
 def test_status_reports_state_unit_and_logs(sandbox, capsys):
@@ -180,15 +187,13 @@ def test_install_without_systemd_says_so(sandbox, capsys):
     assert "systemd --user is not available" in capsys.readouterr().out
 
 
-def test_run_is_serve(sandbox, monkeypatch, capsys):
-    """`gateway run` and `serve` share one implementation."""
+def test_run_uses_the_named_gateway(sandbox, monkeypatch):
     gateways.add("telegram")
     called: list[tuple[str, str, bool]] = []
     monkeypatch.setattr(cli, "_run_gateway",
                         lambda config, name, force: called.append((str(config), name, force)) or 0)
     assert cli.main(["gateway", "run", "telegram"]) == 0
-    assert cli.main(["serve", "--gateway", "telegram"]) == 0
-    assert called == [("None", "telegram", False), ("None", "telegram", False)]
+    assert called == [("None", "telegram", False)]
 
 
 def test_logs_falls_back_to_journalctl(sandbox, monkeypatch, capsys):

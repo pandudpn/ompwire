@@ -7,13 +7,17 @@ from ompwire import update
 
 def test_transport_command_prefers_the_python_line(monkeypatch):
     """A `zsh -lic ... | tee` wrapper must not be respawned: it would stack a second tee."""
-    shell_line = ["/usr/bin/zsh", "-lic", "cd /repo && exec .venv/bin/ompwire serve | tee log"]
-    python_line = ["/repo/.venv/bin/python3", ".venv/bin/ompwire", "serve"]
+    shell_line = ["/usr/bin/zsh", "-lic",
+                  "cd /repo && exec .venv/bin/ompwire gateway run telegram | tee log"]
+    python_line = ["/repo/.venv/bin/python3", ".venv/bin/ompwire", "gateway", "run", "telegram"]
     monkeypatch.setattr(update, "_argv_of",
                         lambda pid: python_line if pid == 2 else shell_line)
 
+    assert update._transport_command(2, "ompwire gateway run telegram") == python_line
+    assert update._transport_command(1, "/usr/bin/zsh -lic ... ompwire gateway run telegram") \
+        == shell_line
+    # a process started before this change (still spelled `serve`) is recognised too
     assert update._transport_command(2, "ompwire serve") == python_line
-    assert update._transport_command(1, "/usr/bin/zsh -lic ... ompwire serve") == shell_line
 
 
 def test_no_transport_means_nothing_to_restart(monkeypatch):

@@ -61,10 +61,6 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_serve(args: argparse.Namespace) -> int:
-    return _run_gateway(args.config, getattr(args, "gateway", "") or "", args.force)
-
-
 def _run_gateway(config_path: str | None, name: str, force: bool) -> int:
     from . import gateways
 
@@ -331,8 +327,8 @@ def _gateway_add(args: argparse.Namespace, gateways, service, bot_identity) -> i
         else:
             print("warn no allowed users: nobody can talk to this bot yet")
 
-    print(f"\nnext:  ompwire service install {name}    # keep it running")
-    print(f"       ompwire serve --gateway {name}    # or run it in this terminal")
+    print(f"\nnext:  ompwire gateway install {name}    # keep it running")
+    print(f"       ompwire gateway run {name}        # or run it in this terminal")
     return 0
 
 
@@ -573,17 +569,6 @@ def build_parser() -> argparse.ArgumentParser:
                     "  ompwire sessions")
     sessions.set_defaults(func=cmd_sessions)
 
-    serve_p = _sub(sub, "serve", "alias of `ompwire gateway run`",
-                   "Same thing as `ompwire gateway run`, kept because older unit files and "
-                   "muscle memory use it. Refuses to start without an agent and a credential, "
-                   "and refuses to start twice.",
-                   "  ompwire serve\n  ompwire gateway run telegram   # the same, named")
-    serve_p.add_argument("--gateway", default="", metavar="NAME",
-                         help="which gateway to run (default: the only one configured)")
-    serve_p.add_argument("--force", action="store_true",
-                         help="start even if another gateway holds the lock")
-    serve_p.set_defaults(func=cmd_serve)
-
     cfg = _sub(sub, "config", "show resolved configuration",
                "Print the merged config with secrets masked, plus the search paths.",
                "  ompwire config")
@@ -619,7 +604,7 @@ def build_parser() -> argparse.ArgumentParser:
     un.add_argument("--keep-config", action="store_true",
                     help="leave config.toml and .env (bot token) in place")
     un.add_argument("--force", action="store_true",
-                    help="stop a running `ompwire serve` before removing")
+                    help="stop a running gateway before removing")
     un.set_defaults(func=cmd_uninstall)
 
     gw = _sub(sub, "gateway", "add, inspect and control gateway bots",

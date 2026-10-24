@@ -18,7 +18,7 @@ def test_no_arguments_prints_help_instead_of_opening_a_chat(capsys):
 def test_help_command_lists_commands(capsys):
     assert cli.main(["help"]) == 0
     out = capsys.readouterr().out
-    for command in ("setup", "gateway", "serve", "doctor", "update", "uninstall", "chat"):
+    for command in ("setup", "gateway", "doctor", "update", "uninstall", "chat"):
         assert command in out
 
 
@@ -47,5 +47,5 @@ def test_every_command_has_a_description_and_examples(capsys):
 
 def test_unknown_flag_exits_two(capsys):
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(["serve", "--nope"])
+        cli.main(["gateway", "run", "--nope"])
     assert excinfo.value.code == 2

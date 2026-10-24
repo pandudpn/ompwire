@@ -1,7 +1,7 @@
 """One transport per bot.
 
 Telegram answers a second poller with 409 Conflict and drops updates, so a second
-`ompwire serve` is not a harmless mistake: the bot goes quiet while both processes look
+A second gateway process for the same bot is not a harmless mistake: the bot goes quiet while both processes look
 healthy. The lock is an flock, which means the kernel releases it the moment the holder
 dies — a stale file is never a reason to refuse to start.
 """

@@ -62,10 +62,14 @@ def human(size: int) -> str:
 
 
 def running_serves() -> list[tuple[int, str]]:
-    """Find `ompwire serve` processes without always trusting pgrep to be installed."""
+    """Find running gateways without always trusting pgrep to be installed.
+
+    Matches `gateway run` and the older `serve` spelling, so an upgrade cannot leave a
+    process behind that this code no longer recognises.
+    """
     output = ""
     try:
-        result = subprocess.run(["pgrep", "-af", "ompwire serve"], capture_output=True,
+        result = subprocess.run(["pgrep", "-af", "ompwire (gateway run|serve)"], capture_output=True,
                                 text=True, timeout=10, check=False)
         output = result.stdout
     except (OSError, subprocess.SubprocessError):
@@ -89,7 +93,7 @@ def running_serves() -> list[tuple[int, str]]:
         pid, command = int(parts[0]), parts[1]
         if pid == os.getpid() or "pgrep" in command or "ompwire uninstall" in command:
             continue
-        if "ompwire" not in command or "serve" not in command:
+        if "ompwire" not in command or not ("gateway run" in command or "serve" in command):
             continue
         found.append((pid, command.strip()))
     return found
@@ -146,7 +150,7 @@ def run(*, yes: bool = False, keep_config: bool = False, force: bool = False,
             print("     (a dry run only reports; use --force to stop them when removing)")
         elif not force:
             print("\nFAIL stop them first, or re-run with --force to stop them now.\n"
-                  "     `ompwire serve` rewrites its state on exit, so removing it underneath\n"
+                  "     A running gateway rewrites its state on exit, so removing it underneath\n"
                   "     a live process leaves a half-written session store.")
             return 1
 

@@ -224,9 +224,12 @@ def _transport_command(pid: int, command: str) -> list[str]:
     if argv[0].endswith(("python", "python3")) or "python" in Path(argv[0]).name:
         return argv
     for index, part in enumerate(argv):
-        if part.endswith("ompwire") and index + 1 < len(argv) and argv[index + 1] == "serve":
+        if not part.endswith("ompwire"):
+            continue
+        rest = argv[index + 1:]
+        if rest[:2] == ["gateway", "run"] or rest[:1] == ["serve"]:
             return argv[index:]
-    return argv if "serve" in command else []
+    return argv if ("gateway run" in command or "serve" in command) else []
 
 
 def restart_gateway(timeout: float = 20.0) -> str:

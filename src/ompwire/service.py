@@ -111,7 +111,7 @@ def install(gateway: str = "telegram", *, force: bool = False, start: bool = Tru
     from .update import serving_processes
 
     if not _systemd_available():
-        print("FAIL systemd --user is not available here; run `ompwire serve --gateway "
+        print("FAIL systemd --user is not available here; run `ompwire gateway run "
               f"{gateway}` under a supervisor of your choice instead")
         return 1
 
@@ -221,7 +221,7 @@ def restart(gateway: str = "telegram") -> int:
 
 def _unit_action(action: str, gateway: str) -> int:
     if not _systemd_available():
-        print(f"FAIL systemd --user is not available; run `ompwire serve --gateway {gateway}`")
+        print(f"FAIL systemd --user is not available; run `ompwire gateway run {gateway}`")
         return 1
     if not unit_path(gateway).is_file():
         print(f"FAIL no unit for {gateway!r} yet. Install it first: "
