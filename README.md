@@ -21,7 +21,8 @@ Telegram  <->  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
 - Approvals arrive as buttons; `/approve` sets the policy, or run with `yolo` and skip them
 - Sessions survive restarts; `/new` starts one, `/resume` picks an old one
 - Model, mode and thinking level switch from chat
-- Photos go straight to the agent
+- Photos go straight to the agent; a PDF, zip or csv is saved and the agent gets the path
+- The agent sends files back: a chart, a screenshot or a report arrives as a photo or a document
 - One systemd unit per bot, so a second bot cannot take the first one down
 
 ## Requirements
@@ -141,7 +142,7 @@ it after the turn ends.
 | `~/.config/ompwire/.env` | secrets (`0600`): one bot token per gateway |
 
 Precedence is defaults, then `config.toml`, then environment variables. Sections in
-`config.toml`: `[acp]`, `[agent]`, `[stream]`, `[mcp]`, `[approval]`, `[logging]`.
+`config.toml`: `[acp]`, `[agent]`, `[stream]`, `[mcp]`, `[files]`, `[approval]`, `[logging]`.
 `ompwire config` prints the merged result with secrets masked. `OMPWIRE_CONFIG_DIR` points
 everything at another directory, for a second install or a throwaway experiment.
 
@@ -150,6 +151,19 @@ with what is on disk, so pressing enter keeps a value and typing changes one thi
 
 MCP servers are not duplicated here. `[mcp] source = "mcp-hub"` reads a shared `servers.yaml`,
 and `exclude` or `[mcp.overrides.<name>]` adjust it per machine without editing the shared file.
+
+`[files]` controls attachments in both directions: `enabled`, `max_mb` (20 by default, applied to
+every file either way) and `incoming_dir`, where documents sent into the chat are written
+(`~/.local/state/ompwire/files` by default). The agent sends a file by naming it in the reply:
+
+```
+Here is the chart you asked for.
+<<file: /home/you/report/chart.png>>
+```
+
+The line is removed before the message is shown. A path outside the agent's working directory, a
+missing file, or one over the limit is refused, and the chat gets one short line saying which file
+and why instead of silently dropping it.
 
 ## Update and remove
 

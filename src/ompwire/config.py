@@ -29,8 +29,22 @@ ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "OMPWIRE_APPROVAL": ("agent", "approval_mode"),
     "OMPWIRE_STREAM_EDIT_INTERVAL": ("stream", "edit_interval"),
     "OMPWIRE_IDLE_TIMEOUT": ("session", "idle_timeout"),
+    "OMPWIRE_FILES_ENABLED": ("files", "enabled"),
+    "OMPWIRE_FILES_MAX_MB": ("files", "max_mb"),
+    "OMPWIRE_FILES_INCOMING_DIR": ("files", "incoming_dir"),
     "TELEGRAM_BOT_TOKEN": ("telegram", "bot_token"),
 }
+
+# Rides along on every session, on top of the configured prose. These are protocol, not taste:
+# the transport parses them, and an install that upgraded keeps working without re-running setup.
+PROTOCOL_HINT = (
+    "Two markers this chat understands, both on their own line:\n"
+    "- <<file: /absolute/path>> sends that file (image, PDF, chart, any document) to the user. "
+    "The path must be inside your working directory; the marker itself is removed from the text. "
+    "One marker can carry several paths separated by a pipe.\n"
+    "- <<options: first | second | third>> asks the user to choose; the transport turns it into "
+    "buttons and removes the line."
+)
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     "acp": {
@@ -48,12 +62,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "approval_mode": "always-ask",
         # omp has no idea it is talking through a chat window, and its default voice
         # leaves commands inline. This hint is what makes replies render as code.
+        # the marker protocol rides on top of the prose below unless this is turned off
+        "protocol_hint": True,
         "append_system_prompt": (
             "You are answering inside a Telegram chat. Format every reply as markdown: "
             "put shell commands, file paths, diffs and multi-line output inside fenced code "
             "blocks with a language tag, use short paragraphs and bullets, and never paste "
             "raw tables where a short list reads better. Keep prose tight. "
             "When you need me to choose between concrete options, end the reply with "
+            "When the user is choosing between a few answers, end the reply with "
             "a single line of the form <<options: first | second | third>> and do not "
             "enumerate the choices in prose; I get them as buttons."
         ),  # forwarded as --approval-mode when set
@@ -73,6 +90,12 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "approval": {
         "policy": "ask",  # ask | allow | deny
         "timeout": 120.0,  # seconds to wait for a button before denying
+    },
+    "files": {
+        "enabled": True,  # attachments in both directions
+        "max_mb": 20.0,  # per file, both directions
+        # where documents sent into the chat are written for the agent to read
+        "incoming_dir": "~/.local/state/ompwire/files",
     },
     "logging": {
         "level": "INFO",

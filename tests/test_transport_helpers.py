@@ -246,6 +246,7 @@ def test_hint_can_be_disabled():
 
     config = load_config(env={})
     config.data.setdefault("agent", {})["append_system_prompt"] = ""
+    config.data["agent"]["protocol_hint"] = False
     agent = ChatAgent.__new__(ChatAgent)
     agent.config = config
     agent.cwd = "/tmp"
@@ -253,3 +254,22 @@ def test_hint_can_be_disabled():
     agent._on_update = None
     agent._on_permission = None
     assert "--append-system-prompt" not in ChatAgent._build_client(agent).args
+
+
+def test_the_marker_protocol_is_always_described():
+    """An upgraded install keeps its old config prose, so the markers cannot live there."""
+    from ompwire.config import load_config
+    from ompwire.telegram import ChatAgent
+
+    config = load_config(env={})
+    config.data.setdefault("agent", {})["append_system_prompt"] = ""
+    agent = ChatAgent.__new__(ChatAgent)
+    agent.config = config
+    agent.cwd = "/tmp"
+    agent.yolo = False
+    agent._on_update = None
+    agent._on_permission = None
+
+    args = ChatAgent._build_client(agent).args
+    hint = args[args.index("--append-system-prompt") + 1]
+    assert "<<file:" in hint and "<<options:" in hint

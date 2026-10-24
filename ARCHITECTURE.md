@@ -51,6 +51,7 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `lock.py` | ~100 | one flock per gateway |
 | `logs.py` | ~62 | redaction filter |
 | `questions.py` | ~40 | the `<<options: a \| b>>` marker turned into buttons |
+| `attachments.py` | ~150 | the `<<file: path>>` marker, its guard rails, and incoming documents |
 
 Line counts move. If a number here is wrong, the file is right and this table is stale.
 
@@ -71,6 +72,31 @@ Line counts move. If a number here is wrong, the file is right and this table is
 8. If the agent ends with `<<options: a | b>>`, the marker is stripped and turned into buttons.
    The chosen text is sent back as an ordinary message.
 
+## Attachments
+
+ACP has no way for the agent to attach a file and no general attachment block going the other way,
+so the transport owns both directions.
+
+Out: the agent names a path in its reply with `<<file: /abs/path>>`, one marker may carry several
+paths separated by a pipe. The marker is stripped from everything the chat sees, including the
+streaming edits, and the files are uploaded once the turn ends. The guard rails are the point:
+the path must resolve inside the agent's working directory (a model that read `~/.ssh` must not be
+able to post it), it must exist and be a file, it must be under `files.max_mb`, and at most five
+files go out per turn. An image under 10 MB travels as a photo, anything else as a document.
+Whatever is refused is reported in one short line naming the file and the reason, because a marker
+that vanishes silently looks like a model that forgot.
+
+In: a document from the chat is written to `files.incoming_dir/<chat id>/` under a name reduced to
+`[A-Za-z0-9._-]` and without overwriting an earlier file, then the agent is told the path, the
+mime type and the size. The agent has a shell, so a readable path beats a content type the
+transport would have to guess at. Images keep their own path: they go to the agent as an ACP
+image content block.
+
+The markers are documented to the agent in `PROTOCOL_HINT`, which is appended to the session on
+top of the configured `append_system_prompt` and can be turned off with `agent.protocol_hint`.
+It is appended rather than stored in the config because setup writes the config once: a protocol
+change would otherwise never reach an install that upgraded.
+
 ## Storage
 
 | Path | Holds |
@@ -80,6 +106,7 @@ Line counts move. If a number here is wrong, the file is right and this table is
 | `~/.config/ompwire/.env` | one credential per gateway, mode `0600` |
 | `~/.local/state/ompwire/sessions.db` | chat key to session id, per-chat prefs |
 | `~/.local/state/ompwire/overrides.json` | approval overrides set from chat |
+| `~/.local/state/ompwire/files/<chat id>/` | documents sent from the chat, for the agent to read |
 | `~/.local/state/ompwire/serve-<gateway>.lock` | flock, one process per gateway |
 | `~/.local/state/ompwire/ompwire.log` | rotating log, redacted |
 

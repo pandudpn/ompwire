@@ -21,6 +21,7 @@ import pathlib
 import signal
 import time
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any, ClassVar
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -38,6 +39,10 @@ from telegram.ext import (
 from . import __version__
 from .acp import AcpClient, AcpError, pick_permission_option
 from .acp import Update as AcpUpdate
+from .attachments import extract as extract_files
+from .attachments import hide_partial as hide_file_partial
+from .attachments import incoming_summary, safe_name
+from .attachments import save as save_incoming
 from .catalog import credential_snapshot, list_providers, list_skills, skill_body
 from .config import Config, approval_policy, save_override
 from .format import card, change, esc, help_sections, now_wib, tool_block
@@ -227,6 +232,10 @@ class ChatAgent:
         args = list(self.config.get("acp", "args") or ["--mode", "acp"])
         approval = "yolo" if (yolo or self.yolo) else str(self.config.get("agent", "approval_mode", ""))
         hint = str(self.config.get("agent", "append_system_prompt", "") or "").strip()
+        if bool(self.config.get("agent", "protocol_hint", True)):
+            from .config import PROTOCOL_HINT
+
+            hint = f"{hint}\n\n{PROTOCOL_HINT}".strip()
         if approval:
             args.append(f"--approval-mode={approval}")
         if hint:
@@ -387,6 +396,34 @@ class ChatAgent:
         except TelegramError as exc:
             log.warning("could not send approval prompt: %s", exc)
 
+    async def deliver_files(self, raw: str) -> None:
+        """Upload the files the agent marked, and say what was dropped.
+
+        The marker never reaches the chat, so a path that does not work would otherwise disappear
+        without a trace. One short line names what was skipped and why.
+        """
+        config = self.config
+        if not bool(config.get("files", "enabled", True)):
+            return
+        max_mb = float(config.get("files", "max_mb", 20.0))
+        _, files, rejected = extract_files(raw, root=self.cwd, max_mb=max_mb)
+        for item in files:
+            try:
+                with item.path.open("rb") as handle:
+                    if item.as_photo:
+                        await self.app.bot.send_photo(self.chat_id, photo=handle)
+                    else:
+                        await self.app.bot.send_document(self.chat_id, document=handle)
+                log.info("file sent chat=%s path=%s bytes=%s", self.chat_id, item.path, item.size)
+            except Exception as exc:  # a send failure must not end the turn
+                log.warning("file send failed chat=%s path=%s: %s", self.chat_id, item.path, exc)
+                rejected.append(f"{item.path.name}: {exc}")
+        if rejected:
+            log.info("files rejected chat=%s: %s", self.chat_id, "; ".join(rejected))
+            shown = rejected[:4]
+            more = "" if len(rejected) <= 4 else f" (+{len(rejected) - 4} more)"
+            await self.send_md("skipped a file · " + " · ".join(shown) + more)
+
     async def offer_options(self, options: list[str], chat_id: int | None = None) -> None:
         """Buttons for the answers the agent offered, plus a free-text escape hatch."""
         target = chat_id or self.chat_id
@@ -468,7 +505,7 @@ class ChatAgent:
             if not force and now - state["last_edit"] < interval:
                 return
             state["last_edit"] = now
-            joined = hide_partial(joined, final=force)
+            joined = hide_file_partial(hide_partial(joined, final=force), final=force)
             if not joined.strip():
                 return
             parts = _chunks(joined, 3600)
@@ -481,9 +518,11 @@ class ChatAgent:
                     sent.append(await self.send_md(extra))
             state["text"] = joined
             if force:
-                _, options = extract_options("".join(text_buffer))
+                raw = "".join(text_buffer)
+                _, options = extract_options(raw)
                 if options:
                     await self.offer_options(options)
+                await self.deliver_files(raw)
 
         async def flush_tools() -> None:
             if not trace:
@@ -887,6 +926,47 @@ class Transport:
         caption = (message.caption or "").strip() or "Describe this image."
         log.info("photo chat=%s bytes=%s caption=%r", chat_id, len(raw), caption[:120])
         payload = _TextOnly(caption, message, images=[block])
+        if self.agent_for(chat_id).busy:
+            depth = self.enqueue(chat_id, "prompt", payload)
+            await message.reply_text(f"queued (position {depth})")
+        else:
+            self.enqueue(chat_id, "prompt", payload)
+
+    async def on_document(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Save a document from the chat and hand the agent its path.
+
+        ACP has no general attachment block, and the agent has a shell: a readable path is more
+        useful than a content type the transport would have to guess at.
+        """
+        if not self._authorized(update):
+            return await self._deny(update)
+        message = update.effective_message
+        if message is None or message.document is None:
+            return
+        if not bool(self.config.get("files", "enabled", True)):
+            return await message.reply_text("file handling is turned off (files.enabled = false)")
+        chat_id = update.effective_chat.id
+        document = message.document
+        max_mb = float(self.config.get("files", "max_mb", 20.0))
+        if document.file_size and max_mb and document.file_size > max_mb * 1024 * 1024:
+            return await message.reply_text(
+                f"too large: {document.file_size / (1024 * 1024):.1f} MB, the limit is {max_mb:g} MB")
+        try:
+            telegram_file = await document.get_file()
+            raw = bytes(await telegram_file.download_as_bytearray())
+        except TelegramError as exc:
+            log.warning("document download failed chat=%s: %s", chat_id, exc)
+            return await message.reply_text(f"could not fetch the file: {exc}")
+        base = Path(str(self.config.get("files", "incoming_dir", "~/.local/state/ompwire/files")))
+        directory = base.expanduser() / str(chat_id)
+        try:
+            target = save_incoming(raw, safe_name(document.file_name or "file"), directory, max_mb)
+        except (OSError, ValueError) as exc:
+            log.warning("document save failed chat=%s: %s", chat_id, exc)
+            return await message.reply_text(f"could not save the file: {exc}")
+        log.info("document chat=%s saved=%s bytes=%s", chat_id, target, len(raw))
+        payload = _TextOnly(
+            incoming_summary(target, document.mime_type or "", message.caption or ""), message)
         if self.agent_for(chat_id).busy:
             depth = self.enqueue(chat_id, "prompt", payload)
             await message.reply_text(f"queued (position {depth})")
@@ -1709,6 +1789,9 @@ class Transport:
         app.add_error_handler(self.on_error)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
         app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self.on_photo))
+        # any other document: PDF, zip, csv, text. The image filter above owns the rest.
+        app.add_handler(MessageHandler(filters.Document.ALL & ~filters.Document.IMAGE,
+                                       self.on_document))
         app.add_handler(MessageHandler(filters.ALL, self.log_update), group=-1)
 
         await app.initialize()
