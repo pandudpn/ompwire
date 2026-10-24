@@ -98,7 +98,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # at the end; edit is the old edit-in-place, which floods on long turns
         "answer": "draft",
         "draft_interval": 0.4,
-        "draft_refresh": 20.0,  # a draft expires ~30 s after its last update
         "edit_interval": 1.0,
         "show_tool_calls": True,
         "show_usage": False,  # per-turn token line; /usage covers it on demand

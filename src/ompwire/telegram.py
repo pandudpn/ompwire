@@ -698,36 +698,16 @@ class ChatAgent:
                                                       parse_mode=ParseMode.HTML)
             except RetryAfter as exc:
                 self._note_rate_limit(exc)
-                return
             except BadRequest as exc:
-                if "parse entities" not in str(exc).lower():
-                    self._draft_unavailable(exc)
+                if "parse entities" in str(exc).lower():
+                    # half-written markdown: a closing tag that has not streamed in yet
+                    with contextlib.suppress(TelegramError):
+                        await self.app.bot.send_message_draft(self.chat_id, draft_id,
+                                                              to_plain(preview))
                     return
-                # half-written markdown: a closing tag that has not streamed in yet
-                try:
-                    await self.app.bot.send_message_draft(self.chat_id, draft_id, to_plain(preview))
-                except TelegramError:
-                    return
+                self._draft_unavailable(exc)
             except TelegramError as exc:
                 self._draft_unavailable(exc)
-                return
-            state["draft_shown"] = joined
-            state["draft_at"] = time.monotonic()
-
-        async def keep_draft_alive() -> None:
-            """Re-send the preview before Telegram drops it.
-
-            A draft lives about 30 s without an update, and a tool call after the first words
-            can easily run longer: the preview vanished while the turn was still working.
-            """
-            refresh = float(self.config.get("stream", "draft_refresh", 20.0))
-            while True:
-                await asyncio.sleep(1.0)
-                shown = state.get("draft_shown")
-                if not shown or not self._draft_ok or self._rate_limited():
-                    continue
-                if time.monotonic() - state.get("draft_at", 0.0) >= refresh:
-                    await show_draft(shown)
 
         async def flush_text(force: bool = False) -> None:
             joined = strip_agent_noise("".join(text_buffer))
@@ -907,7 +887,6 @@ class ChatAgent:
                     await flush_tools()
 
         drain_task = asyncio.create_task(drain())
-        keepalive = asyncio.create_task(keep_draft_alive()) if mode == "draft" else None
         try:
             async with self.typing():
                 result = await asyncio.to_thread(
@@ -932,10 +911,6 @@ class ChatAgent:
             if self._user_cancel or isinstance(exc, AcpTimeout):
                 self.store.end_turn(self.key)
             raise
-        finally:
-            # any other way out of the prompt (a cancelled task) must not leave the refresher on
-            if keepalive is not None:
-                keepalive.cancel()
         self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
         await drain_task
         await flush_reasoning(force=True)

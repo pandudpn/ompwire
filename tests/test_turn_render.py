@@ -502,37 +502,3 @@ def test_edit_mode_keeps_editing_in_place():
     assert not getattr(bot, "drafts", [])
     assert bot.sends == 1
     assert bot.edits >= 2
-
-
-def test_a_draft_is_refreshed_while_a_long_tool_runs(monkeypatch):
-    """Telegram drops a draft ~30 s after its last update; a long tool call must not empty it."""
-    config = _mode_config("draft")
-    config.data["stream"]["draft_refresh"] = 0.0
-    bot = EditCountingBot()
-    monkeypatch.setattr(telegram.asyncio, "sleep", _fast_sleep)
-
-    class SlowClient(FakeClient):
-        def prompt(self, *a, **k):
-            self.on_update(message("sebelum tool "))
-            import time as _t
-            _t.sleep(0.3)  # the tool phase: no new text arrives
-            return super().prompt(*a, **k)
-
-    async def go():
-        agent = telegram.ChatAgent(config, chat_id=1, key="ttl", app=types.SimpleNamespace(bot=bot))
-        agent.client = SlowClient([message("selesai.")])
-        agent.client.on_update = agent._on_update
-        agent.session_id = "s"
-        await agent.ask("halo")
-
-    asyncio.run(go())
-    refreshes = [d for d in bot.drafts if "sebelum tool" in d and "selesai" not in d]
-    assert len(refreshes) >= 2  # first preview, then at least one refresh of the same text
-    assert bot.sends == 1
-
-
-_real_sleep = asyncio.sleep
-
-
-async def _fast_sleep(delay, *a, **k):
-    return await _real_sleep(min(delay, 0.01), *a, **k)

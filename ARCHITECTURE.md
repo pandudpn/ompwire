@@ -264,8 +264,7 @@ deprecation cycle.
   without a 429, and an unclosed `<b>` in a draft is a 400, so a half-written preview is
   resent as plain text. A refused draft switches the process to `final` (one message at the
   end, tool trace still live); a group chat is `final` from the start; `edit` keeps the old
-  behaviour. A draft expires about 30 s after its last update, so a refresher re-sends the
-  current preview every `draft_refresh` seconds while a tool call holds the text still.
+  behaviour.
 - **Keep the process warm.** Each turn carries a large baseline of input tokens (the agent's own
   prompt), mostly cache-served on later turns. Spawning per message throws that away.
 - **`mcpServers` needs `env` as a list.** An entry whose `env` is an object, or missing, fails

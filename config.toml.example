@@ -54,7 +54,6 @@ enabled = true
 # edit:  one message edited in place as text arrives
 answer = "draft"
 draft_interval = 0.4       # seconds between draft previews
-draft_refresh = 20.0       # re-send an idle draft before Telegram drops it (~30 s)
 edit_interval = 1.0        # seconds between message edits in edit mode
 show_tool_calls = true
 show_usage = false       # per-turn token line; use /usage instead
