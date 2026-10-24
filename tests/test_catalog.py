@@ -85,7 +85,7 @@ def test_skill_grid_is_two_columns_and_clickable(tmp_path):
         async def edit_text(self, text, reply_markup=None, parse_mode=None):
             Message.text, Message.keyboard = text, reply_markup
 
-    for index in range(4):
+    for index in range(14):   # more than one page, so the nav row exists
         folder = tmp_path / f"skill-{index}"
         folder.mkdir()
         (folder / "SKILL.md").write_text(
@@ -97,9 +97,9 @@ def test_skill_grid_is_two_columns_and_clickable(tmp_path):
 
     rows = Message.keyboard.inline_keyboard
     skill_rows = [row for row in rows if row[0].callback_data.startswith("skv:")]
-    assert [len(row) for row in skill_rows] == [2, 2]          # two per row
+    assert [len(row) for row in skill_rows] == [2] * 5          # five rows, two per row
     assert [b.callback_data for b in skill_rows[0]] == ["skv:0", "skv:1"]
-    assert rows[-1][0].text == "1/2"                           # nav row
+    assert rows[-1][0].text == "1/2"                            # nav row
 
 
 def test_login_grid_marks_signed_in_providers():
