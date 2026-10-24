@@ -210,13 +210,12 @@ def run_chat(config: Config, key: str, query: str | None = None, cwd: str | None
             if line == "/help":
                 print("/new  fresh session · /stop  cancel turn · /model <id> · /mode <default|plan> · /exit")
                 continue
-            if line.startswith("/model "):
-                value = line.split(maxsplit=1)[1]
-                session.client.set_config_option(session.session_id, "model", value)
-                continue
-            if line.startswith("/mode "):
-                value = line.split(maxsplit=1)[1]
-                session.client.set_config_option(session.session_id, "mode", value)
+            if line.startswith("/model ") or line.startswith("/mode "):
+                key, value = line[1:].split(maxsplit=1)
+                try:
+                    session.client.set_config_option(session.session_id, key, value)
+                except AcpError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
                 continue
             try:
                 session.ask(line)

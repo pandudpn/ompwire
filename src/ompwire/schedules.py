@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import gateways
@@ -52,7 +52,6 @@ class Schedule:
     timeout: float = 1800.0  # seconds, also the unit's TimeoutStartSec
     timezone: str = DEFAULT_TIMEZONE  # "0 7 * * *" means 07:00 here, not on the server's clock
     last_status: str = ""    # what the last run did, for /schedule to show
-    extra: dict = field(default_factory=dict)
 
     @property
     def on_calendar(self) -> str:
@@ -100,25 +99,49 @@ def parse(expr: str) -> str:
     return " ".join(part for part in (weekday, date_spec, time_spec) if part)
 
 
+def _expand(value: str) -> list[int]:
+    """A cron field to sorted numbers: `9-17`, `1,5`, or a plain number. Steps raise ValueError."""
+    out: set[int] = set()
+    for token in value.split(","):
+        if "/" in token:
+            raise ValueError(token)
+        if "-" in token:
+            low, high = (int(part) for part in token.split("-", 1))
+            out.update(range(low, high + 1))
+        else:
+            out.add(int(token))
+    return sorted(out)
+
+
+def _expand_field(value: str) -> list[int]:
+    try:
+        return _expand(value)
+    except ValueError:
+        raise ScheduleError(
+            f"'{value}' with a step is not supported; use --on-calendar") from None
+
+
 def _time_spec(minute: str, hour: str) -> str:
     if hour.startswith("*/"):
         # the step belongs in the hour field: 00/2 is every two hours, not every two minutes
         if minute.startswith("*/"):
             raise ScheduleError("two steps in one entry cannot be expressed; use --on-calendar")
-        exact = int(minute) if minute != "*" else 0
-        return f"00/{int(hour[2:]):02d}:{exact:02d}:00"
+        exacts = [0] if minute == "*" else _expand_field(minute)
+        return ",".join(f"00/{int(hour[2:]):02d}:{part:02d}:00" for part in exacts)
     if hour == "*":
         if minute.startswith("*/"):
             return f"*:00/{int(minute[2:]):02d}:00"
         if minute == "*":
             return "*:*:00"
         return f"*:{int(minute):02d}:00"
-    hours = ",".join(f"{int(part):02d}" for part in hour.split(","))
     if minute.startswith("*/"):
         raise ScheduleError("a minute step needs every hour (minute */N hour *)")
+    hours = ",".join(f"{part:02d}" for part in _expand_field(hour))
     if minute == "*":
         return f"{hours}:*:00"
-    return f"{hours}:{int(minute):02d}:00"
+    if "," in hours:
+        return ",".join(f"{h}:{m:02d}:00" for h in hours.split(",") for m in _expand_field(minute))
+    return ",".join(f"{hours}:{m:02d}:00" for m in _expand_field(minute))
 
 
 def _date_spec(dom: str, month: str) -> str:
@@ -350,10 +373,6 @@ def render_timer(item: Schedule) -> str:
         "WantedBy=timers.target",
         "",
     ])
-
-
-def summary(item: Schedule) -> dict:
-    return {key: value for key, value in asdict(item).items() if key != "extra"}
 
 
 def systemd_dir() -> Path:

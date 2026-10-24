@@ -7,7 +7,8 @@ pinned here without needing a bot token or an ACP process.
 from __future__ import annotations
 
 from ompwire.config import load_config
-from ompwire.telegram import Transport, normalize_mcp_servers
+from ompwire.mcp_hub import normalize
+from ompwire.telegram import Transport
 
 
 class FakeAgent:
@@ -16,14 +17,14 @@ class FakeAgent:
 
 
 def test_env_object_is_converted_to_array():
-    shaped = normalize_mcp_servers([{"name": "x", "command": "npx", "args": ["-y", "pkg"], "env": {"A": "1"}}])
+    shaped = normalize([{"name": "x", "command": "npx", "args": ["-y", "pkg"], "env": {"A": "1"}}])
     assert shaped[0]["env"] == [{"name": "A", "value": "1"}]
     assert shaped[0]["type"] == "stdio"
 
 
 def test_missing_env_becomes_empty_list():
     # omp 18.12.6 rejects session/new when env is absent or an object
-    shaped = normalize_mcp_servers([{"name": "y", "command": "bun"}])
+    shaped = normalize([{"name": "y", "command": "bun"}])
     assert shaped[0]["env"] == []
     assert shaped[0]["args"] == []
 

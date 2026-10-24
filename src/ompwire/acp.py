@@ -34,6 +34,10 @@ class AcpError(RuntimeError):
     """Transport or protocol failure."""
 
 
+class AcpTimeout(AcpError):
+    """The agent stayed silent past the deadline; ompwire gave up on it, the agent did not die."""
+
+
 @dataclass(slots=True)
 class Update:
     """One `session/update` notification, flattened for consumers."""
@@ -188,12 +192,14 @@ class AcpClient:
         self._write(msg)
 
     def _write(self, msg: dict[str, Any]) -> None:
-        if self._proc is None or self._proc.stdin is None:
-            raise AcpError("ACP process is not running")
         with self._lock:
+            # read under the lock: close() can null _proc between a check and the write
+            proc = self._proc
+            if proc is None or proc.stdin is None:
+                raise AcpError("ACP process is not running")
             try:
-                self._proc.stdin.write(json.dumps(msg) + "\n")
-                self._proc.stdin.flush()
+                proc.stdin.write(json.dumps(msg) + "\n")
+                proc.stdin.flush()
             except (BrokenPipeError, ValueError) as exc:
                 raise AcpError(f"ACP process died: {self._stderr_hint()}") from exc
 
@@ -226,7 +232,7 @@ class AcpClient:
                     if idle and time.monotonic() - self._last_activity < timeout:
                         continue
                     kind = "silent for" if idle else "timed out after"
-                    raise AcpError(f"{method} {kind} {timeout}s ({self._stderr_hint()})") from exc
+                    raise AcpTimeout(f"{method} {kind} {timeout}s ({self._stderr_hint()})") from exc
         finally:
             self._pending.pop(msg_id, None)
         if "error" in reply:

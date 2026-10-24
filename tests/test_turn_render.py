@@ -327,7 +327,14 @@ def test_the_tool_trace_is_throttled_without_a_flood(monkeypatch):
 @pytest.mark.parametrize(("command", "expected"), [
     # reads that real turns ask for, and that nobody should have to approve
     ("ls -d ~/ompwire ~/*/ompwire 2>/dev/null", True),
-    ("find src -name '*.py' -printf '%s %p\\n' | sort -n | awk '{print}'", True),
+    ("find src -name '*.py' -printf '%s %p\\n' | sort -n", True),
+    ("awk 'BEGIN{system(\"rm -rf /tmp/x\")}'", False),
+    ("sort -o out.txt in.txt", False),
+    ("find . -fprint files.txt", False),
+    ("git branch -D main", False),
+    ("git branch --show-current", True),
+    ("git remote add origin https://x", False),
+    ("git remote -v", True),
     ("git log --oneline -5 && git status --short", True),
     ("git log --oneline 2>&1 | head", True),
     ("gh repo view noovoleum/infra-deploy-prod", True),

@@ -14,5 +14,3 @@ def test_prefs_are_per_key_and_survive(tmp_path):
     store.set_pref("tg:1", "model", "zai/glm-5.3")   # upsert, not duplicate
     assert store.prefs("tg:1")["model"] == "zai/glm-5.3"
 
-    store.drop_pref("tg:1", "yolo")
-    assert "yolo" not in store.prefs("tg:1")

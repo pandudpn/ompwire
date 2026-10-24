@@ -114,3 +114,43 @@ def test_human_readable_sizes():
     assert uninstall.human(512) == "512B"
     assert uninstall.human(2048) == "2.0K"
     assert uninstall.human(5 * 1024 * 1024) == "5.0M"
+
+
+def test_every_generated_unit_is_removed_not_just_the_telegram_one(monkeypatch, tmp_path):
+    from ompwire import service
+
+    _layout(monkeypatch, tmp_path)
+    unit_dir = tmp_path / "units"
+    unit_dir.mkdir(exist_ok=True)
+    removed: list[str] = []
+
+    def unit_path(gateway: str = "telegram") -> object:
+        return unit_dir / service.unit_name(gateway)
+
+    monkeypatch.setattr(service, "unit_path", unit_path)
+    for name in ("ompwire-telegram.service", "ompwire-schedule-morning.service",
+                 "ompwire-schedule-morning.timer", "ompwire-other.service"):
+        (unit_dir / name).write_text("[Unit]\n", encoding="utf-8")
+    monkeypatch.setattr(service, "remove",
+                        lambda *a, **kw: removed.append(kw["path"].name) or 0)
+
+    assert uninstall.run(yes=True) == 0
+    assert sorted(removed) == ["ompwire-other.service", "ompwire-schedule-morning.service",
+                               "ompwire-schedule-morning.timer", "ompwire-telegram.service"]
+
+
+def test_a_sandboxed_run_never_reaches_the_real_state(monkeypatch, tmp_path):
+    real_state = tmp_path / "real-state"
+    real_data = tmp_path / "real-data"
+    real_state.mkdir()
+    real_data.mkdir()
+    monkeypatch.setattr(uninstall, "STATE_DIR", real_state)
+    monkeypatch.setattr(uninstall, "DATA_DIR", real_data)
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(sandbox))
+
+    paths = [path for path, _note in uninstall.targets()]
+    assert real_state not in paths
+    assert real_data not in paths
+    assert sandbox in paths

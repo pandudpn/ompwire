@@ -182,3 +182,41 @@ def test_queue_mode_keeps_the_old_fifo(tmp_path):
     queued = _submit(config, client, True, msg)
     assert client.steered == []
     assert queued == ["wait your turn"]
+
+
+def test_an_idle_evicted_chat_still_works_on_the_next_message(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        agent = _agent(config, Client())
+        agent.client.close = lambda *_a, **_k: None
+        await agent.stop_process()
+        agent.client = Client()
+        await agent.ask("after eviction")  # used to raise: Cannot operate on a closed database
+
+    asyncio.run(go())
+    assert _pending(config) == []
+
+
+def test_schedule_lists_without_crashing(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    sent: list[str] = []
+
+    class SchedBot(Bot):
+        async def send_message(self, chat_id, text, **kw):
+            sent.append(text)
+            return await super().send_message(chat_id, text, **kw)
+
+    monkeypatch.setattr(telegram.schedule_lib, "load", lambda: {})
+    update = types.SimpleNamespace(effective_user=types.SimpleNamespace(id=7),
+                                   effective_chat=types.SimpleNamespace(id=7),
+                                   effective_message=None)
+
+    async def go():
+        transport = telegram.Transport(config)
+        transport.allowed = {7}
+        transport.app = types.SimpleNamespace(bot=SchedBot())
+        await transport.cmd_schedule(update, types.SimpleNamespace(args=[]))
+
+    asyncio.run(go())
+    assert any("no schedules yet" in body for body in sent)

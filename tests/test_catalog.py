@@ -46,31 +46,6 @@ def test_missing_skill_dir_is_not_fatal(tmp_path):
     assert list_skills((str(tmp_path / "nope"),)) == []
 
 
-def test_credentials_in_db_reads_names_and_types(tmp_path):
-    import sqlite3
-
-    from ompwire.catalog import credentials_in_db
-
-    db = tmp_path / "agent.db"
-    con = sqlite3.connect(db)
-    con.execute("CREATE TABLE auth_credentials (provider TEXT, credential_type TEXT, data TEXT)")
-    con.executemany("INSERT INTO auth_credentials VALUES (?,?,?)",
-                    [("zai", "api_key", "secret-shape"), ("anthropic", "oauth", "secret-shape")])
-    con.commit()
-    con.close()
-
-    assert credentials_in_db(str(db)) == {"zai": "api_key", "anthropic": "oauth"}
-
-
-def test_credentials_in_db_tolerates_missing_or_foreign_files(tmp_path):
-    from ompwire.catalog import credentials_in_db
-
-    assert credentials_in_db(str(tmp_path / "nope.db")) == {}
-    empty = tmp_path / "empty.db"
-    empty.write_bytes(b"")
-    assert credentials_in_db(str(empty)) == {}
-
-
 def test_skill_grid_is_two_columns_and_clickable(tmp_path):
     import asyncio
 

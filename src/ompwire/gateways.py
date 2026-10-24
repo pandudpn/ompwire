@@ -20,7 +20,6 @@ from typing import Any
 
 KINDS = ("telegram", "whatsapp")
 IMPLEMENTED = ("telegram",)
-DEFAULT_NAMES = {"telegram": "telegram", "whatsapp": "whatsapp"}
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 
 

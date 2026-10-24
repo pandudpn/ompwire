@@ -21,6 +21,7 @@ import pathlib
 import re
 import signal
 import time
+import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, ClassVar
@@ -39,7 +40,7 @@ from telegram.ext import (
 
 from . import __version__, allowlist, gateways
 from . import schedules as schedule_lib
-from .acp import AcpClient, AcpError, pick_permission_option
+from .acp import AcpClient, AcpError, AcpTimeout, pick_permission_option
 from .acp import Update as AcpUpdate
 from .attachments import extract as extract_files
 from .attachments import hide_partial as hide_file_partial
@@ -125,11 +126,6 @@ def mcp_label(names: Iterable[str]) -> str:
     if len(names) > MCP_LABEL_MAX:
         shown += f" +{len(names) - MCP_LABEL_MAX}"
     return shown
-
-
-def normalize_mcp_servers(servers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Backwards-compatible alias for `mcp_hub.normalize`."""
-    return normalize(list(servers or []))
 
 
 # Choices that belong to the chat, not to one ACP session: /new must not reset them.
@@ -261,10 +257,8 @@ class ChatAgent:
         self.turns = 0
         self.tools_used = 0
         self.options: dict[str, dict[str, Any]] = {}
-        self.mcp_warning = ""
         self.info: dict[str, Any] = {}
         self.agent_version = ""
-        self.picker: dict[str, Any] = {}
         self.advertised_commands: list[str] = []
         self._updates: asyncio.Queue[AcpUpdate | None] = asyncio.Queue()
         self._pending_perm: dict[str, dict[str, Any]] = {}
@@ -325,7 +319,6 @@ class ChatAgent:
             if not self._mcp_servers():
                 raise
             log.warning("session/new with mcp servers failed (%s); retrying without them", exc)
-            self.mcp_warning = str(exc)
             result = await asyncio.to_thread(self.client.new_session, self.cwd, [])
             self.session_id = str(result.get("sessionId") or "")
         finally:
@@ -385,7 +378,7 @@ class ChatAgent:
         if command and allowlist.is_read_only(command):
             log.info("permission auto-allow chat=%s (read-only): %s", self.chat_id, command[:120])
             return pick_permission_option(params, "allow")
-        token = f"perm-{int(time.time() * 1000)}"
+        token = f"perm-{uuid.uuid4().hex[:12]}"  # two requests can land in the same millisecond
         slot: dict[str, Any] = {"optionId": None, "params": params}
         self._pending_perm[token] = slot
         self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._ask_permission(token, params)))
@@ -849,7 +842,7 @@ class ChatAgent:
                     images=images or None,
                     timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
                 )
-        except AcpError:
+        except AcpError as exc:
             # A silent turn is abandoned here, so stop it in omp too: left running, its late
             # chunks land in the next turn's stream and the chat sees the answer twice.
             if self.client is not None and self.client.alive:
@@ -861,8 +854,9 @@ class ChatAgent:
             await drain_task
             await flush_text(force=True)  # what did arrive is still worth showing
             self.busy = False
-            # the agent died under the turn; only a deliberate stop/kill means it is finished
-            if self._user_cancel:
+            # A crash or shutdown cut keeps the row, so the next start resumes it. A deliberate
+            # stop and a silence timeout do not: the person has already been told it failed.
+            if self._user_cancel or isinstance(exc, AcpTimeout):
                 self.store.end_turn(self.key)
             raise
         self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
@@ -972,10 +966,14 @@ class ChatAgent:
         self.client = None
         await self.ensure(yolo=yolo)
 
-    async def shutdown(self) -> None:
+    async def stop_process(self) -> None:
+        """Close the agent process; the chat keeps its store and comes back on the next message."""
         if self.client is not None:
             await asyncio.to_thread(self.client.close, self.session_id)
             self.client = None
+
+    async def shutdown(self) -> None:
+        await self.stop_process()
         self.store.close()
 
     async def new_session(self) -> str:
@@ -1062,6 +1060,7 @@ class Transport:
         items = schedule_lib.load()
         if not items:
             return await self.send_md(
+                chat_id,
                 "no schedules yet. Just ask, for example: \"every morning at 7, summarise the repo\".")
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"▶ {name}", callback_data=f"sched:run:{name}"),
@@ -1074,7 +1073,7 @@ class Transport:
             rows.append(f"{name} · {item.cron or item.calendar} · {item.timezone} → {item.gateway}"
                         f" · {item.last_status or 'never ran'}")
         await self.app.bot.send_message(
-            self.chat_id, card("schedules", f"{len(items)}", [("scheduled", "\n".join(rows))],
+            chat_id, card("schedules", f"{len(items)}", [("scheduled", "\n".join(rows))],
                                "run one now or remove it with the buttons"),
             parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
@@ -1103,7 +1102,7 @@ class Transport:
                 idle = float(self.config.get("session", "idle_timeout", 1800))
                 if not agent.busy and time.time() - agent.last_used > idle and agent.client is not None:
                     log.info("idle eviction for chat %s", chat_id)
-                    await agent.shutdown()
+                    await agent.stop_process()
                 if queue.empty():
                     return
                 continue
@@ -1184,11 +1183,13 @@ class Transport:
         """Acknowledge without adding a message to the chat; a reply if reactions are refused."""
         try:
             await message.set_reaction(emoji)
-        except (TelegramError, AttributeError):
+            log.info("react %s ok", emoji)
+        except (TelegramError, AttributeError) as exc:
+            log.warning("react %s failed (%s); replying instead", emoji, exc)
             try:
                 await message.reply_text(fallback)
-            except TelegramError:
-                pass
+            except TelegramError as reply_exc:
+                log.warning("react fallback reply failed: %s", reply_exc)
 
     def _agent_gate(self, agent: ChatAgent) -> str:
         """What the agent itself was started with, which is what decides whether anything asks."""
@@ -1401,8 +1402,9 @@ class Transport:
         if not skills:
             return
         window, index, pages = paginate(skills, max(0, page - 1), self.SKILL_PAGE)
-        buttons = [InlineKeyboardButton(skill.name[:28], callback_data=f"skv:{skills.index(skill)}")
-                   for skill in window]
+        offset = index * self.SKILL_PAGE
+        buttons = [InlineKeyboardButton(skill.name[:28], callback_data=f"skv:{offset + position}")
+                   for position, skill in enumerate(window)]
         rows = two_columns(buttons)
         nav = []
         if pages > 1:
@@ -2074,11 +2076,8 @@ class Transport:
                     card("❓ answer sent", answer, [], "waiting for the agent"), parse_mode=ParseMode.HTML)
             except BadRequest:
                 pass
-            if agent.busy:
-                depth = self.enqueue(chat_id, "prompt", _TextOnly(answer, query.message))
-                await self.app.bot.send_message(chat_id, f"queued (position {depth})")
-            else:
-                self.enqueue(chat_id, "prompt", _TextOnly(answer, query.message))
+            payload = _TextOnly(answer, query.message)
+            await self.submit(chat_id, payload, query.message)
             return
 
         if data.startswith("skv:"):
@@ -2154,6 +2153,8 @@ class Transport:
             await query.answer()
             return
 
+        if data in {"sk:noop", "lg:noop"}:  # the page counter between the arrows
+            return await query.answer()
         try:
             token, index = data.rsplit(":", 1)
             label = await agent.handle_permission_callback(token, int(index))

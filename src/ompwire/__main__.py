@@ -223,7 +223,7 @@ def cmd_gateway(args: argparse.Namespace) -> int:
         return 0
 
     if action == "list":
-        items = gateways.load()
+        items = gateways.load(load_config(args.config))
         if not items:
             print("no gateway configured. Run `ompwire gateway add telegram`.")
             return 0
@@ -241,7 +241,7 @@ def cmd_gateway(args: argparse.Namespace) -> int:
         return 0
 
     if action == "add":
-        return _gateway_add(args, gateways, service, bot_identity)
+        return _gateway_add(args, gateways, bot_identity)
 
     if action in ("remove", "rm"):
         try:
@@ -322,7 +322,18 @@ def _gateway_logs(item, service) -> int:
     return 0
 
 
-def _gateway_add(args: argparse.Namespace, gateways, service, bot_identity) -> int:
+def _allowed_ids(args: argparse.Namespace) -> list[int] | None:
+    """`--allowed` as numbers, or None when the flag was not given."""
+    raw = (getattr(args, "allowed", "") or "").replace(",", " ").split()
+    if not raw:
+        return None
+    try:
+        return [int(part) for part in raw]
+    except ValueError:
+        return []
+
+
+def _gateway_add(args: argparse.Namespace, gateways, bot_identity) -> int:
     from .setup import normalise_token
 
     kind = getattr(args, "kind", "") or ""
@@ -350,10 +361,14 @@ def _gateway_add(args: argparse.Namespace, gateways, service, bot_identity) -> i
               f"     telegram is the transport that works today.", file=sys.stderr)
         return 1
 
-    name = (getattr(args, "name", "") or kind).lower()
     try:
-        existing = {item.name for item in gateways.load()}
+        name = gateways.validate_name((getattr(args, "name", "") or kind).lower())
     except gateways.GatewayError as exc:
+        print(f"FAIL {exc}", file=sys.stderr)
+        return 1
+    try:
+        existing = {item.name for item in gateways.load(load_config(args.config))}
+    except (gateways.GatewayError, ValueError) as exc:
         print(f"FAIL {exc}", file=sys.stderr)
         return 1
     if name in existing and not args.force:
@@ -385,23 +400,25 @@ def _gateway_add(args: argparse.Namespace, gateways, service, bot_identity) -> i
 
     if name in existing:
         gateways.save([item if item.name != name else gateways.Gateway(
-            name=name, kind=kind, allowed=item.allowed, home=item.home) for item in
-            gateways.load()])
+            name=item.name, kind=item.kind, allowed=item.allowed, home=item.home,
+            enabled=item.enabled) for item in gateways.load(load_config(args.config))])
         print(f"ok   gateway {name!r} already defined, credential replaced")
     else:
-        gateways.add(name, kind, allowed=[], home=None)
+        gateways.add(name, kind, allowed=_allowed_ids(args), home=None)
         print(f"ok   gateway added: {name} ({kind})")
 
     env_path = gateways.set_token(gateways.Gateway(name=name, kind=kind), token)
     print(f"ok   credential stored in {env_path} (0600)")
     print(f"ok   token valid: @{username}")
 
-    items = gateways.load()
+    items = gateways.load(load_config(args.config))
     item = next(entry for entry in items if entry.name == name)
     if not item.allowed and not args.yes:
-        answer = input(f"allowed telegram user ids for @{username} "
-                       f"(comma separated, blank = nobody): ").strip()
-        ids = [int(part) for part in answer.replace(" ", "").split(",") if part.isdigit()]
+        ids = _allowed_ids(args)
+        if ids is None:
+            answer = input(f"allowed telegram user ids for @{username} "
+                           f"(comma separated, blank = nobody): ").strip()
+            ids = [int(part) for part in answer.replace(" ", "").split(",") if part.isdigit()]
         item.allowed = ids
         item.home = ids[0] if ids else None
         gateways.save(items)

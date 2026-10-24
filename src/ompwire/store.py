@@ -106,10 +106,6 @@ class SessionStore:
         )
         self._db.commit()
 
-    def drop_pref(self, key: str, name: str) -> None:
-        self._db.execute("DELETE FROM prefs WHERE key = ? AND name = ?", (key, name))
-        self._db.commit()
-
     def get(self, key: str) -> SessionRecord | None:
         row = self._db.execute("SELECT * FROM sessions WHERE key = ?", (key,)).fetchone()
         if row is None:

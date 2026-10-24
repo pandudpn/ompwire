@@ -214,3 +214,39 @@ def test_logs_falls_back_to_journalctl(sandbox, monkeypatch, capsys):
     monkeypatch.setattr("subprocess.run", lambda *a, **k: Result())
     assert cli.main(["gateway", "logs", "telegram"]) == 0
     assert "line one" in capsys.readouterr().out
+
+
+def test_add_uses_allowed_ids_from_the_flag_not_the_prompt(sandbox, monkeypatch, capsys):
+    _identifies(monkeypatch)
+    monkeypatch.setattr("sys.stdin", io.StringIO("123:abcdef\n"))
+    prompts: list[str] = []
+
+    def fail(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", fail)
+
+    assert cli.main(["gateway", "add", "telegram", "--token-stdin", "--yes",
+                     "--allowed", "11, 22"]) == 0
+
+    assert not prompts
+    assert gateways.load()[0].allowed == [11, 22]
+
+
+def test_force_preserves_a_disabled_gateway(sandbox, monkeypatch, capsys):
+    _identifies(monkeypatch)
+    gateways.add("telegram", enabled=False)
+    monkeypatch.setattr("sys.stdin", io.StringIO("123:abcdef\n"))
+
+    assert cli.main(["gateway", "add", "telegram", "--token-stdin", "--yes", "--force"]) == 0
+
+    assert gateways.load()[0].enabled is False
+
+
+def test_add_rejects_an_invalid_name_like_remove_does(sandbox, monkeypatch, capsys):
+    _identifies(monkeypatch)
+    monkeypatch.setattr("sys.stdin", io.StringIO("123:abcdef\n"))
+
+    assert cli.main(["gateway", "add", "bad name!", "--token-stdin", "--yes"]) == 1
+    assert "FAIL" in capsys.readouterr().err

@@ -19,17 +19,29 @@ DATA_DIR = Path("~/.local/share/ompwire")
 NEVER_TOUCH = (Path("~/.omp"),)
 
 
+def _sandbox() -> Path | None:
+    override = os.environ.get("OMPWIRE_CONFIG_DIR", "").strip()
+    return Path(override).expanduser() if override else None
+
+
 def _config_dir() -> Path:
     """Honour OMPWIRE_CONFIG_DIR so a sandbox run cannot delete a real install."""
-    override = os.environ.get("OMPWIRE_CONFIG_DIR", "").strip()
-    return Path(override).expanduser() if override else CONFIG_DIR.expanduser()
+    return _sandbox() or CONFIG_DIR.expanduser()
 
 
 def targets(keep_config: bool = False) -> list[tuple[Path, str]]:
-    """Everything ompwire owns, with a note on what it holds."""
+    """Everything ompwire owns, with a note on what it holds.
+
+    Under OMPWIRE_CONFIG_DIR the sandbox is the whole install: state and data are looked for
+    inside it. Only redirecting the config once let a sandboxed uninstall wipe the real
+    ~/.local/state and ~/.local/share of a live gateway.
+    """
+    sandbox = _sandbox()
+    state = sandbox / "state" if sandbox else STATE_DIR.expanduser()
+    data = sandbox / "data" if sandbox else DATA_DIR.expanduser()
     plan = [
-        (STATE_DIR.expanduser(), "session ids, per-chat prefs, approval override, logs"),
-        (DATA_DIR.expanduser(), "MCP server installs created by ompwire"),
+        (state, "session ids, per-chat prefs, approval override, logs"),
+        (data, "MCP server installs created by ompwire"),
     ]
     if not keep_config:
         plan.insert(0, (_config_dir(), "config.toml and .env (bot token)"))
@@ -151,12 +163,15 @@ def run(*, yes: bool = False, keep_config: bool = False, force: bool = False,
 
     from . import service
 
-    unit = service.unit_path()
-    if unit.is_file():
+    # systemd units are per user, not per sandbox: a sandboxed run must not stop the real gateway
+    unit_dir = service.unit_path().parent
+    units = [] if _sandbox() else sorted(path for path in unit_dir.glob("ompwire*")
+                                         if path.suffix in (".service", ".timer"))
+    for unit in units:
         if dry_run:
             print(f"--   systemd unit would be disabled and removed: {unit}")
         else:
-            service.remove()
+            service.remove(path=unit, quiet=True)
 
     plan = targets(keep_config)
     serves = running_serves()

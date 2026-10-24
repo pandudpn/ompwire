@@ -35,6 +35,10 @@ def _escape(text: str) -> str:
     return html.escape(text, quote=False)
 
 
+def _escape_url(url: str) -> str:
+    return html.escape(url, quote=True)
+
+
 def _fence(block: str) -> str:
     body = block[3:]
     language = ""
@@ -125,7 +129,7 @@ def _inline(text: str) -> str:
     work = INLINE_CODE_RE.sub(lambda m: stash(re.match(r"`([^`\n]+)`", m.group(0))), text)
     work = _escape(work)
     work = HEADING_RE.sub(lambda m: f"<b>{m.group(2)}</b>", work)
-    work = LINK_RE.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', work)
+    work = LINK_RE.sub(lambda m: f'<a href="{_escape_url(m.group(2))}">{m.group(1)}</a>', work)
     work = BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", work)
     work = ITALIC_RE.sub(lambda m: f"<i>{m.group(1)}</i>", work)
     work = STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", work)
@@ -190,10 +194,12 @@ def strip_html(text: str) -> str:
 
 
 # omp injects MCP connect failures into the agent's own message stream; they are
-# diagnostics for us, not something to read in the chat.
+# diagnostics for us, not something to read in the chat. A failure ends at its
+# line, or at the restart sentence, so the agent's own answer after it survives.
 MCP_NOISE_RE = re.compile(
-    r"MCP (?:srv|server)s?\s+[\"']?[^\"'.:]+[\"']?\s+failed to connect:.*?"
-    r"(?:restarts the session\.|$)",
+    r"MCP (?:srv|server)s?\s+[\"']?[^\n\"\'.:]+[\"']?\s+failed to connect:"
+    # a failure runs to the restart sentence, the end of its line, or the end of the text
+    r".*?(?:restarts the session\.|(?=\n)|$)",
     re.DOTALL,
 )
 

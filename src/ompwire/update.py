@@ -13,8 +13,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 REPO = "pandudpn/ompwire"
@@ -22,16 +20,6 @@ GIT_URL = f"git+https://github.com/{REPO}.git"
 PACKAGE = "ompwire"
 STABLE = "stable"
 EDGE = "edge"
-
-
-def _get(url: str, timeout: float = 10.0) -> dict | list | None:
-    request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
-                                                   "User-Agent": "ompwire-update"})
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode())
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
-        return None
 
 
 def current_version() -> str:

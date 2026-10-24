@@ -21,7 +21,7 @@ def sandbox_config(monkeypatch, tmp_path):
     ("*/15 * * * *", "*-*-* *:00/15:00"),
     ("0 */6 * * *", "*-*-* 00/06:00:00"),
     ("15 * * * *", "*-*-* *:15:00"),
-    ("0 7,19 * * *", "*-*-* 07,19:00:00"),
+    ("0 7,19 * * *", "*-*-* 07:00:00,19:00:00"),
     ("0 9 * * 0", "Sun *-*-* 09:00:00"),
     ("0 9 * * 7", "Sun *-*-* 09:00:00"),
     ("0 9 1 * *", "*-*-01 09:00:00"),
@@ -210,3 +210,15 @@ def test_a_schedule_says_itself_in_words(cron, words):
 def test_an_explicit_calendar_is_shown_as_written():
     item = schedules.Schedule(name="x", cron="", calendar="Mon..Fri 07:00", prompt="p")
     assert schedules.describe(item) == "Mon..Fri 07:00"
+
+
+def test_hour_and_minute_ranges_expand_into_the_calendar():
+    assert schedules.to_on_calendar("0 9-17 * * *") == \
+        "*-*-* 09:00:00,10:00:00,11:00:00,12:00:00,13:00:00,14:00:00,15:00:00,16:00:00,17:00:00"
+    assert schedules.to_on_calendar("15,45 2 * * *") == "*-*-* 02:15:00,02:45:00"
+
+
+def test_a_stepped_hour_range_is_refused_with_direction_not_a_traceback():
+    with pytest.raises(schedules.ScheduleError) as excinfo:
+        schedules.to_on_calendar("0 9-17/2 * * *")
+    assert "--on-calendar" in str(excinfo.value)

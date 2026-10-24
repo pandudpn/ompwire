@@ -349,16 +349,6 @@ def _mcp_wizard(yes: bool, path: Path | None = None) -> Path | None:
             return written
 
 
-def _existing_env() -> dict[str, str]:
-    values: dict[str, str] = {}
-    env_file = _paths()[2]
-    if env_file.is_file():
-        for raw in env_file.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
 
 
 def _next_steps() -> None:
@@ -446,8 +436,7 @@ def _summary(settings: dict[str, Any]) -> str:
     return " · ".join(parts)
 
 
-def run(*, yes: bool = False, force: bool = False, install_omp: bool = False,
-        token: str = "") -> int:
+def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) -> int:
     config_dir, config_file, _env_file = _paths()
     print("ompwire setup\n")
 

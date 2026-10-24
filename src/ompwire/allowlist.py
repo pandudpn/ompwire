@@ -22,7 +22,7 @@ READ_ONLY: tuple[tuple[str, ...], ...] = (
     ("stat",), ("du",), ("df",), ("tree",), ("file",), ("which",), ("whereis",),
     ("ps",), ("pgrep",), ("uname",), ("uptime",), ("free",), ("id",), ("hostname",),
     ("date",), ("pwd",), ("whoami",), ("echo",), ("jq",), ("sort",), ("uniq",), ("cut",),
-    ("tr",), ("awk",), ("diff",), ("column",), ("basename",), ("dirname",), ("realpath",),
+    ("tr",), ("diff",), ("column",), ("basename",), ("dirname",), ("realpath",),
     ("git", "status"), ("git", "log"), ("git", "diff"), ("git", "show"), ("git", "branch"),
     ("git", "remote"), ("git", "rev-parse"), ("git", "ls-files"), ("git", "describe"),
     ("git", "blame"), ("git", "shortlog"), ("git", "config", "--get"), ("git", "count-objects"),
@@ -38,6 +38,19 @@ READ_ONLY: tuple[tuple[str, ...], ...] = (
 
 # Flags that turn a read into a write, or start another command.
 WRITE_FLAGS = ("-exec", "-execdir", "-delete", "-ok", "-okdir", "-i", "--in-place", "--output")
+
+# find's own file-writing outputs, and sort's in-place flag (-o is also find's positional
+# print target, so it only counts as a write for sort).
+WRITE_FLAGS += ("-fprint", "-fprint0", "-fprintf", "-fls")
+
+SORT_WRITE_FLAGS = ("-o",)
+
+# `git branch` / `git remote` are read-only for status, but these words mutate.
+GIT_MUTATING = frozenset({
+    "-d", "-D", "-m", "-M", "-c", "-C", "--delete", "--move", "--copy",
+    "--set-upstream-to", "-u", "add", "remove", "rm", "rename", "set-url", "prune",
+    "set-head", "set-branches",
+})
 
 # gh api is read-only only when it is not given a method or a field.
 GH_WRITE_FLAGS = ("-X", "--method", "-f", "-F", "--input", "--field")
@@ -61,6 +74,11 @@ def _reads(words: list[str]) -> bool:
     if any(word in WRITE_FLAGS for word in words[1:]):
         return False
     if tuple(words[:2]) == ("gh", "api") and any(word in GH_WRITE_FLAGS for word in words[2:]):
+        return False
+    if tuple(words[:2]) in (("git", "branch"), ("git", "remote")) \
+            and any(word in GIT_MUTATING for word in words[2:]):
+        return False
+    if words[0] == "sort" and any(word in SORT_WRITE_FLAGS for word in words[1:]):
         return False
     return any(tuple(words[:len(prefix)]) == prefix for prefix in READ_ONLY)
 

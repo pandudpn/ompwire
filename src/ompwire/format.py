@@ -13,7 +13,6 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
 WIB = timezone(timedelta(hours=7))
-BAR = "─" * 18
 
 
 def esc(value: object) -> str:

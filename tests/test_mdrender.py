@@ -65,6 +65,15 @@ def test_agent_mcp_failure_notice_is_stripped():
              'responding. Its tools are unavailable until the client restarts the session.')
     assert strip_agent_noise(noise * 4) == ""
     assert strip_agent_noise(f"{noise}Jawaban asli.") == "Jawaban asli."
+    assert strip_agent_noise("MCP servers 'foo' failed to connect: boom\n\nThe answer is 42.") \
+        == "The answer is 42."
+
+
+def test_a_quote_in_a_url_cannot_break_out_of_the_href():
+    from ompwire.mdrender import to_html
+
+    html = to_html('[click](https://example.com/a"onmouseover="alert(1))')
+    assert '"onmouseover' not in html
 
 
 def test_strip_html_unwraps_a_rendered_tool_block():
