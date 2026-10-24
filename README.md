@@ -215,12 +215,14 @@ ompwire --version        # or -V
 | Command | What it is for |
 |---|---|
 | `ompwire setup` | first machine: agent, provider and model, thinking, mode, yolo, cwd, MCP, gateway |
-| `ompwire doctor` | verify agent, session store and bot token, one line per check |
+| `ompwire status` | what it is set to and whether the gateway is running: model, mode, thinking, approvals, cwd, allowed users, token, MCP, gateway, sessions, log |
+| `ompwire doctor` | verify agent, session store, bot token and allow list, one line per check |
 | `ompwire serve` | run the Telegram transport |
 | `ompwire chat` | talk to the agent from this terminal (`-q` for one-shot) |
 | `ompwire sessions` | the `chat_key → sessionId` map |
 | `ompwire config` | merged config with secrets masked |
-| `ompwire update [--edge] [--check]` | newest release, or the tip of main |
+| `ompwire update [--edge] [--check]` | newest release, or the tip of main, then restart |
+| `ompwire restart` | restart the gateway without updating |
 | `ompwire uninstall [--dry-run]` | remove ompwire, never `~/.omp` |
 | `ompwire scrub-logs` | clean bot tokens out of a log file written before redaction existed |
 
@@ -305,9 +307,35 @@ ok   ACP handshake: omp 18.12.6 (protocol 1)
      capabilities: loadSession=True sessions=['close', 'fork', 'list', 'resume']
 ok   session/new: 01a16c3e · config options ['mode', 'model', 'thinking']
      model now: omniroute/chat (174 available)
---   telegram token missing
-ready · ompwire 0.1.0
+ok   telegram token set
+ok   allowed users: 749994884
+ready · ompwire 0.8.0
 ```
+
+doctor judges: it fails when the agent or the store is broken. `ompwire status` reports
+instead — one screen of current settings, no ACP handshake, so it is cheap to run:
+
+```bash
+$ ompwire status
+version         ompwire 0.8.0
+installed       uv
+config          /home/you/.config/ompwire/config.toml
+agent           omp/18.12.6 (/home/you/.local/bin/omp)
+model           omniroute/chat
+mode            default
+thinking        xhigh
+approvals       yolo (bypassed)
+cwd             /home/you
+allowed users   749994884
+telegram token  set
+mcp             source mcp-hub · 22 server(s) from the hub · excluded: playwright, honcho
+gateway         process · running as pid 4242 (no systemd unit)
+sessions        7 session(s) in /home/you/.local/state/ompwire/sessions.db
+log             /home/you/.local/state/ompwire/ompwire.log (248 KiB)
+```
+
+An empty allow list is the failure that looks like success: the bot starts, answers
+nobody, and logs nothing unusual. Both commands name it explicitly.
 
 ## Uninstall
 

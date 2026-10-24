@@ -136,6 +136,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     token = str(config.get("telegram", "bot_token", "") or "")
     print(f"{'ok  ' if token else '--  '} telegram token {'set' if token else 'missing'}")
 
+    allowed = [str(user) for user in (config.get("telegram", "allowed_users") or [])]
+    if allowed:
+        print(f"ok   allowed users: {', '.join(allowed)}")
+    else:
+        print("--   allowed users: none (nobody can talk to the bot; run ompwire setup)")
+
     print(f"\n{'FAILED' if failures else 'ready'} · ompwire {__version__}")
     return 1 if failures else 0
 
@@ -145,6 +151,12 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     return run(edge=args.edge, check=args.check, force=args.force,
                restart=not args.no_restart)
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    from .status import run
+
+    return run(args.config)
 
 
 def cmd_restart(_args: argparse.Namespace) -> int:
@@ -214,6 +226,7 @@ common flows:
   ompwire chat                      chat with the agent from this terminal
   ompwire update [--edge]           newest release, or the tip of main (restarts the gateway)
   ompwire restart                   restart the gateway without updating
+  ompwire status                    settings and whether the gateway is running
   ompwire uninstall --dry-run       see what uninstalling would remove
 
 config: ~/.config/ompwire/config.toml (+ .env for the bot token)
@@ -306,6 +319,12 @@ def build_parser() -> argparse.ArgumentParser:
     un.add_argument("--force", action="store_true",
                     help="stop a running `ompwire serve` before removing")
     un.set_defaults(func=cmd_uninstall)
+
+    st = _sub(sub, "status", "what this installation is set to, and whether it is running",
+              "One screen: version and how it was installed, agent, model/mode/thinking, "
+              "approvals, cwd, allowed users, token, mcp, gateway state, sessions, log.",
+              "  ompwire status")
+    st.set_defaults(func=cmd_status)
 
     rst = _sub(sub, "restart", "restart a running gateway so new code is used",
                "Restarts the systemd user unit when it is active, otherwise respawns the "
