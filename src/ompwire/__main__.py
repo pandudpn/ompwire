@@ -1,4 +1,9 @@
-"""Entry point: `ompwire [chat|doctor|sessions|config]`."""
+"""Entry point: `ompwire <command>`.
+
+`ompwire` on its own prints the help; `ompwire chat` starts an interactive session.
+Every command carries examples, because the help is the first thing a new machine
+shows and it should answer the question without a README open.
+"""
 
 from __future__ import annotations
 
@@ -167,6 +172,23 @@ def cmd_scrub(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_help(args: argparse.Namespace) -> int:
+    parser = build_parser()
+    topic = getattr(args, "topic", None)
+    if not topic:
+        parser.print_help()
+        return 0
+    subparsers = next(action for action in parser._actions
+                      if isinstance(action, argparse._SubParsersAction))
+    chosen = subparsers.choices.get(topic)
+    if chosen is None:
+        print(f"unknown command: {topic}\n", file=sys.stderr)
+        parser.print_help()
+        return 2
+    chosen.print_help()
+    return 0
+
+
 def cmd_version(_args: argparse.Namespace) -> int:
     from .update import current_commit, current_version, install_mode
 
@@ -176,45 +198,96 @@ def cmd_version(_args: argparse.Namespace) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ompwire", description="Chat harness driving an OMP agent over ACP")
-    parser.add_argument("--version", action="version", version=f"ompwire {__version__}")
-    parser.add_argument("--config", help="path to config.toml")
-    sub = parser.add_subparsers(dest="command")
+TOP_EPILOG = """\
+common flows:
+  ompwire setup                     first machine: check the agent, write config and .env
+  ompwire doctor                    verify agent, session store and bot token
+  ompwire serve                     run the Telegram transport
+  ompwire chat                      chat with the agent from this terminal
+  ompwire update [--edge]           newest release, or the tip of main
+  ompwire uninstall --dry-run       see what uninstalling would remove
 
-    chat = sub.add_parser("chat", help="interactive chat (default)")
+config: ~/.config/ompwire/config.toml (+ .env for the bot token)
+logs:   ~/.local/state/ompwire/ompwire.log
+"""
+
+
+def _sub(sub, name: str, help_text: str, description: str, examples: str):
+    parser = sub.add_parser(name, help=help_text, description=description,
+                            epilog=f"examples:\n{examples}", formatter_class=argparse.RawDescriptionHelpFormatter)
+    return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="ompwire",
+        description="Chat harness driving an OMP agent over ACP",
+        epilog=TOP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("-V", "--version", action="version", version=f"ompwire {__version__}")
+    parser.add_argument("--config", help="path to config.toml")
+    sub = parser.add_subparsers(dest="command", metavar="command")
+
+    help_p = _sub(sub, "help", "show help for a command",
+                  "Show the command list, or the help of one command.",
+                  "  ompwire help\n  ompwire help setup")
+    help_p.add_argument("topic", nargs="?", help="command to explain")
+    help_p.set_defaults(func=cmd_help)
+
+    chat = _sub(sub, "chat", "talk to the agent from this terminal",
+                "Interactive chat in this terminal. The session key defaults to cli:<cwd>, so a "
+                "directory keeps its own conversation.",
+                "  ompwire chat\n  ompwire chat -q \"summarise this repo\"\n  ompwire chat --cwd ~/proj")
     chat.add_argument("-q", "--query", help="one-shot prompt, print the answer and exit")
     chat.add_argument("--cwd", help="agent working directory")
     chat.add_argument("--key", help="session key (default: cli:<cwd>)")
     chat.set_defaults(func=cmd_chat)
 
-    doctor = sub.add_parser("doctor", help="verify the agent, the session store and the bot token")
+    doctor = _sub(sub, "doctor", "verify the agent, the session store and the bot token",
+                  "Checks every dependency the transport needs and prints one line per check.",
+                  "  ompwire doctor")
     doctor.set_defaults(func=cmd_doctor)
 
-    sessions = sub.add_parser("sessions", help="list recorded sessions")
+    sessions = _sub(sub, "sessions", "list recorded sessions",
+                    "Show the chat_key to sessionId mapping and how long ago each was used.",
+                    "  ompwire sessions")
     sessions.set_defaults(func=cmd_sessions)
 
-    serve_p = sub.add_parser("serve", help="run the Telegram transport")
+    serve_p = _sub(sub, "serve", "run the Telegram transport",
+                   "Start the gateway. Refuses to start without an agent, a supported platform "
+                   "and a verified bot token.",
+                   "  ompwire serve\n  ompwire serve --config ~/.config/ompwire/config.toml")
     serve_p.set_defaults(func=cmd_serve)
 
-    cfg = sub.add_parser("config", help="show resolved configuration")
+    cfg = _sub(sub, "config", "show resolved configuration",
+               "Print the merged config with secrets masked, plus the search paths.",
+               "  ompwire config")
     cfg.set_defaults(func=cmd_config)
 
-    upd = sub.add_parser("update", help="update to the newest release (or the tip of main)")
+    upd = _sub(sub, "update", "update to the newest release (or the tip of main)",
+               "Uses whichever installer owns this copy (uv tool, pipx, or a git checkout).",
+               "  ompwire update\n  ompwire update --edge\n  ompwire update --check")
     upd.add_argument("--edge", action="store_true", help="track the latest commit on main")
     upd.add_argument("--stable", action="store_true", help="track the newest release (default)")
     upd.add_argument("--check", action="store_true", help="report what an update would do")
     upd.add_argument("--force", action="store_true", help="for a source checkout, run git checkout")
     upd.set_defaults(func=cmd_update)
 
-    setup = sub.add_parser("setup", help="check for omp, then write config and .env")
+    setup = _sub(sub, "setup", "check for omp, then write config and .env",
+                 "In order: agent, provider and model, thinking, mode, yolo, cwd, MCP, then the "
+                 "gateway with its token and access list.",
+                 "  ompwire setup\n  ompwire setup --yes\n  ompwire setup --force --install-omp")
     setup.add_argument("--yes", action="store_true", help="accept the defaults, no prompts")
     setup.add_argument("--force", action="store_true", help="rewrite an existing config")
     setup.add_argument("--install-omp", action="store_true",
                        help="run the official omp installer without asking")
     setup.set_defaults(func=cmd_setup)
 
-    un = sub.add_parser("uninstall", help="remove ompwire: config, state, data, package")
+    un = _sub(sub, "uninstall", "remove ompwire: config, state, data, package",
+              "Removes only what ompwire created. ~/.omp (agent sessions, credentials, MCP "
+              "config) is never touched.",
+              "  ompwire uninstall --dry-run\n  ompwire uninstall\n  ompwire uninstall --keep-config")
     un.add_argument("--yes", action="store_true", help="remove without asking")
     un.add_argument("--dry-run", action="store_true", help="show what would be removed")
     un.add_argument("--keep-config", action="store_true",
@@ -223,11 +296,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="stop a running `ompwire serve` before removing")
     un.set_defaults(func=cmd_uninstall)
 
-    scrub = sub.add_parser("scrub-logs", help="replace bot tokens already written to a log file")
+    scrub = _sub(sub, "scrub-logs", "replace bot tokens already written to a log file",
+                 "New log lines are redacted as they are written; this cleans files written "
+                 "before that filter existed.",
+                 "  ompwire scrub-logs\n  ompwire scrub-logs --file /tmp/ompwire-serve.log")
     scrub.add_argument("--file", help="log file to clean (default: logging.file from config)")
     scrub.set_defaults(func=cmd_scrub)
 
-    ver = sub.add_parser("version", help="print the installed version and installer")
+    ver = _sub(sub, "version", "print the installed version and installer",
+               "Shows the version of the running code, its commit, and which installer owns it.",
+               "  ompwire version")
     ver.set_defaults(func=cmd_version)
 
     return parser
@@ -238,7 +316,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
-        args = parser.parse_args([*argv, "chat"])
+        # no arguments is a question about this tool, not a request for a chat
+        parser.print_help()
+        print("\nRun `ompwire chat` to talk to the agent.")
+        return 0
     return int(args.func(args))
 
 

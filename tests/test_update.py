@@ -89,3 +89,13 @@ def test_current_version_comes_from_the_code_not_stale_metadata(monkeypatch):
     from ompwire import __version__
 
     assert update.current_version() == __version__
+
+
+def test_declared_version_matches_the_running_code():
+    """Two version strings drift silently; this is the check that catches it."""
+    import pathlib
+    import tomllib
+
+    pyproject = pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text())["project"]["version"]
+    assert update.current_version() == declared

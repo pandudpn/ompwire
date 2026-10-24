@@ -166,6 +166,35 @@ uv tool install --from git+https://github.com/pandudpn/ompwire.git@main ompwire
 `pipx install git+https://github.com/pandudpn/ompwire.git@v0.2.0` is supported by the
 same code path, though only `uv` is verified on this machine.
 
+## The CLI
+
+```bash
+ompwire                  # help, with the flows people actually run
+ompwire help setup       # per-command help and examples
+ompwire --version        # or -V
+```
+
+| Command | What it is for |
+|---|---|
+| `ompwire setup` | first machine: agent, provider and model, thinking, mode, yolo, cwd, MCP, gateway |
+| `ompwire doctor` | verify agent, session store and bot token, one line per check |
+| `ompwire serve` | run the Telegram transport |
+| `ompwire chat` | talk to the agent from this terminal (`-q` for one-shot) |
+| `ompwire sessions` | the `chat_key → sessionId` map |
+| `ompwire config` | merged config with secrets masked |
+| `ompwire update [--edge] [--check]` | newest release, or the tip of main |
+| `ompwire uninstall [--dry-run]` | remove ompwire, never `~/.omp` |
+| `ompwire scrub-logs` | clean bot tokens out of a log file written before redaction existed |
+
+Working from a checkout, one symlink makes the command available everywhere without a
+second copy to keep in sync:
+
+```bash
+ln -sfn "$PWD/.venv/bin/ompwire" ~/.local/bin/ompwire
+```
+
+An installed copy (`uv tool install …`) already puts `ompwire` on `PATH`.
+
 ## Setup
 
 ```bash
