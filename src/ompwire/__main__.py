@@ -65,6 +65,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if agent_path(command) is None:
         print(f"FAIL agent not found: {command}. Run `ompwire setup` first.", file=sys.stderr)
         return 1
+    platform = str(config.get("gateway", "platform", "telegram"))
+    if platform != "telegram":
+        print(f"FAIL gateway platform {platform!r} is not implemented", file=sys.stderr)
+        return 1
+    if not str(config.get("telegram", "bot_token", "") or ""):
+        print("FAIL telegram bot token missing. Run `ompwire setup` or set TELEGRAM_BOT_TOKEN.",
+              file=sys.stderr)
+        return 1
     from .telegram import serve
 
     return serve(config)
@@ -139,6 +147,19 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return run(yes=args.yes, force=args.force, install_omp=args.install_omp)
 
 
+def cmd_scrub(args: argparse.Namespace) -> int:
+    from .logs import scrub_file
+
+    config = load_config(args.config)
+    target = args.file or str(config.get("logging", "file", ""))
+    if not target:
+        print("no log file configured")
+        return 1
+    replaced = scrub_file(target)
+    print(f"redacted {replaced} token occurrence(s) in {target}")
+    return 0
+
+
 def cmd_version(_args: argparse.Namespace) -> int:
     from .update import current_commit, current_version, install_mode
 
@@ -185,6 +206,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--install-omp", action="store_true",
                        help="run the official omp installer without asking")
     setup.set_defaults(func=cmd_setup)
+
+    scrub = sub.add_parser("scrub-logs", help="replace bot tokens already written to a log file")
+    scrub.add_argument("--file", help="log file to clean (default: logging.file from config)")
+    scrub.set_defaults(func=cmd_scrub)
 
     ver = sub.add_parser("version", help="print the installed version and installer")
     ver.set_defaults(func=cmd_version)

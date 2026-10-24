@@ -13,6 +13,13 @@ def _sandbox(monkeypatch, tmp_path):
     return tmp_path
 
 
+def _with_token(monkeypatch):
+    """Pretend a valid token was typed and verified, and never read stdin."""
+    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: "123:abc", raising=False)
+    monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "test_bot")
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+
+
 def test_missing_agent_stops_before_writing_anything(monkeypatch, tmp_path, capsys):
     _sandbox(monkeypatch, tmp_path)
     monkeypatch.setattr(setup, "agent_path", lambda command="omp": None)
@@ -34,6 +41,7 @@ def test_agent_install_runs_before_config(monkeypatch, tmp_path):
 
     monkeypatch.setattr(setup, "agent_path", lambda command="omp": state["found"])
     monkeypatch.setattr(setup, "install_agent", fake_install)
+    _with_token(monkeypatch)
 
     assert setup.run(yes=True, install_omp=True) == 0
     assert calls == ["install-omp"]
@@ -43,19 +51,25 @@ def test_agent_install_runs_before_config(monkeypatch, tmp_path):
 def test_config_is_written_and_parses(monkeypatch, tmp_path):
     _sandbox(monkeypatch, tmp_path)
     monkeypatch.setattr(setup, "agent_path", lambda command="omp": "/usr/bin/omp")
+    _with_token(monkeypatch)
     assert setup.run(yes=True) == 0
 
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert data["acp"]["command"] == "omp"
     assert data["acp"]["args"] == ["--mode", "acp"]
+    assert data["gateway"]["platform"] == "telegram"
     assert data["telegram"]["allowed_users"] == []
     assert data["approval"]["policy"] == "always-ask"
+    assert data["agent"]["thinking"] == "xhigh"
+    assert data["agent"]["yolo"] is True
+    assert data["agent"]["mode"] == "default"
     assert "fenced code" in data["agent"]["append_system_prompt"]
 
 
 def test_existing_config_is_kept_unless_forced(monkeypatch, tmp_path, capsys):
     _sandbox(monkeypatch, tmp_path)
     monkeypatch.setattr(setup, "agent_path", lambda command="omp": "/usr/bin/omp")
+    _with_token(monkeypatch)
     config = tmp_path / "config.toml"
     config.write_text("[acp]\ncommand = \"mine\"\n", encoding="utf-8")
 
@@ -73,6 +87,7 @@ def test_token_goes_to_env_with_0600_and_is_verified(monkeypatch, tmp_path, caps
     monkeypatch.setattr(setup, "agent_path", lambda command="omp": "/usr/bin/omp")
     monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "my_bot")
     monkeypatch.setattr(setup, "_ask", lambda prompt, default, yes=False: default)
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
     monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: "123:abc", raising=False)
 
     assert setup.run(yes=False) == 0
@@ -87,10 +102,69 @@ def test_token_goes_to_env_with_0600_and_is_verified(monkeypatch, tmp_path, caps
 def test_allowed_users_are_parsed_into_a_list(monkeypatch, tmp_path):
     _sandbox(monkeypatch, tmp_path)
     monkeypatch.setattr(setup, "agent_path", lambda command="omp": "/usr/bin/omp")
-    monkeypatch.setattr(setup, "_ask", lambda prompt, default, yes=False: "111, 222 ,x")
-    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: "", raising=False)
+    def answer(prompt: str, default: str, *, yes: bool = False) -> str:
+        if "allowed telegram user ids" in prompt:
+            return "111, 222 ,x"
+        return default
+
+    monkeypatch.setattr(setup, "_ask", answer)
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+    _with_token(monkeypatch)
 
     assert setup.run(yes=False) == 0
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert data["telegram"]["allowed_users"] == [111, 222]
     assert data["telegram"]["home_channel"] == 111
+
+
+def test_no_token_fails_because_the_gateway_cannot_start(monkeypatch, tmp_path, capsys):
+    _sandbox(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup, "agent_path", lambda command="omp": "/usr/bin/omp")
+    monkeypatch.setattr(setup, "_ask", lambda prompt, default, yes=False: default)
+    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: "", raising=False)
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+
+    assert setup.run(yes=False) == 1
+    out = capsys.readouterr().out
+    assert "no usable TELEGRAM_BOT_TOKEN" in out
+    assert (tmp_path / "config.toml").is_file()          # config still written
+    assert not (tmp_path / ".env").exists()              # but no empty token file
+
+
+def test_unverified_token_is_reported_and_stops(monkeypatch, tmp_path, capsys):
+    _sandbox(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup, "agent_path", lambda command="omp": "/usr/bin/omp")
+    monkeypatch.setattr(setup, "_ask", lambda prompt, default, yes=False: default)
+    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: "bad:token", raising=False)
+    monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "")
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+
+    assert setup.run(yes=False) == 1
+    out = capsys.readouterr().out
+    assert "failed getMe" in out
+    assert "bad:token" not in out
+
+
+def test_unsupported_platform_stops_early(monkeypatch, tmp_path, capsys):
+    _sandbox(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup, "agent_path", lambda command="omp": "/usr/bin/omp")
+    monkeypatch.setattr(setup, "_ask", lambda prompt, default, yes=False: "discord")
+    _with_token(monkeypatch)
+
+    assert setup.run(yes=False) == 1
+    assert "not implemented" in capsys.readouterr().out
+    assert not (tmp_path / "config.toml").exists()
+
+
+def test_env_token_is_reused_without_prompting(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "999:fromenv")
+    monkeypatch.setattr(setup, "agent_path", lambda command="omp": "/usr/bin/omp")
+    monkeypatch.setattr(setup, "_ask", lambda prompt, default, yes=False: default)
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+    monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "env_bot")
+    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: (_ for _ in ()).throw(
+        AssertionError("must not prompt when the env already has a token")), raising=False)
+
+    assert setup.run(yes=True) == 0
+    assert "999:fromenv" in (tmp_path / ".env").read_text()

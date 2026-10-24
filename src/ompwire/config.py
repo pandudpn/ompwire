@@ -42,7 +42,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "agent": {
         "cwd": "~",
         "model": "",  # empty => whatever the ACP session defaults to
-        "mode": "",  # default | plan
+        "mode": "default",  # default | plan
+        "thinking": "xhigh",  # reasoning effort, agent-dependent
+        "yolo": True,  # approvals bypassed unless the chat turns it off
         "approval_mode": "always-ask",
         # omp has no idea it is talking through a chat window, and its default voice
         # leaves commands inline. This hint is what makes replies render as code.
@@ -78,6 +80,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "mcp": {
         "servers": [],  # list of {name, command, args, env} passed to session/new
+    },
+    "gateway": {
+        "platform": "telegram",  # the only transport implemented so far
     },
     "telegram": {
         "bot_token": "",  # secret: env only

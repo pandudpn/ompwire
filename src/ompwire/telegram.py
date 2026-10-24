@@ -157,8 +157,13 @@ class ChatAgent:
         self.last_used = time.time()
         self.busy = False
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
-        # yolo survives /new: it is stored per chat, like model/mode/thinking
-        self.yolo = self.store.prefs(key).get("yolo") == "on"
+        # yolo survives /new: it is stored per chat, like model/mode/thinking.
+        # With no stored choice the config decides, so setup can ship yolo on.
+        stored_yolo = self.store.prefs(key).get("yolo")
+        if stored_yolo is None:
+            self.yolo = bool(config.get("agent", "yolo", True))
+        else:
+            self.yolo = stored_yolo == "on"
         self.usage = {"input": 0, "output": 0, "cached": 0, "turns": 0}
         self.turns = 0
         self.tools_used = 0
@@ -1805,6 +1810,11 @@ def configure_logging(config: Config) -> None:
         handlers=handlers,
         force=True,
     )
+    # the Telegram API puts the token in every request path, and httpx logs those
+    # paths at INFO: without this the token ends up in the log file on every poll
+    from .logs import install as install_redaction
+
+    install_redaction(level)
 
 
 def serve(config: Config) -> int:
