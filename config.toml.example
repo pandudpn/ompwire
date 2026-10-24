@@ -49,7 +49,12 @@ idle_timeout = 1800        # drop the ACP subprocess after this many idle second
 
 [stream]
 enabled = true
-edit_interval = 1.0        # seconds between message edits (Telegram edit-in-place)
+# draft: a native Telegram draft previews the answer, then one message keeps it (private chats)
+# final: one message when the turn ends; the tool trace still updates live
+# edit:  one message edited in place as text arrives
+answer = "draft"
+draft_interval = 0.4       # seconds between draft previews
+edit_interval = 1.0        # seconds between message edits in edit mode
 show_tool_calls = true
 show_usage = false       # per-turn token line; use /usage instead
 

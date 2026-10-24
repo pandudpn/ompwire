@@ -18,6 +18,7 @@ import contextlib
 import logging
 import logging.handlers
 import pathlib
+import random
 import re
 import signal
 import time
@@ -237,6 +238,8 @@ class ChatAgent:
         # that edits a live message goes quiet until the window passes, instead of turning a
         # pretty trace into "Turn failed: Flood control exceeded".
         self._quiet_until = 0.0
+        # flips off for the life of the process the first time Telegram refuses a draft
+        self._draft_ok = True
         # the bot that receives a scheduled result defaults to the bot being talked to
         self.gateway_name = str(config.get("_gateway", "name", "telegram") or "telegram")
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
@@ -645,6 +648,24 @@ class ChatAgent:
         self._quiet_until = time.monotonic() + window
         log.warning("telegram rate limit: no edits for %.0fs (%s)", window, exc)
 
+    def answer_mode(self) -> str:
+        """How the answer reaches the chat while it is being written.
+
+        draft: a native Telegram draft previews it, then one message carries the final text.
+        final: nothing until the turn ends, then one message (the tool trace stays live).
+        edit:  one message edited in place as text arrives; the old behaviour.
+        Drafts exist only in private chats; a group, or a bot that is refused one, gets final.
+        """
+        mode = str(self.config.get("stream", "answer", "draft") or "draft")
+        if mode == "draft" and (self.chat_id < 0 or not self._draft_ok):
+            return "final"
+        return mode if mode in {"draft", "final", "edit"} else "draft"
+
+    def _draft_unavailable(self, exc: Exception) -> None:
+        self._draft_ok = False
+        log.warning("telegram refused a message draft (%s); answers are sent once at the end",
+                    exc)
+
     # ------------------------------------------------------------------ turn
     async def ask(self, text: str, message=None, images: list[dict[str, Any]] | None = None,
                   resumes: int = 0, record: str | None = None) -> str:
@@ -666,12 +687,36 @@ class ChatAgent:
         state = {"text_msg": None, "tool_msg": None, "reason_msg": None, "reasoning": "",
                  "last_edit": 0.0, "text": "", "tools": 0}
 
+        mode = self.answer_mode()
+        draft_id = random.randint(1, 2**31 - 1)  # same id per turn: Telegram animates the change
+
+        async def show_draft(joined: str) -> None:
+            """Preview the tail of the answer as an ephemeral draft; nothing is stored in the chat."""
+            preview = _chunks(joined, 3600)[-1]
+            try:
+                await self.app.bot.send_message_draft(self.chat_id, draft_id, to_html(preview),
+                                                      parse_mode=ParseMode.HTML)
+            except RetryAfter as exc:
+                self._note_rate_limit(exc)
+            except BadRequest as exc:
+                if "parse entities" in str(exc).lower():
+                    # half-written markdown: a closing tag that has not streamed in yet
+                    with contextlib.suppress(TelegramError):
+                        await self.app.bot.send_message_draft(self.chat_id, draft_id,
+                                                              to_plain(preview))
+                    return
+                self._draft_unavailable(exc)
+            except TelegramError as exc:
+                self._draft_unavailable(exc)
+
         async def flush_text(force: bool = False) -> None:
             joined = strip_agent_noise("".join(text_buffer))
             if not joined.strip():
                 return
             now = time.time()
             interval = float(self.config.get("stream", "edit_interval", 1.0))
+            if mode == "draft" and self._draft_ok:
+                interval = float(self.config.get("stream", "draft_interval", 0.4))
             if not force and now - state["last_edit"] < interval:
                 return
             state["last_edit"] = now
@@ -679,11 +724,18 @@ class ChatAgent:
             joined = schedule_lib.hide_partial(joined, final=force)
             if not joined.strip():
                 return
+            if not force and mode != "edit":
+                # draft previews the answer; final (and a refused draft) waits for the end
+                if mode == "draft" and self._draft_ok and not self._rate_limited() \
+                        and joined != state["text"]:
+                    await show_draft(joined)
+                    state["text"] = joined
+                return
             parts = _chunks(joined, 3600)
-            # one Telegram message per chunk, edited in place; sending parts[1:] on every flush
-            # posted the tail of a long answer again each second
+            # one Telegram message per chunk; in edit mode it is edited in place, otherwise each
+            # chunk is sent exactly once when the turn ends
             chunk_msgs: list[Any] = state.setdefault("chunk_msgs", [])
-            if joined != state["text"]:
+            if joined != state["text"] or force:
                 for index, part in enumerate(parts):
                     if index < len(chunk_msgs):
                         if index == len(chunk_msgs) - 1 or index == len(parts) - 1 or force:

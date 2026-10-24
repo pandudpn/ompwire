@@ -94,6 +94,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "stream": {
         "enabled": True,
+        # draft previews the answer natively and keeps one final message; final sends it once
+        # at the end; edit is the old edit-in-place, which floods on long turns
+        "answer": "draft",
+        "draft_interval": 0.4,
         "edit_interval": 1.0,
         "show_tool_calls": True,
         "show_usage": False,  # per-turn token line; /usage covers it on demand

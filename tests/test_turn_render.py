@@ -40,6 +40,13 @@ class FakeBot:
     async def send_document(self, *_a, **_k):
         return None
 
+    async def send_message_draft(self, _chat_id, _draft_id, text, **_kw):
+        self.drafts = [*getattr(self, "drafts", []), text]
+        return True
+
+    async def send_chat_action(self, *_a, **_k):
+        return None
+
 
 class FakeClient:
     alive = True
@@ -420,3 +427,78 @@ def test_a_long_answer_is_sent_once_per_chunk(monkeypatch):
     asyncio.run(go())
     answer_sends = [body for body in sends if "aaaa" in body or "step" in body]
     assert len(answer_sends) == 2
+
+
+def _answer_turn(config, bot, chat_id=1):
+    async def go():
+        agent = telegram.ChatAgent(config, chat_id=chat_id, key=f"mode{chat_id}",
+                                   app=types.SimpleNamespace(bot=bot))
+        agent.client = FakeClient([message("Halo "), message("dunia, "), message("ini **jawaban**.")])
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        await agent.ask("halo")
+        return agent
+
+    return asyncio.run(go())
+
+
+def _mode_config(answer):
+    config = load_config(env={})
+    config.data["stream"].update({"show_tool_calls": False, "edit_interval": 0.0,
+                                  "draft_interval": 0.0, "answer": answer})
+    return config
+
+
+class EditCountingBot(FakeBot):
+    def __init__(self):
+        super().__init__()
+        self.sends = 0
+        self.edits = 0
+
+    async def send_message(self, chat_id, text, **kw):
+        self.sends += 1
+        sent = await super().send_message(chat_id, text, **kw)
+        bot = self
+        original = sent.edit_text
+
+        async def edit_text(body, **kwargs):
+            bot.edits += 1
+            await original(body, **kwargs)
+
+        sent.edit_text = edit_text
+        return sent
+
+
+def test_draft_mode_previews_then_sends_the_answer_once():
+    bot = EditCountingBot()
+    _answer_turn(_mode_config("draft"), bot)
+    assert len(bot.drafts) >= 2            # the answer was previewed while it streamed
+    assert bot.sends == 1                  # and stored as exactly one message
+    assert "jawaban" in bot.messages[0]
+    assert bot.edits <= 1                  # the final flush, not one edit per chunk
+
+
+def test_a_refused_draft_falls_back_to_one_final_message():
+    class NoDraftBot(EditCountingBot):
+        async def send_message_draft(self, *_a, **_k):
+            raise telegram.BadRequest("Method is available only for private chats")
+
+    bot = NoDraftBot()
+    agent = _answer_turn(_mode_config("draft"), bot)
+    assert bot.sends == 1
+    assert agent.answer_mode() == "final"  # the refusal sticks for the process
+
+
+def test_a_group_chat_never_tries_a_draft():
+    bot = EditCountingBot()
+    _answer_turn(_mode_config("draft"), bot, chat_id=-100123)
+    assert not getattr(bot, "drafts", [])
+    assert bot.sends == 1
+
+
+def test_edit_mode_keeps_editing_in_place():
+    bot = EditCountingBot()
+    _answer_turn(_mode_config("edit"), bot)
+    assert not getattr(bot, "drafts", [])
+    assert bot.sends == 1
+    assert bot.edits >= 2
