@@ -201,3 +201,124 @@ def test_a_waiting_call_is_not_shown_as_a_step(rendered):
     ])
     trace = [body for body in messages if "🔧" in body][-1]
     assert "Waiting for" not in trace
+
+
+def test_the_subagent_brief_is_shown_so_you_know_what_it_was_asked(rendered):
+    messages = rendered([
+        tool_call("t1", "Reading a.txt via subagent", tasks=[{
+            "name": "ReadNote", "agent": "sonic",
+            "task": "# Target\nFile: a.txt in the working directory and report its contents.\n",
+            "tools": ["read", "shell"],
+        }]),
+        message("done"),
+    ])
+    trace = [body for body in messages if "🔧" in body][-1]
+    assert "task: File: a.txt in the working directory" in trace
+    assert "tools: read, shell" in trace
+
+
+@pytest.mark.parametrize(("brief", "shown"), [
+    ("# Target\nFile: a.txt and report it.\n# Acceptance", "File: a.txt and report it."),
+    ("", ""),
+    ("```\ncode\n```", "code"),
+])
+def test_a_brief_skips_markdown_labels(brief, shown):
+    from ompwire.telegram import _task_brief
+
+    assert _task_brief(brief) == shown
+
+
+class FloodBot(FakeBot):
+    """Telegram answering every edit with RetryAfter, which used to end the turn."""
+
+    def __init__(self, retry_after=255):
+        super().__init__()
+        self.retry_after = retry_after
+        self.edits = 0
+
+    async def send_message(self, chat_id, text, **_kw):
+        from telegram.error import RetryAfter
+
+        self.messages.append(text)
+        bot = self
+
+        class Sent:
+            def __init__(self, body):
+                self.body = body
+
+            async def edit_text(self, body, **_kwargs):
+                bot.edits += 1
+                raise RetryAfter(bot.retry_after)
+
+        return Sent(text)
+
+
+def test_a_flood_limit_does_not_end_the_turn(monkeypatch):
+    """The regression from a real turn: 49 subagent updates, one edit each, then 255s of flood."""
+    import types as _types
+
+    from ompwire.config import load_config
+
+    config = load_config(env={})
+    config.data.setdefault("stream", {}).update({"edit_interval": 0.0, "verbose": True})
+    bot = FloodBot()
+    updates = [tool_call("t1", "Reading a.txt via subagent",
+                         tasks=[{"name": "Read", "agent": "scout", "task": "# Target\nread a.txt"}])]
+    updates += [tool_progress("t1", f"step {index}") for index in range(40)]
+    updates.append(message("selesai"))
+
+    async def go():
+        agent = telegram.ChatAgent(config, chat_id=1, key="flood",
+                                   app=_types.SimpleNamespace(bot=bot))
+        agent.client = FakeClient(updates)
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        agent.verbose = True
+        await agent.ask("halo")
+        return agent
+
+    agent = asyncio.run(go())
+    assert any("selesai" in body for body in bot.messages)
+    assert agent._quiet_until > 0  # it noticed, and stopped editing
+    assert bot.edits <= 2  # one attempt, then quiet; not forty
+
+
+def test_the_tool_trace_is_throttled_without_a_flood(monkeypatch):
+    import types as _types
+
+    from ompwire.config import load_config
+
+    edits = {"count": 0}
+
+    class CountingBot(FakeBot):
+        async def send_message(self, chat_id, text, **_kw):
+            self.messages.append(text)
+
+            class Sent:
+                def __init__(self, body):
+                    self.body = body
+
+                async def edit_text(self, body, **_kwargs):
+                    edits["count"] += 1
+
+            return Sent(text)
+
+    config = load_config(env={})
+    config.data.setdefault("stream", {}).update({"edit_interval": 0.0, "verbose": True,
+                                                 "tool_edit_interval": 2.0})
+    updates = [tool_call("t1", "Reading a.txt via subagent",
+                         tasks=[{"name": "Read", "agent": "scout", "task": "read a.txt"}])]
+    updates += [tool_progress("t1", f"step {index}") for index in range(40)]
+    updates.append(message("selesai"))
+
+    async def go():
+        agent = telegram.ChatAgent(config, chat_id=1, key="throttle",
+                                   app=_types.SimpleNamespace(bot=CountingBot()))
+        agent.client = FakeClient(updates)
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        agent.verbose = True
+        await agent.ask("halo")
+
+    asyncio.run(go())
+    assert edits["count"] <= 3  # inside one interval only the final flush renders

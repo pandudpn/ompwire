@@ -27,7 +27,7 @@ from typing import Any, ClassVar
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -154,6 +154,20 @@ async def send_md(bot, chat_id: int, text: str):
 WAITING_RE = re.compile(r"^(waiting for|menunggu)\b", re.IGNORECASE)
 
 
+def _task_brief(text: str) -> str:
+    """The first meaningful line of a subagent brief.
+
+    omp sends the brief as markdown that opens with a heading ("# Target"), which says nothing on
+    its own. Drop the headings and keep the first line that carries the assignment.
+    """
+    for line in str(text or "").splitlines():
+        clean = line.strip()
+        if not clean or clean.startswith("#") or clean.startswith("```"):
+            continue  # headings and fences label the brief, they are not the brief
+        return " ".join(clean.split())[:120]
+    return ""
+
+
 def _is_waiting(title: str) -> bool:
     """A call that only says it is waiting adds a line and no information."""
     return bool(WAITING_RE.match(title.strip()))
@@ -215,6 +229,10 @@ class ChatAgent:
         self.session_id = ""
         self.cwd = str(config.get("agent", "cwd") or "~")
         self.reasoning = bool(config.get("stream", "show_reasoning", False))
+        # Telegram's flood control counts edits too. When it answers with RetryAfter, everything
+        # that edits a live message goes quiet until the window passes, instead of turning a
+        # pretty trace into "Turn failed: Flood control exceeded".
+        self._quiet_until = 0.0
         # the bot that receives a scheduled result defaults to the bot being talked to
         self.gateway_name = str(config.get("_gateway", "name", "telegram") or "telegram")
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
@@ -575,6 +593,49 @@ class ChatAgent:
             except Exception as exc:
                 log.debug("could not rewrite the expired approval prompt: %s", exc)
 
+    async def _send_answer(self, text: str):
+        """The answer is the one message worth waiting for, briefly."""
+        try:
+            return await self.send_md(text)
+        except RetryAfter as exc:
+            self._note_rate_limit(exc)
+            window = self._retry_window(exc)
+            if window > 20:
+                log.error("rate limited for %.0fs, the answer was not delivered", window)
+                return None
+            await asyncio.sleep(window + 0.5)
+            try:
+                self._quiet_until = 0.0
+                return await self.send_md(text)
+            except TelegramError as retry:
+                log.error("answer still not delivered after waiting: %s", retry)
+                return None
+
+    async def _edit_answer(self, message, text: str) -> None:
+        try:
+            await self.edit_md(message, text)
+        except RetryAfter as exc:
+            self._note_rate_limit(exc)
+        except TelegramError as exc:
+            log.debug("answer edit rejected: %s", exc)
+
+    def _rate_limited(self) -> bool:
+        return time.monotonic() < self._quiet_until
+
+    @staticmethod
+    def _retry_window(exc: Exception) -> float:
+        """PTB gives seconds today and a timedelta from v23; both mean the same wait."""
+        value = getattr(exc, "retry_after", 5)
+        if hasattr(value, "total_seconds"):
+            return float(value.total_seconds())
+        return float(value or 5)
+
+    def _note_rate_limit(self, exc: Exception) -> None:
+        window = self._retry_window(exc)
+        # a long window is not worth stalling the turn for; stop editing and let the answer land
+        self._quiet_until = time.monotonic() + window
+        log.warning("telegram rate limit: no edits for %.0fs (%s)", window, exc)
+
     # ------------------------------------------------------------------ turn
     async def ask(self, text: str, message=None, images: list[dict[str, Any]] | None = None) -> str:
         await self.ensure()
@@ -605,12 +666,15 @@ class ChatAgent:
                 return
             parts = _chunks(joined, 3600)
             if state["text_msg"] is None:
-                state["text_msg"] = await self.send_md(parts[0])
-                sent.append(state["text_msg"])
+                state["text_msg"] = await self._send_answer(parts[0])
+                if state["text_msg"] is not None:
+                    sent.append(state["text_msg"])
             elif joined != state["text"]:
-                await self.edit_md(state["text_msg"], parts[0])
+                await self._edit_answer(state["text_msg"], parts[0])
                 for extra in parts[1:]:
-                    sent.append(await self.send_md(extra))
+                    message = await self._send_answer(extra)
+                    if message is not None:
+                        sent.append(message)
             state["text"] = joined
             if force:
                 raw = "".join(text_buffer)
@@ -622,14 +686,19 @@ class ChatAgent:
                 if proposals:
                     await self.offer_schedules(proposals)
 
-        async def flush_tools() -> None:
-            if not trace:
+        async def flush_tools(force: bool = False) -> None:
+            if not trace or self._rate_limited():
                 return
+            if state["tool_msg"] is not None and not force:
+                interval = float(self.config.get("stream", "tool_edit_interval", 2.0))
+                if time.time() - state.get("last_tool_edit", 0.0) < interval:
+                    return
+            state["last_tool_edit"] = time.time()
             blocks = [
                 tool_block(entry.get("kind", "tool"), entry.get("title", ""),
                            entry.get("command", ""), entry.get("output", ""),
                            entry.get("status", ""), entry.get("subagent", ""),
-                           entry.get("steps") or [])
+                           entry.get("steps") or [], entry.get("brief", ""))
                 for entry in trace.values()
             ]
             body = ""
@@ -643,22 +712,23 @@ class ChatAgent:
             if dropped:
                 body = f"… {dropped} earlier call(s)\n{body}" if body else f"… {dropped} call(s)"
             if state["tool_msg"] is None:
-                state["tool_msg"] = await self.send_html(body)
-                sent.append(state["tool_msg"])
+                try:
+                    state["tool_msg"] = await self.send_html(body)
+                    sent.append(state["tool_msg"])
+                except RetryAfter as exc:
+                    self._note_rate_limit(exc)
                 return
             try:
                 await state["tool_msg"].edit_text(body, parse_mode=ParseMode.HTML)
+            except RetryAfter as exc:
+                self._note_rate_limit(exc)
             except BadRequest as exc:
                 if "not modified" in str(exc).lower():
                     return
-                log.debug("tool trace edit rejected (%s); retrying as plain text", exc)
-                try:
-                    await state["tool_msg"].edit_text(strip_html(body))
-                except BadRequest:
-                    pass
+                log.debug("tool trace edit rejected (%s)", exc)
 
         async def flush_reasoning(force: bool = False) -> None:
-            if not self.reasoning or not state["reasoning"].strip():
+            if not self.reasoning or not state["reasoning"].strip() or self._rate_limited():
                 return
             now = time.time()
             interval = float(self.config.get("stream", "edit_interval", 1.0))
@@ -670,11 +740,16 @@ class ChatAgent:
                 shown = "…\n" + shown[-REASONING_CHARS:]
             body = f"💭 <i>thinking</i>\n<blockquote expandable>{esc(shown)}</blockquote>"
             if state["reason_msg"] is None:
-                state["reason_msg"] = await self.send_html(body)
-                sent.append(state["reason_msg"])
+                try:
+                    state["reason_msg"] = await self.send_html(body)
+                    sent.append(state["reason_msg"])
+                except RetryAfter as exc:
+                    self._note_rate_limit(exc)
                 return
             try:
                 await state["reason_msg"].edit_text(body, parse_mode=ParseMode.HTML)
+            except RetryAfter as exc:
+                self._note_rate_limit(exc)
             except BadRequest as exc:
                 if "not modified" not in str(exc).lower():
                     log.debug("reasoning edit rejected: %s", exc)
@@ -686,7 +761,10 @@ class ChatAgent:
                     return
                 if update.kind == "agent_message_chunk" and update.text:
                     text_buffer.append(update.text)
-                    await flush_text()
+                    try:
+                        await flush_text()
+                    except RetryAfter as exc:
+                        self._note_rate_limit(exc)
                 elif update.kind == "agent_thought_chunk" and update.text and self.reasoning:
                     state["reasoning"] += update.text
                     await flush_reasoning()
@@ -711,6 +789,12 @@ class ChatAgent:
                             entry["subagent"] = ", ".join(
                                 f"{item.get('name', '?')} ({item.get('agent', 'task')})"
                                 for item in tasks if isinstance(item, dict))[:80]
+                            first = next((item for item in tasks if isinstance(item, dict)), {})
+                            entry["brief"] = _task_brief(first.get("task", ""))
+                            tools = first.get("tools")
+                            if isinstance(tools, list) and tools:
+                                entry["brief"] = (entry["brief"] + " · tools: "
+                                                  + ", ".join(str(t) for t in tools))[:160]
                         log.info("tool call chat=%s kind=%s command=%r", self.chat_id,
                                  entry["kind"], entry["command"][:120] or entry["title"][:120])
                     entry["status"] = str(raw.get("status") or entry.get("status", ""))
@@ -749,7 +833,7 @@ class ChatAgent:
         await drain_task
         await flush_reasoning(force=True)
         await flush_text(force=True)
-        await flush_tools()
+        await flush_tools(force=True)
         self.busy = False
         self.store.touch(self.key)
 
@@ -866,6 +950,7 @@ class Transport:
         self._login_cache_at = 0.0
         self._skills: dict[int, list[Any]] = {}
         self.logins: dict[int, Any] = {}
+        self._login_seen: dict[int, list[str]] = {}
         self._login_before: dict[int, dict[str, tuple[str, str]]] = {}
         self.credential_db = str(config.get("agent", "credential_db", "~/.omp/agent/agent.db"))
         self.token = str(config.get("telegram", "bot_token", "") or "")
@@ -1166,8 +1251,8 @@ class Transport:
             page = int(ctx.args[0])
         window, index, pages = paginate(skills, page - 1, self.SKILL_PAGE)
         buttons = [
-            InlineKeyboardButton(skill.name[:28], callback_data=f"skv:{skills.index(skill)}")
-            for skill in window
+            InlineKeyboardButton(skill.name[:28], callback_data=f"skv:{index * self.SKILL_PAGE + offset}")
+            for offset, skill in enumerate(window)
         ]
         rows = two_columns(buttons)
         nav: list[InlineKeyboardButton] = []
@@ -1325,6 +1410,7 @@ class Transport:
             menu_index=None if target else provider.index,
         )
         self.logins[chat_id] = session
+        self._login_seen[chat_id] = []
         self._login_before[chat_id] = await asyncio.to_thread(credential_snapshot, self.credential_db)
         log.info("login started chat=%s provider=%s target=%s (credentials before: %s)",
                  chat_id, provider.label, target, len(self._login_before[chat_id]))
@@ -1344,6 +1430,11 @@ class Transport:
         text = line.strip()
         if not text or any(noise in text for noise in self.LOGIN_NOISE):
             return
+        seen = self._login_seen.setdefault(chat_id, [])
+        if text in seen:
+            return  # omp redraws the same prompt on every step; the chat does not need it twice
+        seen.append(text)
+        del seen[:-40]
         session = self.logins.get(chat_id)
         if session is not None and session.url and session.url in text:
             rows = [[InlineKeyboardButton("open login page", url=session.url)]]
