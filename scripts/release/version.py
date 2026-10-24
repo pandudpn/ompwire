@@ -69,9 +69,13 @@ def latest_tag() -> str:
 def next_version(bump: str, from_tag: str = "") -> str:
     base = from_tag or latest_tag()
     if base:
-        major, minor, patch, _pre = parse(base)
+        major, minor, patch, pre = parse(base)
     else:
-        major, minor, patch, _pre = parse(current()[0])
+        major, minor, patch, pre = parse(current()[0])
+    # A prerelease graduates by dropping the suffix, not by moving the number: v1.4.0-rc.2 plus a
+    # patch bump is v1.4.0, which is what everyone expects a release candidate to become.
+    if pre and bump == "patch":
+        return f"{major}.{minor}.{patch}"
     if bump == "major":
         return f"{major + 1}.0.0"
     if bump == "minor":

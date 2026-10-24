@@ -57,6 +57,11 @@ def test_next_version(kind, expected):
     assert release_version.next_version(kind, from_tag="v1.4.2") == expected
 
 
+def test_a_patch_bump_graduates_a_prerelease_instead_of_moving_the_number():
+    assert release_version.next_version("patch", from_tag="v1.4.0-rc.2") == "1.4.0"
+    assert release_version.next_version("minor", from_tag="v1.4.0-rc.2") == "1.5.0"
+
+
 def test_a_prerelease_tag_is_parsed_but_not_confused_with_stable():
     major, minor, patch, pre = release_version.parse("v1.4.2-rc.1")
     assert (major, minor, patch, pre) == (1, 4, 2, "rc.1")
