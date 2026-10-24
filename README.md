@@ -125,9 +125,12 @@ What ompwire relies on, verified against the live binary:
 | `session/prompt` | → | one turn; returns `stopReason` and `usage` |
 | `session/update` | ← | `agent_message_chunk`, `tool_call`, `usage_update`, `available_commands_update` |
 | `session/request_permission` | ← | approval request; answered with an `optionId` |
-| `session/set_config_option` | → | switch model, mode, thinking |
+| `session/set_config_option` | → | switch model, mode, thinking; returns the full `configOptions` set |
+| `session/fork` | → | branch a conversation; new `sessionId` inherits the context |
+| `session/list` | → | history: `{sessionId, cwd, updatedAt, _meta{messageCount,size}}` |
 | `session/cancel` | → | stop a running turn |
 | `session/close` | → | release the session |
+| `_session/steering` | → | steer a running turn (extension, see Queue vs steer) |
 
 ## Design notes
 
@@ -149,9 +152,50 @@ make doctor
 
 Tests skip cleanly when `omp` is absent from `PATH`. They never mock the wire: their job is to fail when the agent changes shape.
 
+## Commands (Telegram transport)
+
+The transport owns session routing, approvals, streaming and cost reporting. Anything else is forwarded to the agent as a prompt: OMP already advertises 1153 commands over `available_commands_update`, including every `/skill:<name>` in your skills directories, so re-implementing them here would only create drift.
+
+| Command | Backed by |
+|---|---|
+| `/new` | `session/new` |
+| `/sessions` | `session/list` (`updatedAt`, `cwd`, `size`; no titles) |
+| `/resume <id>`, `/continue` | `session/load` |
+| `/fork` | `session/fork`, inherits context under a new id |
+| `/model <id>`, `/mode <default\|plan>`, `/thinking <level>` | `session/set_config_option` |
+| `/skills [query]` | filter of the agent's advertised command list |
+| `/stop` | `session/cancel` |
+| `/status` | transport state: session id, cwd, model/mode/thinking, process age |
+| `/usage` | accumulated `usage_update` frames per session |
+| `/verbose` | toggle `tool_call` frame rendering |
+| `/queue <text>` | harness FIFO, dispatched after the running turn ends |
+| `/steer <text>` | `_session/steering` extension, experimental (see below) |
+| `/cwd <path>` | new session in that directory, old id kept |
+| `/yolo` | respawns the agent with `--approval-mode=yolo` |
+| `/kill` | terminates the agent subprocess for this chat |
+| `/help`, `/whoami` | transport metadata |
+
+## Queue vs steer
+
+These are not the same thing, and the wire decides which one is safe.
+
+Measured against omp 18.12.6:
+
+| Action while a turn is running | Result |
+|---|---|
+| second `session/prompt` | running turn ends with `stopReason: "cancelled"` (reproduced 3x) |
+| `session/prompt` with `_meta.steering.queue: "followUp"` | running turn still `cancelled`; the new prompt runs next |
+| `_session/steering` notification | turn completes normally (`end_turn`), never cancelled |
+| `_session/steering` with `message` / `text` / `prompt` / `content` payloads | accepted silently, no observable effect on the reply in all four shapes |
+
+So a naive "just send the message" implementation silently kills the work in progress. The transport therefore implements `/queue` itself: hold the text in a FIFO, and dispatch it as the next `session/prompt` once the current promise resolves. That is deterministic and matches what chat users expect from a queue.
+
+`/steer` stays opt-in and labelled experimental: it is non-destructive, but on this agent version the steering text never showed up in the reply, and the payload key is undocumented. Treat the flag as provisional until a case is found where it visibly changes a running turn.
+
 ## Roadmap
 
 - [ ] Telegram transport (`ompwire serve`): long polling, allowlist, edit-in-place streaming, inline-keyboard approvals
+- [ ] queue and steer plumbing per the section above
 - [ ] idle eviction so an unused conversation releases its subprocess
 - [ ] cron or webhook triggers for unattended turns
 - [ ] more transports (the CLI and Telegram paths already share one interface)
