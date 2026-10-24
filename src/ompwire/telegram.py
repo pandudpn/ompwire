@@ -294,7 +294,8 @@ class ChatAgent:
         self.info = info
         log.info("agent up for %s: %s %s (approval=%s, mcp=%d)", self.chat_id,
                  agent.get("name"), agent.get("version"),
-                 approval_policy(self.config), len(self._mcp_servers()))
+                 "yolo" if self.yolo else self.config.get("agent", "approval_mode", "write"),
+                 len(self._mcp_servers()))
         record = self.store.get(self.key)
         previous = self.client.on_update
         self.client.on_update = None  # session/load replays the transcript
@@ -1087,6 +1088,14 @@ class Transport:
             return
         self.enqueue(update.effective_chat.id, "prompt", message)
 
+    def _agent_gate(self, agent: ChatAgent) -> str:
+        """What the agent itself was started with, which is what decides whether anything asks."""
+        if getattr(agent, "yolo", False):
+            return "yolo · no tool asks"
+        mode = str(self.config.get("agent", "approval_mode", "write") or "write")
+        timeout = float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
+        return f"{mode} · asks · {timeout:.0f}s"
+
     def session_card(self, agent: ChatAgent, title: str, note: str = "") -> str:
         options = getattr(agent, "options", {}) or {}
         rows = [
@@ -1094,8 +1103,8 @@ class Transport:
             ("model", (options.get("model") or {}).get("currentValue", "?")),
             ("mode", (options.get("mode") or {}).get("currentValue", "?")),
             ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
-            ("approval", approval_policy(self.config)),
-            ("yolo", "on · approvals bypassed" if agent.yolo else "off"),
+            ("approval", self._agent_gate(agent)),
+            ("yolo", "on · nothing asks" if agent.yolo else "off"),
             ("cwd", agent.cwd),
         ]
         return card(title, now_wib(), rows, note)
@@ -2171,7 +2180,7 @@ class Transport:
             servers = []
             log.warning("mcp resolution failed: %s", exc)
         rows += [
-            ("approval", f"{approval_policy(self.config)} · {float(self.config.get('approval', 'timeout', 120)):.0f}s"),
+            ("approval", self._agent_gate(agent)),
             ("yolo", "on" if agent.yolo else "off"),
             ("reasoning", "on" if agent.reasoning else "off"),
             ("mcp", mcp_label(servers)),
