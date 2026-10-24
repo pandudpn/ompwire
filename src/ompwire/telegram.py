@@ -541,17 +541,24 @@ class ChatAgent:
         await self.send_md(f"schedule {name} created · {item.on_calendar} → {gateway}\nnext: {nxt}")
 
     async def offer_options(self, options: list[str], chat_id: int | None = None) -> None:
-        """Buttons for the answers the agent offered, plus a free-text escape hatch."""
+        """Buttons for the answers the agent offered, plus a free-text escape hatch.
+
+        Telegram cuts an inline button's label to one line on the phone, so a sentence-long
+        option arrived as "Teks per segmen + 1 pesan…". The full text goes in the message body,
+        numbered, and each button carries its number so the choice is never ambiguous.
+        """
         target = chat_id or self.chat_id
         self.pending_options = options
-        rows = [[InlineKeyboardButton(option[:60], callback_data=f"qo:{index}")]
+        rows = [[InlineKeyboardButton(f"{index + 1}. {option}"[:64], callback_data=f"qo:{index}")]
                 for index, option in enumerate(options)]
         rows.append([InlineKeyboardButton("✏️ Other answer", callback_data="qo:other")])
+        listed = "\n".join(f"<b>{index + 1}.</b> {esc(option)}"
+                           for index, option in enumerate(options))
         log.info("question offered chat=%s options=%s", target, options)
         await self.app.bot.send_message(
             target,
             card("❓ pick an answer", "tap one, or choose Other and just type it", [],
-                 "the chosen text is sent as your next message"),
+                 "the chosen text is sent as your next message") + f"\n\n{listed}",
             reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
         )
 

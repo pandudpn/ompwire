@@ -58,7 +58,7 @@ seams are already there:
 
 1. `gateways.KINDS` and `gateways.IMPLEMENTED` in `gateways.py`.
 2. The transport module itself, following `telegram.py`: long polling or webhook in, one
-   `ChatSession` per conversation, streaming edits out, approvals as interactive replies.
+   `ChatSession` per conversation, each step posted as a new message, approvals as interactive replies.
 3. A credential variable per gateway; `gateways.Gateway.token_var()` derives it.
 4. Tests next to the existing ones. No network in tests.
 

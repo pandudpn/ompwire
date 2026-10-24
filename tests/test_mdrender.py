@@ -175,6 +175,30 @@ def test_options_card_has_a_free_text_button():
 
     agent = asyncio.run(main())
     labels = [button.text for row in sent["kb"].inline_keyboard for button in row]
-    assert labels == ["postgres", "mysql", "✏️ Other answer"]
+    assert labels == ["1. postgres", "2. mysql", "✏️ Other answer"]
     assert sent["kb"].inline_keyboard[-1][0].callback_data == "qo:other"
     assert agent.pending_options == ["postgres", "mysql"]
+
+
+def test_a_long_option_is_shown_whole_in_the_message():
+    """A button label is cut to one line on the phone; the message body must carry the text."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from ompwire.config import load_config
+    from ompwire.telegram import ChatAgent
+
+    long = "Teks per segmen + 1 pesan per tool call, dengan timestamp asli untuk setiap langkah"
+    sent = {}
+
+    async def fake_send_message(chat_id, text, reply_markup=None, **kwargs):
+        sent["text"] = text
+        return SimpleNamespace(chat_id=chat_id)
+
+    async def main():
+        agent = ChatAgent(load_config(env={}), 5, "tg:5", SimpleNamespace(bot=SimpleNamespace(
+            send_message=fake_send_message)))
+        await agent.offer_options([long, "pendek"])
+
+    asyncio.run(main())
+    assert long in sent["text"]
