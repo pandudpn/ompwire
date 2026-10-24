@@ -72,9 +72,18 @@ jobs:
             version=$(python -m scripts.release.version bump "$KIND")
           fi
           git add pyproject.toml src/ompwire/__init__.py
-          git commit -m "chore(release): v${version}"
-          git tag -a "v${version}" -m "ompwire ${version}"
-          git push origin "HEAD:${GITHUB_REF_NAME}" --follow-tags
+          if git diff --cached --quiet; then
+            echo "files already say ${version}, no bump commit needed"
+          else
+            git commit -m "chore(release): v${version}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "tag v${version} already exists, reusing it"
+          else
+            git tag -a "v${version}" -m "ompwire ${version}"
+            git push origin "v${version}"
+          fi
           echo "TAG=v${version}" >> "$GITHUB_ENV"
 
       - name: Report what this run releases
@@ -87,8 +96,12 @@ jobs:
           else
             tag="${TAG:-}"
             if [ -z "$tag" ]; then
-              # Dispatch with no bump and no version: release whatever HEAD is tagged with.
-              tag=$(git describe --tags --exact-match 2>/dev/null || true)
+              # Dispatch with no bump: release the version the files declare, once it is
+              # tagged. The guard below still refuses if the tag and the files disagree.
+              declared=$(python -m scripts.release.version show | awk '{print $1}')
+              if git rev-parse -q --verify "refs/tags/v${declared}" >/dev/null 2>&1; then
+                tag="v${declared}"
+              fi
             fi
           fi
           if [ -z "$tag" ]; then
