@@ -121,6 +121,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    from .update import run
+
+    return run(edge=args.edge, check=args.check, force=args.force)
+
+
+def cmd_version(_args: argparse.Namespace) -> int:
+    from .update import current_commit, current_version, install_mode
+
+    commit = current_commit()
+    print(f"ompwire {current_version()}" + (f" ({commit})" if commit else ""))
+    print(f"installer: {install_mode()}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ompwire", description="Chat harness driving an OMP agent over ACP")
     parser.add_argument("--version", action="version", version=f"ompwire {__version__}")
@@ -144,6 +159,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     cfg = sub.add_parser("config", help="show resolved configuration")
     cfg.set_defaults(func=cmd_config)
+
+    upd = sub.add_parser("update", help="update to the newest release (or the tip of main)")
+    upd.add_argument("--edge", action="store_true", help="track the latest commit on main")
+    upd.add_argument("--stable", action="store_true", help="track the newest release (default)")
+    upd.add_argument("--check", action="store_true", help="report what an update would do")
+    upd.add_argument("--force", action="store_true", help="for a source checkout, run git checkout")
+    upd.set_defaults(func=cmd_update)
+
+    ver = sub.add_parser("version", help="print the installed version and installer")
+    ver.set_defaults(func=cmd_version)
 
     return parser
 
