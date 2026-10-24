@@ -14,19 +14,114 @@ OMP already ships that machinery and speaks ACP over stdio. So a frontend only n
 
 ## How it works
 
-```
-Telegram / CLI
-      │  text, images, commands
-      ▼
-   ompwire ──── session/prompt ──────────────▶ omp --mode acp
-      ▲   ◀─── session/update (stream) ───────┐   │
-      │   ◀─── session/request_permission ───┘   │  agent loop, tools,
-      │                                          │  MCP, compaction
-      ▼                                          │
-  sqlite: chat_key → sessionId ──────────────────┘
+A chat surface, one transport process, one agent process. Nothing between them but
+the Agent Client Protocol over stdio.
+
+```mermaid
+flowchart LR
+    subgraph surfaces["chat surfaces"]
+        TG["Telegram bot"]
+        CLI["ompwire CLI"]
+    end
+
+    subgraph wire["ompwire process"]
+        T["transport<br/>routing · rendering · approvals"]
+        DB[("sessions.db<br/>chat_key → sessionId · prefs")]
+        CFG[/"config.toml + .env<br/>settings · token"/]
+    end
+
+    subgraph agent["omp process"]
+        A["omp --mode acp<br/>loop · tools · compaction · skills"]
+        S[("agent.db + config.yml<br/>sessions · credentials · mcp.json")]
+    end
+
+    P["model providers"]
+    M["MCP servers"]
+    W["workspace<br/>files · shell · git"]
+
+    TG -->|"updates"| T
+    CLI -->|serve| T
+    T <-->|"session/prompt · session/update"| A
+    A -.->|"request_permission"| T
+    T --- DB
+    DB --- CFG
+    A --- S
+    A --> P
+    A --> M
+    A --> W
 ```
 
-The harness keeps one row per conversation and nothing else. Conversation history lives inside the agent's own session, so a restart costs one `session/load` call instead of a transcript replay.
+Interactive version of the same picture, with the failure modes drawn in:
+[`docs/ompwire-architecture.html`](docs/ompwire-architecture.html) (open in a browser;
+generated with [archify](https://github.com/tt-a1i/archify)).
+
+### Components and what each one owns
+
+| Component | Owns | Fails how | Fallback |
+|---|---|---|---|
+| Transport | routing, streaming, approvals, rendering, per-chat prefs | a Telegram edit fails, markup is rejected | resend as plain text instead of losing the message |
+| `sessions.db` | `chat_key → sessionId`, prefs, approval override | unreadable | a new agent session; the chat key is kept |
+| ACP client | stdio framing, request ids, timeouts | the subprocess dies mid-turn | respawn, then `session/load` on the same session id |
+| Agent (omp) | loop, tools, MCP, compaction, skills, memory | provider or tool error | reported to the chat as the agent's own error text |
+| Catalogs | model/mode/thinking lists, providers, skills | the agent will not answer a probe | empty list, and the command says so instead of inventing options |
+
+### A turn, end to end
+
+1. Telegram delivers an update; the transport drops it unless the sender is in `allowed_users`.
+2. The chat key is resolved to a session id (`sessions.db`), or a new ACP session is created.
+3. Stored prefs (model, mode, thinking, yolo) are replayed onto the fresh session via `session/set_config_option`, and the reply refreshes the cached option lists.
+4. The message becomes a `session/prompt`; images are attached as `image` content blocks.
+5. `session/update` chunks stream back: prose is batched into edits, tool calls into a separate `🔧` message so the answer is never clobbered.
+6. `session/request_permission` becomes a picker; the answer is `allow`/`deny` plus a persisted override, so the same tool is not asked twice.
+7. Every action lands in a rotating log with the token redacted before it reaches a handler.
+8. If the agent proposes concrete options (`<<options: a | b>>`), they arrive as buttons; the answer is sent back as a normal message.
+
+### Requirements this design is sized by
+
+| Requirement | Target | How it is met |
+|---|---|---|
+| Resume after restart | one call, not a transcript replay | session id in sqlite, `session/load` on startup |
+| First token on screen | under a second after the agent starts answering | chunk batching on an interval, not per token |
+| Approval visibility | never silent | every permission request becomes a message that stays until answered |
+| Secret exposure | zero tokens in logs | redaction filter on every handler, `ompwire scrub-logs` for old files |
+| Agent reachability | fail loudly | `serve` checks the agent, the platform and the token before polling |
+
+### Decision record
+
+| Decision | Alternatives rejected | Why | What it costs |
+|---|---|---|---|
+| Transport only | a full chat client with its own loop | OMP already owns the loop, tools and compaction; a second copy is where frontends rot | features that need agent state must go upstream |
+| ACP over stdio | provider HTTP APIs called directly | the agent authenticates itself, so no keys live here | ACP shape becomes a contract to follow |
+| One subprocess per conversation | one shared agent with multiplexed sessions | a stuck turn cannot block other chats, and `cwd` is per chat | process memory per active chat |
+| HTML `parse_mode` | MarkdownV2 | MarkdownV2 needs 18 characters escaped; HTML needs 3, and `<pre>` content is never parsed | markup must be built, not pasted |
+| Catalogs read from the agent | a hard-coded provider/model list | lists drift the day the agent ships a new provider | a probe costs one extra subprocess call |
+| Formatting via `--append-system-prompt` | post-processing the model's markdown | fences, short paragraphs and the options marker are cheaper to ask for than to repair | a prompt hint that must stay short |
+| Git tags + `uv tool`, not PyPI | publishing to PyPI | the transport depends on a specific agent surface, so edge installs matter | needs git credentials on the installing machine |
+
+## Use cases
+
+The same transport, four shapes of work. Each one is a different answer to "where is
+the agent running, and who is watching it".
+
+**1. Unblock a long task from a phone.** A refactor runs on the workstation, pauses on
+a permission request, and the request lands in Telegram with the command and its
+arguments. Approving from the phone continues the same turn; nothing is re-run.
+
+**2. Review queue on a second device.** `/review` style work: the agent reads a diff,
+streams findings into the chat, and the buttons carry the follow-up decision. The
+session id survives a laptop restart, so the queue is not rebuilt.
+
+**3. Multiple worktrees, one inbox.** Each chat maps to its own working directory, so a
+backend repo and a mobile app repo can sit in different chats with different models and
+different approval posture, without a multiplexer in between.
+
+**4. A transport you can audit.** Every action is in the log, every message is a
+rendered card, and the whole surface is one file — small enough to read before pointing
+it at a machine that has credentials on it.
+
+The counter-case matters too: if the work needs a browser, a full TUI, or multi-agent
+orchestration, drive the agent directly. This is a chat transport, not a replacement for
+the terminal.
 
 ## What it does
 

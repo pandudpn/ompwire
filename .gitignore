@@ -7,3 +7,4 @@ build/
 .env
 *.db
 .pytest_cache/
+.archify/
