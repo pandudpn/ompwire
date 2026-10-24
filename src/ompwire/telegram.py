@@ -54,6 +54,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("usage", "token usage for this session"),
     ("context", "context window breakdown from the agent"),
     ("skills", "browse skills and read their SKILL.md"),
+    ("commands", "search the agent's advertised slash commands"),
     ("login", "sign in to a model provider"),
     ("sessions", "list recorded sessions"),
     ("resume", "resume a session by id"),
@@ -1361,7 +1362,8 @@ class Transport:
         await self.announce(update.effective_chat.id,
                            f"tool trace: {'on' if agent.verbose else 'off'}")
 
-    async def cmd_skills(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def cmd_commands(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Search the slash commands the agent advertises (about a thousand)."""
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
@@ -1445,7 +1447,7 @@ class Transport:
         groups = [
             ("session", ["new", "sessions", "resume", "continue", "fork", "cwd", "kill"]),
             ("agent", ["model", "mode", "thinking", "approve", "trace", "verbose", "yolo"]),
-            ("catalog", ["skills", "login"]),
+            ("catalog", ["skills", "login", "commands"]),
             ("running", ["stop", "queue", "steer", "status", "usage", "context"]),
             ("info", ["whoami", "help"]),
         ]
@@ -1570,6 +1572,7 @@ class Transport:
         app.add_handler(CommandHandler("context", self.cmd_context))
         app.add_handler(CommandHandler("skills", self.cmd_skills))
         app.add_handler(CommandHandler("login", self.cmd_login))
+        app.add_handler(CommandHandler("commands", self.cmd_commands))
         app.add_handler(CommandHandler("sessions", self.cmd_sessions))
         app.add_handler(CommandHandler("resume", self.cmd_resume))
         app.add_handler(CommandHandler("continue", self.cmd_continue))
@@ -1580,7 +1583,6 @@ class Transport:
         app.add_handler(CommandHandler("thinking", self.cmd_thinking))
         app.add_handler(CommandHandler("approve", self.cmd_approve))
         app.add_handler(CommandHandler("verbose", self.cmd_verbose))
-        app.add_handler(CommandHandler("skills", self.cmd_skills))
         app.add_handler(CommandHandler("queue", self.cmd_queue))
         app.add_handler(CommandHandler("steer", self.cmd_steer))
         app.add_handler(CommandHandler("yolo", self.cmd_yolo))

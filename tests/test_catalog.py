@@ -184,3 +184,15 @@ def test_login_noise_is_not_forwarded_to_the_chat():
                   "Preferred port 54545 unavailable, using port 39865",
                   "Waiting for browser authentication..."):
         assert any(part in noise for part in Transport.LOGIN_NOISE)
+
+
+def test_skills_command_is_the_grid_not_the_command_search():
+    """A second cmd_skills used to shadow the catalog grid in the class body."""
+    import inspect
+
+    from ompwire.telegram import Transport
+
+    source = inspect.getsource(Transport.cmd_skills)
+    assert "list_skills" in source and "InlineKeyboardMarkup" in source
+    assert hasattr(Transport, "cmd_commands")   # the command search kept its own name
+    assert "advertised_commands" in inspect.getsource(Transport.cmd_commands)
