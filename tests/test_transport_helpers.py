@@ -54,3 +54,31 @@ def test_single_provider_stays_on_one_list():
     agent = FakeAgent({"mode": {"currentValue": "default", "options": [{"value": "default"}, {"value": "plan"}]}})
     transport = Transport(load_config(env={}))
     assert [name for name, _ in transport._providers(agent, "mode")] == ["other"]
+
+
+def test_page_slice_clamps_and_pages():
+    values = [str(i) for i in range(20)]
+    window, page, pages = Transport._page_slice(values, 0, 8)
+    assert (window[0], len(window), page, pages) == ("0", 8, 0, 3)
+    window, page, pages = Transport._page_slice(values, 2, 8)
+    assert (window[0], len(window), page, pages) == ("16", 4, 2, 3)
+    # out of range clamps instead of raising
+    window, page, pages = Transport._page_slice(values, 99, 8)
+    assert (page, pages) == (2, 3)
+    assert Transport._page_slice([], 0, 8) == ([], 0, 1)
+
+
+def test_pick_indices_map_to_the_full_option_list():
+    """A page inside a provider must select the global option, not a local one."""
+    agent = FakeAgent({
+        "model": {
+            "currentValue": "zai/a",
+            "options": [{"value": "commandcode/x"}, {"value": "zai/a"}, {"value": "zai/b"}],
+        }
+    })
+    transport = Transport(load_config(env={}))
+    providers = dict(transport._providers(agent, "model"))
+    values = transport._values(agent, "model")
+    zai_indices = providers["zai"]
+    assert [values[i] for i in zai_indices] == ["zai/a", "zai/b"]
+    assert zai_indices == [1, 2]
