@@ -19,7 +19,7 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 
 | Layer | Owns | When it fails |
 | --- | --- | --- |
-| Transport (`telegram.py`) | routing, streaming edits, approvals, rendering, per-chat prefs | a Telegram edit fails or markup is rejected; the reply is resent as plain text instead of being lost |
+| Transport (`telegram.py`) | routing, posting each step, approvals, rendering, per-chat prefs | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
 | `sessions.db` (`store.py`) | chat key to session id, prefs, approval override | unreadable: a new agent session, the chat key is kept |
 | ACP client (`acp.py`) | stdio framing, request ids, timeouts | the subprocess dies mid-turn: respawn, then `session/load` on the same id |
 | Agent (`omp`) | loop, tools, MCP, compaction, skills, memory, prompt | provider or tool error: reported to the chat as the agent's own text |
@@ -65,8 +65,10 @@ Line counts move. If a number here is wrong, the file is right and this table is
 3. Stored prefs (model, mode, thinking, yolo) are replayed onto the session with
    `session/set_config_option`.
 4. The message becomes a `session/prompt`. Images arrive as ACP image content blocks.
-5. `session/update` frames stream back: prose is batched into edits to one message, tool calls
-   go to a separate trace message so the answer is never clobbered.
+5. `session/update` frames stream back. Nothing is edited after it is sent: the prose written
+   before each tool call is posted as a message when the tool call starts, each tool call is
+   posted as its own message when it finishes (with its output), and whatever is left goes out
+   when the turn ends. Every message's timestamp is when that step happened.
 6. `session/request_permission` becomes an inline keyboard. The answer is an option id from
    what the agent offered, plus a persisted override so the same tool is not asked twice.
 7. Every action lands in a rotating log with token-shaped strings redacted before the handler
@@ -80,8 +82,8 @@ ACP has no way for the agent to attach a file and no general attachment block go
 so the transport owns both directions.
 
 Out: the agent names a path in its reply with `<<file: /abs/path>>`, one marker may carry several
-paths separated by a pipe. The marker is stripped from everything the chat sees, including the
-streaming edits, and the files are uploaded once the turn ends. The guard rails are the point:
+paths separated by a pipe. The marker is stripped from everything the chat sees, and the files
+are uploaded once the turn ends. The guard rails are the point:
 the path must resolve inside the agent's working directory (a model that read `~/.ssh` must not be
 able to post it), it must exist and be a file, it must be under `files.max_mb`, and at most five
 files go out per turn. An image under 10 MB travels as a photo, anything else as a document.
@@ -159,9 +161,9 @@ decision behind it:
 
 | Kind | What the transport does |
 | --- | --- |
-| `agent_message_chunk` | the answer, streamed into the message being edited |
+| `agent_message_chunk` | the answer, buffered and posted as a new message at the next tool call or the end of the turn |
 | `agent_thought_chunk` | the reasoning, shown only with `/reasoning on`, kept to its tail |
-| `tool_call`, `tool_call_update` | the tool trace, when `stream.verbose` is on |
+| `tool_call`, `tool_call_update` | one message per call, posted when it completes or fails, when `stream.show_tool_calls` is on |
 | `usage_update`, `session_info_update` | read for accounting, never rendered |
 | `available_commands_update` | fills `/commands` |
 | `config_option_update`, `current_mode_update` | kept so the pickers show current values |

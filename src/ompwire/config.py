@@ -27,7 +27,6 @@ ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "OMPWIRE_MODEL": ("agent", "model"),
     "OMPWIRE_MODE": ("agent", "mode"),
     "OMPWIRE_APPROVAL": ("agent", "approval_mode"),
-    "OMPWIRE_STREAM_EDIT_INTERVAL": ("stream", "edit_interval"),
     "OMPWIRE_IDLE_TIMEOUT": ("session", "idle_timeout"),
     "OMPWIRE_FILES_MAX_MB": ("files", "max_mb"),
     "OMPWIRE_FILES_INCOMING_DIR": ("files", "incoming_dir"),
@@ -94,7 +93,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "stream": {
         "enabled": True,
-        "edit_interval": 1.0,
         "show_tool_calls": True,
         "show_usage": False,  # per-turn token line; /usage covers it on demand
         # the agent's thinking arrives over ACP as agent_thought_chunk; off by default because

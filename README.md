@@ -16,8 +16,8 @@ Telegram  <->  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
 
 ## What you get
 
-- Answers stream into one message and are edited in place, not posted as a wall of new ones
-- Tool calls go to their own trace message, so the answer is never clobbered
+- Every step is its own message with its own timestamp: the agent's text up to each tool call,
+  then each tool call with its output. Nothing is edited after it is sent
 - Approvals arrive as buttons; `/approve` sets the policy, or run with `yolo` and skip them
 - Sessions survive restarts; `/new` starts one, `/resume` picks an old one
 - Model, mode and thinking level switch from chat

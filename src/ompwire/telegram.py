@@ -233,10 +233,6 @@ class ChatAgent:
         self.session_id = ""
         self.cwd = str(config.get("agent", "cwd") or "~")
         self.reasoning = bool(config.get("stream", "show_reasoning", False))
-        # Telegram's flood control counts edits too. When it answers with RetryAfter, everything
-        # that edits a live message goes quiet until the window passes, instead of turning a
-        # pretty trace into "Turn failed: Flood control exceeded".
-        self._quiet_until = 0.0
         # the bot that receives a scheduled result defaults to the bot being talked to
         self.gateway_name = str(config.get("_gateway", "name", "telegram") or "telegram")
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
@@ -602,38 +598,6 @@ class ChatAgent:
             except Exception as exc:
                 log.debug("could not rewrite the expired approval prompt: %s", exc)
 
-    async def _send_answer(self, text: str):
-        """The answer is the one message worth waiting for, briefly."""
-        try:
-            return await self.send_md(text)
-        except RetryAfter as exc:
-            self._note_rate_limit(exc)
-            window = self._retry_window(exc)
-            if window > 20:
-                log.error("rate limited for %.0fs, the answer was not delivered", window)
-                return None
-            await asyncio.sleep(window + 0.5)
-            try:
-                self._quiet_until = 0.0
-                return await self.send_md(text)
-            except TelegramError as retry:
-                log.error("answer still not delivered after waiting: %s", retry)
-                return None
-
-    async def _edit_answer(self, message, text: str) -> bool:
-        """Edit the answer; False when Telegram did not take it, so the caller can retry."""
-        try:
-            await self.edit_md(message, text)
-            return True
-        except RetryAfter as exc:
-            self._note_rate_limit(exc)
-        except TelegramError as exc:
-            log.warning("answer edit not delivered: %s", exc)
-        return False
-
-    def _rate_limited(self) -> bool:
-        return time.monotonic() < self._quiet_until
-
     @staticmethod
     def _retry_window(exc: Exception) -> float:
         """PTB gives seconds today and a timedelta from v23; both mean the same wait."""
@@ -641,12 +605,6 @@ class ChatAgent:
         if hasattr(value, "total_seconds"):
             return float(value.total_seconds())
         return float(value or 5)
-
-    def _note_rate_limit(self, exc: Exception) -> None:
-        window = self._retry_window(exc)
-        # a long window is not worth stalling the turn for; stop editing and let the answer land
-        self._quiet_until = time.monotonic() + window
-        log.warning("telegram rate limit: no edits for %.0fs (%s)", window, exc)
 
     # ------------------------------------------------------------------ turn
     async def ask(self, text: str, message=None, images: list[dict[str, Any]] | None = None,
@@ -663,160 +621,104 @@ class ChatAgent:
         self.store.begin_turn(self.key, record or text, resumes)
         log.info("turn start chat=%s session=%s input_chars=%s", self.chat_id,
                  self.session_id[:8], len(text))
-        text_buffer: list[str] = []
-        trace: dict[str, dict[str, str]] = {}
-        sent: list[Any] = []
-        state = {"text_msg": None, "tool_msg": None, "reason_msg": None, "reasoning": "",
-                 "last_edit": 0.0, "text": "", "tools": 0}
+        # Every message is posted once and never edited, so its timestamp is when that step
+        # happened. Answer text is cut into segments at each tool call; each tool call is its own
+        # message, posted when it finishes so it carries its output.
+        segment: list[str] = []    # answer text since the last tool call
+        answer: list[str] = []     # the whole answer, for the markers read at the end
+        thinking: list[str] = []
+        trace: dict[str, dict[str, Any]] = {}
+        state: dict[str, Any] = {"text_msg": None, "tools": 0}
 
-        async def flush_text(force: bool = False) -> None:
-            joined = strip_agent_noise("".join(text_buffer))
-            if not joined.strip():
-                return
-            now = time.time()
-            interval = float(self.config.get("stream", "edit_interval", 1.0))
-            if not force and now - state["last_edit"] < interval:
-                return
-            state["last_edit"] = now
-            joined = hide_file_partial(hide_partial(joined, final=force), final=force)
-            joined = schedule_lib.hide_partial(joined, final=force)
-            if not joined.strip():
-                return
-            parts = _chunks(joined, 3600)
-            # one Telegram message per chunk, edited in place; sending parts[1:] on every flush
-            # posted the tail of a long answer again each second
-            chunk_msgs: list[Any] = state.setdefault("chunk_msgs", [])
-            # Remember only what Telegram actually shows. Recording the text after a refused
-            # edit made the final flush think nothing had changed: the chat kept "The" while the
-            # agent had written the whole answer.
-            if joined != state["text"] or force:
-                delivered = True
-                for index, part in enumerate(parts):
-                    if index < len(chunk_msgs):
-                        if index == len(chunk_msgs) - 1 or index == len(parts) - 1 or force:
-                            ok = await self._edit_answer(chunk_msgs[index], part)
-                            delivered = delivered and ok
-                        continue
-                    sent_msg = await self._send_answer(part)
-                    if sent_msg is None:
-                        delivered = False
-                        break
-                    chunk_msgs.append(sent_msg)
-                    sent.append(sent_msg)
-                state["text_msg"] = chunk_msgs[0] if chunk_msgs else None
-                if delivered:
-                    state["text"] = joined
-                elif force and chunk_msgs:
-                    # the final edit is the answer itself: wait out a short flood window, retry once
-                    window = max(0.0, self._quiet_until - time.monotonic())
-                    if window <= 20:
-                        await asyncio.sleep(window + 0.5)
-                        self._quiet_until = 0.0
-                        last = len(chunk_msgs) - 1
-                        if await self._edit_answer(chunk_msgs[last], parts[last]):
-                            state["text"] = joined
-                    if state["text"] != joined:
-                        log.error("final answer not delivered chat=%s chars=%s",
-                                  self.chat_id, len(joined))
-            if force:
-                raw = "".join(text_buffer)
-                _, options = extract_options(raw)
-                if options:
-                    await self.offer_options(options)
-                await self.deliver_files(raw)
-                _clean, proposals = schedule_lib.extract(raw)
-                if proposals:
-                    await self.offer_schedules(proposals)
-
-        async def flush_tools(force: bool = False) -> None:
-            if not trace or self._rate_limited():
-                return
-            if state["tool_msg"] is not None and not force:
-                interval = float(self.config.get("stream", "tool_edit_interval", 2.0))
-                if time.time() - state.get("last_tool_edit", 0.0) < interval:
-                    return
-            state["last_tool_edit"] = time.time()
-            blocks = [
-                tool_block(entry.get("kind", "tool"), entry.get("title", ""),
-                           entry.get("command", ""), entry.get("output", ""),
-                           entry.get("status", ""), entry.get("subagent", ""),
-                           entry.get("steps") or [], entry.get("brief", ""))
-                for entry in trace.values()
-            ]
-            body = ""
-            dropped = 0
-            for block in reversed(blocks):
-                candidate = block if not body else f"{block}\n{body}"
-                if len(candidate) > TELEGRAM_LIMIT - 40:
-                    dropped += 1
-                    continue
-                body = candidate
-            if dropped:
-                body = f"… {dropped} earlier call(s)\n{body}" if body else f"… {dropped} call(s)"
-            if state["tool_msg"] is None:
+        async def post(body: str, *, html: bool, essential: bool) -> Any:
+            """One new message. A flood window is waited out for the answer, not for a trace."""
+            for attempt in range(2):
                 try:
-                    state["tool_msg"] = await self.send_html(body)
-                    sent.append(state["tool_msg"])
+                    return await (self.send_html(body) if html else self.send_md(body))
                 except RetryAfter as exc:
-                    self._note_rate_limit(exc)
-                return
-            try:
-                await state["tool_msg"].edit_text(body, parse_mode=ParseMode.HTML)
-            except RetryAfter as exc:
-                self._note_rate_limit(exc)
-            except BadRequest as exc:
-                if "not modified" in str(exc).lower():
-                    return
-                log.debug("tool trace edit rejected (%s)", exc)
+                    window = self._retry_window(exc)
+                    if attempt or window > (60 if essential else 10):
+                        log.warning("message dropped chat=%s after flood control (%.0fs)",
+                                    self.chat_id, window)
+                        return None
+                    await asyncio.sleep(window + 0.5)
+                except TelegramError as exc:
+                    log.warning("message not delivered chat=%s: %s", self.chat_id, exc)
+                    return None
+            return None
 
-        async def flush_reasoning(force: bool = False) -> None:
-            if not self.reasoning or not state["reasoning"].strip() or self._rate_limited():
+        async def flush_thinking() -> None:
+            shown = "".join(thinking).strip()
+            thinking.clear()
+            if not self.reasoning or not shown:
                 return
-            now = time.time()
-            interval = float(self.config.get("stream", "edit_interval", 1.0))
-            if not force and now - state["last_edit"] < interval:
-                return
-            state["last_edit"] = now
-            shown = state["reasoning"].strip()
             if len(shown) > REASONING_CHARS:
                 shown = "…\n" + shown[-REASONING_CHARS:]
-            body = f"💭 <i>thinking</i>\n<blockquote expandable>{esc(shown)}</blockquote>"
-            if state["reason_msg"] is None:
-                try:
-                    state["reason_msg"] = await self.send_html(body)
-                    sent.append(state["reason_msg"])
-                except RetryAfter as exc:
-                    self._note_rate_limit(exc)
+            await post(f"💭 <i>thinking</i>\n<blockquote expandable>{esc(shown)}</blockquote>",
+                       html=True, essential=False)
+
+        async def flush_segment() -> None:
+            text = strip_agent_noise("".join(segment))
+            segment.clear()
+            text = hide_file_partial(hide_partial(text, final=True), final=True)
+            text = schedule_lib.hide_partial(text, final=True)
+            if not text.strip():
                 return
-            try:
-                await state["reason_msg"].edit_text(body, parse_mode=ParseMode.HTML)
-            except RetryAfter as exc:
-                self._note_rate_limit(exc)
-            except BadRequest as exc:
-                if "not modified" not in str(exc).lower():
-                    log.debug("reasoning edit rejected: %s", exc)
+            for part in _chunks(text, 3600):
+                sent_msg = await post(part, html=False, essential=True)
+                if sent_msg is not None:
+                    state["text_msg"] = sent_msg
+
+        async def post_tool(entry: dict[str, Any]) -> None:
+            entry["posted"] = True
+            if not self.verbose:
+                return
+            fields = (entry.get("kind", "tool"), entry.get("title", ""), entry.get("command", ""))
+            tail = (entry.get("status", ""), entry.get("subagent", ""), entry.get("steps") or [],
+                    entry.get("brief", ""))
+            body = tool_block(*fields, entry.get("output", ""), *tail)
+            if len(body) > TELEGRAM_LIMIT:
+                body = tool_block(*fields, "(output too long for one message)", *tail)
+            await post(body, html=True, essential=False)
+
+        async def finish() -> None:
+            """End of turn: whatever is still buffered, then the markers in the whole answer."""
+            await flush_thinking()
+            await flush_segment()
+            for entry in trace.values():
+                if not entry.get("posted"):
+                    await post_tool(entry)
+            raw = "".join(answer)
+            _, options = extract_options(raw)
+            if options:
+                await self.offer_options(options)
+            await self.deliver_files(raw)
+            _clean, proposals = schedule_lib.extract(raw)
+            if proposals:
+                await self.offer_schedules(proposals)
 
         async def drain() -> None:
             while True:
                 update = await self._updates.get()
                 if update is None:
                     return
-                if update.kind == "agent_message_chunk" and update.text:
-                    text_buffer.append(update.text)
-                    try:
-                        await flush_text()
-                    except RetryAfter as exc:
-                        self._note_rate_limit(exc)
-                elif update.kind == "agent_thought_chunk" and update.text and self.reasoning:
-                    state["reasoning"] += update.text
-                    await flush_reasoning()
-                elif update.kind in {"tool_call", "tool_call_update"} and self.verbose:
+                if update.kind == "agent_thought_chunk" and update.text:
+                    thinking.append(update.text)
+                elif update.kind == "agent_message_chunk" and update.text:
+                    await flush_thinking()
+                    segment.append(update.text)
+                    answer.append(update.text)
+                elif update.kind in {"tool_call", "tool_call_update"}:
                     raw = update.raw
                     call_id = str(raw.get("toolCallId") or f"anon{len(trace)}")
                     entry = trace.setdefault(call_id, {"kind": "tool"})
-                    if update.kind == "tool_call" and _is_waiting(str(raw.get("title") or "")):
-                        continue
                     if update.kind == "tool_call":
+                        # the text before a tool call is a finished thought: post it now
+                        await flush_thinking()
+                        await flush_segment()
+                        if _is_waiting(str(raw.get("title") or "")):
+                            entry["posted"] = True
+                            continue
                         state["tools"] += 1
                         self.tools_used += 1
                         entry["kind"] = str(raw.get("kind") or "tool")
@@ -839,6 +741,8 @@ class ChatAgent:
                                                   + ", ".join(str(t) for t in tools))[:160]
                         log.info("tool call chat=%s kind=%s command=%r", self.chat_id,
                                  entry["kind"], entry["command"][:120] or entry["title"][:120])
+                    if entry.get("posted"):
+                        continue
                     entry["status"] = str(raw.get("status") or entry.get("status", ""))
                     steps = [item.get("text", "") for item in (raw.get("content") or [])
                              if isinstance(item, dict) and item.get("text")]
@@ -854,7 +758,8 @@ class ChatAgent:
                               if isinstance(item, dict)]
                     if any(chunks):
                         entry["output"] = "\n".join(chunks)
-                    await flush_tools()
+                    if entry["status"] in {"completed", "failed"}:
+                        await post_tool(entry)
 
         drain_task = asyncio.create_task(drain())
         try:
@@ -874,7 +779,7 @@ class ChatAgent:
             # has already handed to the loop, or the last of a turn is dropped
             self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
             await drain_task
-            await flush_text(force=True)  # what did arrive is still worth showing
+            await finish()  # what did arrive is still worth showing
             self.busy = False
             # A crash or shutdown cut keeps the row, so the next start resumes it. A deliberate
             # stop and a silence timeout do not: the person has already been told it failed.
@@ -883,9 +788,7 @@ class ChatAgent:
             raise
         self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
         await drain_task
-        await flush_reasoning(force=True)
-        await flush_text(force=True)
-        await flush_tools(force=True)
+        await finish()
         self.busy = False
         self.store.touch(self.key)
         # A cancel nobody asked for is the gateway going down (systemd signals the agent too).
@@ -919,15 +822,6 @@ class ChatAgent:
 
     async def send_md(self, text: str):
         return await send_md(self.app.bot, self.chat_id, text)
-
-    async def edit_md(self, message: Any, text: str) -> None:
-        try:
-            await message.edit_text(to_html(text), parse_mode=ParseMode.HTML)
-        except BadRequest as exc:
-            if "not modified" in str(exc).lower():
-                return
-            log.warning("html edit rejected (%s); falling back to plain text", exc)
-            await message.edit_text(to_plain(text))
 
     @contextlib.asynccontextmanager
     async def typing(self):

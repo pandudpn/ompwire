@@ -49,7 +49,6 @@ idle_timeout = 1800        # drop the ACP subprocess after this many idle second
 
 [stream]
 enabled = true
-edit_interval = 1.0        # seconds between message edits (Telegram edit-in-place)
 show_tool_calls = true
 show_usage = false       # per-turn token line; use /usage instead
 
