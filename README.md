@@ -126,12 +126,35 @@ conversations, because every live chat owns its own `omp` subprocess. Each unit 
 | `/login` | authenticate a model provider |
 | `/approve`, `/verbose`, `/yolo` | approval policy, tool trace, bypass approvals |
 | `/queue <text>`, `/steer <text>` | queue the next turn, or steer the running one |
+| `/schedule [run\|rm <name>]` | list scheduled turns, run one now, remove one |
 | `/stop`, `/kill` | cancel the turn, kill the agent process for this chat |
 | `/help`, `/whoami` | what this thing is |
 
 Anything else is forwarded to the agent as a prompt. `/queue` is a real queue: a second prompt
 sent into a running turn cancels it on this agent version, so ompwire holds the text and sends
 it after the turn ends.
+
+## Schedules
+
+A schedule runs one turn on a timer and exits. There is no daemon: between runs nothing of ompwire
+is alive, and the cost of a schedule is a timer entry plus about a kilobyte of text.
+
+```
+ompwire schedule add morning --cron "0 7 * * *" --prompt "ringkas aktivitas repo semalam"
+ompwire schedule run morning      # prove it now instead of waiting for 07:00
+ompwire schedule list
+ompwire schedule remove morning
+```
+
+The cron fields are read on `Asia/Jakarta` by default, because that is the clock the bot shows,
+and the result goes to the gateway named in the schedule (default `telegram`). Each schedule is a
+`oneshot` unit capped at 1 GB and 200% CPU with a 30 minute timeout, so one runaway turn cannot
+disturb anything else on the machine. Runs are ephemeral and answer `cancelled` to any tool that
+would need a human approval; `--yolo` per schedule opts out, deliberately.
+
+You can also just ask in the chat ("every morning at 7, summarise the repo"). The agent proposes
+it with a marker, the transport turns that into a confirmation card, and nothing is installed until
+you press **Buat schedule**.
 
 ## Configuration
 

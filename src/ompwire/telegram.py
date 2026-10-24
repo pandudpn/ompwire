@@ -18,6 +18,7 @@ import contextlib
 import logging
 import logging.handlers
 import pathlib
+import re
 import signal
 import time
 from collections.abc import Iterable
@@ -36,7 +37,8 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__
+from . import __version__, gateways
+from . import schedules as schedule_lib
 from .acp import AcpClient, AcpError, pick_permission_option
 from .acp import Update as AcpUpdate
 from .attachments import extract as extract_files
@@ -83,6 +85,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("commands", "search the agent's own slash commands"),
     ("queue", "queue a prompt for the next turn"),
     ("steer", "steer the running turn (experimental)"),
+    ("schedule", "scheduled turns: list, run now, remove"),
     ("yolo", "respawn the agent with approvals off"),
     ("kill", "stop the agent process for this chat"),
     ("whoami", "ids and transport info"),
@@ -201,6 +204,9 @@ class ChatAgent:
         self.client: AcpClient | None = None
         self.session_id = ""
         self.cwd = str(config.get("agent", "cwd") or "~")
+        # the bot that receives a scheduled result defaults to the bot being talked to
+        self.gateway_name = str(config.get("_gateway", "name", "telegram") or "telegram")
+        self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
         self.started_at = time.time()
         self.pending_options: list[str] = []
         self.last_used = time.time()
@@ -421,6 +427,85 @@ class ChatAgent:
             more = "" if len(rejected) <= 4 else f" (+{len(rejected) - 4} more)"
             await self.send_md("skipped a file · " + " · ".join(shown) + more)
 
+    # ------------------------------------------------------------- schedules
+    def _schedule_name(self, proposal: schedule_lib.Proposal) -> str:
+        """A readable name from the prompt, unique among what already exists."""
+        words = re.findall(r"[a-z0-9]+", proposal.prompt.lower())[:3]
+        base = "-".join(words)[:24] or "scheduled"
+        existing = set(schedule_lib.load())
+        if base not in existing:
+            return base
+        for index in range(2, 100):
+            candidate = f"{base}-{index}"
+            if candidate not in existing:
+                return candidate
+        return f"{base}-{len(existing) + 1}"
+
+    async def offer_schedules(self, proposals: list[schedule_lib.Proposal]) -> None:
+        """A marker is a proposal: nothing is installed until a button is pressed."""
+        known = {item.name for item in gateways.load()}
+        for proposal in proposals:
+            gateway = proposal.gateway or self.gateway_name
+            problem = ""
+            if known and gateway not in known:
+                problem = f"gateway '{gateway}' tidak dikenal"
+            try:
+                expression = proposal.expression
+                schedule_lib.validate_calendar(f"{expression} {schedule_lib.DEFAULT_TIMEZONE}")
+            except schedule_lib.ScheduleError as exc:
+                problem = str(exc)
+            if problem:
+                await self.send_md(f"jadwal ditolak · {problem}")
+                continue
+            name = self._schedule_name(proposal)
+            self.pending_schedules[name] = proposal
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("Buat schedule", callback_data=f"sched:new:{name}"),
+                InlineKeyboardButton("Batal", callback_data=f"sched:cancel:{name}"),
+            ]])
+            body = card("jadwal", expression, [
+                ("kirim ke", gateway),
+                ("prompt", proposal.prompt[:200]),
+            ], "tidak ada yang berjalan sampai kamu menekan Buat")
+            await self.app.bot.send_message(self.chat_id, body, parse_mode=ParseMode.HTML,
+                                            reply_markup=keyboard)
+
+    async def _schedule_run(self, name: str) -> None:
+        from . import schedule_run
+
+        await self.send_md(f"menjalankan {name} sekarang…")
+        try:
+            code = await asyncio.to_thread(schedule_run.run, name)
+        except Exception as exc:
+            return await self.send_md(f"gagal menjalankan {name} · {exc}")
+        if code != 0:
+            await self.send_md(f"{name} selesai dengan kode {code}, lihat /schedule untuk status")
+
+    async def _schedule_remove(self, name: str) -> None:
+        try:
+            schedule_lib.uninstall(name)
+            item = schedule_lib.remove(name)
+        except schedule_lib.ScheduleError as exc:
+            return await self.send_md(f"tidak bisa menghapus · {exc}")
+        await self.send_md(f"schedule {item.name} dihapus beserta timer-nya")
+
+    async def _schedule_create(self, name: str) -> None:
+        proposal = self.pending_schedules.pop(name, None)
+        if proposal is None:
+            return await self.send_md("usulan itu sudah tidak ada; minta lagi saja")
+        gateway = proposal.gateway or self.gateway_name
+        try:
+            item = schedule_lib.Schedule(name=name, cron=proposal.cron, prompt=proposal.prompt,
+                                         gateway=gateway, calendar=proposal.calendar)
+            schedule_lib.add(name=name, cron=proposal.cron, calendar=proposal.calendar,
+                             prompt=proposal.prompt, gateway=gateway)
+            schedule_lib.install(item)
+            schedule_lib.enable(name)
+        except schedule_lib.ScheduleError as exc:
+            return await self.send_md(f"gagal membuat schedule · {exc}")
+        nxt = schedule_lib.next_elapse(name) or "lihat systemctl --user list-timers"
+        await self.send_md(f"schedule {name} dibuat · {item.on_calendar} → {gateway}\nberikutnya: {nxt}")
+
     async def offer_options(self, options: list[str], chat_id: int | None = None) -> None:
         """Buttons for the answers the agent offered, plus a free-text escape hatch."""
         target = chat_id or self.chat_id
@@ -503,6 +588,7 @@ class ChatAgent:
                 return
             state["last_edit"] = now
             joined = hide_file_partial(hide_partial(joined, final=force), final=force)
+            joined = schedule_lib.hide_partial(joined, final=force)
             if not joined.strip():
                 return
             parts = _chunks(joined, 3600)
@@ -520,6 +606,9 @@ class ChatAgent:
                 if options:
                     await self.offer_options(options)
                 await self.deliver_files(raw)
+                _clean, proposals = schedule_lib.extract(raw)
+                if proposals:
+                    await self.offer_schedules(proposals)
 
         async def flush_tools() -> None:
             if not trace:
@@ -745,6 +834,37 @@ class Transport:
         if not self.allowed:
             return False
         return user.id in self.allowed
+
+    async def cmd_schedule(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return await self._deny(update)
+        chat_id = update.effective_chat.id
+        agent = self.agent_for(chat_id)
+        args = list(ctx.args or [])
+        action = args[0].lower() if args else "list"
+        rest = args[1:]
+        if action in ("remove", "rm") and rest:
+            return await agent._schedule_remove(rest[0])
+        if action == "run" and rest:
+            return await agent._schedule_run(rest[0])
+        items = schedule_lib.load()
+        if not items:
+            return await self.send_md(
+                "belum ada schedule. Bilang saja, misal: \"tiap pagi jam 7 ringkas repo\".")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"▶ {name}", callback_data=f"sched:run:{name}"),
+             InlineKeyboardButton(f"hapus {name}", callback_data=f"sched:rm:{name}")]
+            for name in sorted(items)
+        ])
+        rows = []
+        for name in sorted(items):
+            item = items[name]
+            rows.append(f"{name} · {item.cron or item.calendar} · {item.timezone} → {item.gateway}"
+                        f" · {item.last_status or 'belum pernah jalan'}")
+        await self.app.bot.send_message(
+            self.chat_id, card("schedules", f"{len(items)} buah", [("daftar", "\n".join(rows))],
+                               "jalankan sekarang atau hapus lewat tombol"),
+            parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     async def _deny(self, update: Update) -> None:
         user = update.effective_user
@@ -1626,6 +1746,26 @@ class Transport:
         chat_id = update.effective_chat.id
         agent = self.agent_for(chat_id)
 
+        if data.startswith("sched:"):
+            _, what, name = (data.split(":", 2) + ["", ""])[:3]
+            if what == "new":
+                await query.answer("membuat…")
+                await agent._schedule_create(name)
+            elif what == "cancel":
+                agent.pending_schedules.pop(name, None)
+                await query.answer("dibatalkan")
+                try:
+                    await query.edit_message_text("usulan jadwal dibatalkan")
+                except Exception as exc:
+                    log.debug("could not rewrite the schedule prompt: %s", exc)
+            elif what == "run":
+                await query.answer("menjalankan…")
+                await agent._schedule_run(name)
+            elif what == "rm":
+                await query.answer("menghapus…")
+                await agent._schedule_remove(name)
+            return
+
         if data.startswith("qo:"):
             agent = self.agent_for(chat_id)
             choice = data.split(":", 1)[1]
@@ -1773,6 +1913,7 @@ class Transport:
         app.add_handler(CommandHandler("thinking", self.cmd_thinking))
         app.add_handler(CommandHandler("approve", self.cmd_approve))
         app.add_handler(CommandHandler("verbose", self.cmd_verbose))
+        app.add_handler(CommandHandler("schedule", self.cmd_schedule))
         app.add_handler(CommandHandler("queue", self.cmd_queue))
         app.add_handler(CommandHandler("steer", self.cmd_steer))
         app.add_handler(CommandHandler("yolo", self.cmd_yolo))

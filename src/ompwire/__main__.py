@@ -123,6 +123,93 @@ def _ask_secret_line(prompt: str) -> str:
     return normalise_token(_ask_secret(prompt, yes=False))
 
 
+def cmd_schedule(args: argparse.Namespace) -> int:
+    from . import schedules
+
+    action = getattr(args, "schedule_action", "list") or "list"
+
+    if action == "_run":  # called by the systemd unit, not by a person
+        from . import schedule_run
+
+        return schedule_run.main(args.name)
+
+    if action == "list":
+        items = schedules.load()
+        if not items:
+            print("no schedule configured. Run `ompwire schedule add <name> --cron \"0 7 * * *\" "
+                  "--prompt ...`.")
+            return 0
+        width = max(len(name) for name in items)
+        for name in sorted(items):
+            item = items[name]
+            state = schedules.next_elapse(name) or "-"
+            print(f"{name.ljust(width)}  {item.cron:<15} {item.timezone:<13} "
+                  f"-> {item.gateway:<12} next {state:<22} {item.last_status or 'never run'}")
+        return 0
+
+    if action == "add":
+        try:
+            item = schedules.add(
+                name=args.name,
+                cron=args.cron or "",
+                calendar=args.on_calendar or "",
+                prompt=args.prompt,
+                gateway=args.gateway,
+                ephemeral=not args.keep_session,
+                yolo=args.yolo,
+                timeout=args.timeout,
+                timezone=args.timezone,
+            )
+            if not args.no_start:
+                schedules.install(item)
+                schedules.enable(item.name)
+        except schedules.ScheduleError as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 1
+        print(f"ok   schedule {item.name}: {item.on_calendar} -> gateway {item.gateway}")
+        if not args.no_start:
+            print(f"     units: {schedules.unit_names(item.name)[1]}")
+            print(f"     next:  {schedules.next_elapse(item.name) or 'see systemctl --user list-timers'}")
+        return 0
+
+    if action in ("remove", "rm"):
+        try:
+            schedules.uninstall(args.name)
+            item = schedules.remove(args.name)
+        except schedules.ScheduleError as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 1
+        print(f"ok   removed schedule {item.name} and its timer")
+        return 0
+
+    if action == "run":
+        from . import schedule_run
+
+        print(f"running schedule {args.name} now (this runs one turn in the foreground)")
+        return schedule_run.main(args.name)
+
+    if action == "show":
+        try:
+            item = schedules.get(args.name)
+        except schedules.ScheduleError as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 1
+        print(f"name      {item.name}")
+        print(f"cron      {item.cron or '-'}")
+        print(f"calendar  {item.on_calendar}")
+        print(f"gateway   {item.gateway}")
+        print(f"prompt    {item.prompt}")
+        print(f"session   {'ephemeral' if item.ephemeral else 'persisted'}")
+        print(f"approval  {'yolo' if item.yolo else 'deny (unattended)'}")
+        print(f"timeout   {item.timeout:g}s")
+        print(f"last      {item.last_status or 'never run'}")
+        print(f"next      {schedules.next_elapse(item.name) or '-'}")
+        return 0
+
+    print(f"FAIL unknown action {action}", file=sys.stderr)
+    return 1
+
+
 def cmd_gateway(args: argparse.Namespace) -> int:
     from . import gateways, service
     from .setup import bot_identity
@@ -606,6 +693,33 @@ def build_parser() -> argparse.ArgumentParser:
     un.add_argument("--force", action="store_true",
                     help="stop a running gateway before removing")
     un.set_defaults(func=cmd_uninstall)
+
+    sc = _sub(sub, "schedule", "run one turn on a timer, unattended",
+              "A schedule is a cron entry plus a systemd timer: no daemon, no cost between runs. "
+              "The result goes to the gateway named in the schedule, so an unattended turn never "
+              "picks its own destination. Runs are ephemeral and refuse approval-needing tools "
+              "unless --yolo is given.",
+              "  ompwire schedule add morning --cron \"0 7 * * *\" --prompt \"ringkas repo semalam\"\n"
+              "  ompwire schedule list\n"
+              "  ompwire schedule run morning")
+    sc.add_argument("schedule_action", nargs="?", default="list", metavar="action",
+                    choices=["list", "add", "remove", "rm", "run", "show", "_run"])
+    sc.add_argument("name", nargs="?", default="", help="schedule name")
+    sc.add_argument("--cron", default="", help="add: five cron fields, e.g. \"0 7 * * *\"")
+    sc.add_argument("--on-calendar", dest="on_calendar", default="",
+                    help="add: a systemd expression for what cron cannot say, e.g. \"Mon..Fri 07:00\"")
+    sc.add_argument("--prompt", default="", help="add: what the agent is asked each time")
+    sc.add_argument("--gateway", default="telegram", help="add: which bot receives the result")
+    sc.add_argument("--timezone", default="Asia/Jakarta",
+                    help="add: the clock the cron fields are read in")
+    sc.add_argument("--keep-session", action="store_true",
+                    help="add: persist the session instead of running ephemeral")
+    sc.add_argument("--yolo", action="store_true",
+                    help="add: let the run approve its own tools (unattended, on purpose)")
+    sc.add_argument("--timeout", type=float, default=1800.0, help="add: seconds per run")
+    sc.add_argument("--no-start", action="store_true",
+                    help="add: write the schedule without installing the timer")
+    sc.set_defaults(func=cmd_schedule)
 
     gw = _sub(sub, "gateway", "add, start and inspect gateway bots",
               "A gateway is one bot on one platform: its own credential, its own allow list, "

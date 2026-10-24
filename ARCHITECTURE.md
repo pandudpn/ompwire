@@ -52,6 +52,8 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `logs.py` | ~62 | redaction filter |
 | `questions.py` | ~40 | the `<<options: a \| b>>` marker turned into buttons |
 | `attachments.py` | ~150 | the `<<file: path>>` marker, its guard rails, and incoming documents |
+| `schedules.py` | ~330 | cron to `OnCalendar`, the units, and the `<<schedule: ...>>` proposal |
+| `schedule_run.py` | ~180 | one unattended turn: build, run, deliver, record, exit |
 
 Line counts move. If a number here is wrong, the file is right and this table is stale.
 
@@ -99,6 +101,36 @@ protocol rather than a preference. The hint is appended rather than stored in th
 setup writes the config once: a marker added later would otherwise never reach an install that
 upgraded.
 
+## Scheduled turns
+
+One schedule is one row in `schedules.toml`, one systemd timer and one `oneshot` service. systemd
+owns the timing, so there is no scheduler process to keep alive and no idle memory cost: a timer is
+an entry in PID 1's timer wheel, not a waiting process. The process exists only while the turn runs.
+
+The runner (`schedule_run.py`) is where the unattended defaults live, and they all point one way:
+nobody is watching.
+
+- `--approval-mode=always-ask` with no permission handler installed, so every request is answered
+  `cancelled` at once. omp has no `deny` mode; `cancelled` is the same outcome without a wait.
+  `--yolo` per schedule is the deliberate exception.
+- Ephemeral sessions (`--no-session`): a scheduled turn is not a conversation, and persisting it
+  would grow the session store forever for nobody's benefit.
+- `MemoryMax=1G`, `CPUQuota=200%`, `Nice=10`, `TimeoutStartSec` from the schedule: a run that
+  misbehaves is contained by its own cgroup and killed there.
+- `Environment=PATH=` on the unit. A user unit does not inherit the shell's PATH, and without this
+  the timer fires, the process starts, and the turn dies hours later in a journal nobody reads.
+
+Delivery goes straight to the Bot API with the destination gateway's token, so a result still
+arrives when that gateway's poller is stopped. Only the token has to be valid. The destination is
+stored on the schedule rather than chosen at run time: an unattended turn that picks its own
+destination is a mistake nobody is watching for.
+
+The marker is a proposal. `<<schedule: 0 7 * * * | prompt>>` reaches the chat as a confirmation
+card, because a model that misreads "every morning" as every minute would otherwise be discovered
+when the machine fills up. The name, the gateway and the calendar are all validated before a button
+appears, and `systemd-analyze calendar` checks the expression, so an installed schedule is one
+systemd already agreed to run.
+
 ## Storage
 
 | Path | Holds |
@@ -109,6 +141,7 @@ upgraded.
 | `~/.local/state/ompwire/sessions.db` | chat key to session id, per-chat prefs |
 | `~/.local/state/ompwire/overrides.json` | approval overrides set from chat |
 | `~/.local/state/ompwire/files/<chat id>/` | documents sent from the chat, for the agent to read |
+| `~/.config/ompwire/schedules.toml` | the schedules, one row each (no daemon state) |
 | `~/.local/state/ompwire/serve-<gateway>.lock` | flock, one process per gateway |
 | `~/.local/state/ompwire/ompwire.log` | rotating log, redacted |
 
