@@ -1832,8 +1832,22 @@ def serve(config: Config) -> int:
     if not transport.allowed:
         print("error: telegram.allowed_users is empty, nobody could talk to the bot")
         return 2
+    from telegram.error import Conflict, InvalidToken
+
     try:
         asyncio.run(transport.run())
     except KeyboardInterrupt:
         pass
+    except InvalidToken:
+        # a revoked token is the most common way a bot stops answering; say which one
+        print("\nFAIL Telegram rejected the token for this gateway. It was probably revoked\n"
+              "     in @BotFather. Replace it:\n"
+              "       ompwire gateway add telegram --force\n"
+              "     `ompwire doctor` shows the same check without starting anything.")
+        return 2
+    except Conflict:
+        print("\nFAIL another process is polling this bot (409 Conflict). Telegram delivers\n"
+              "     each update to one poller, so updates are being dropped. Stop the other\n"
+              "     one: `ompwire gateway list` shows what is running.")
+        return 2
     return 0

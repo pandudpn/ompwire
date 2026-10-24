@@ -20,6 +20,7 @@ def sandbox(monkeypatch, tmp_path):
             return config_dir, config_dir / "config.toml", config_dir / ".env"
 
     monkeypatch.setattr("ompwire.setup._paths", Paths())
+    monkeypatch.setattr(gateways, "gateways_file", lambda: config_dir / "gateways.toml")
     monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     return config_dir

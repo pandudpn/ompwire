@@ -217,10 +217,11 @@ ompwire --version        # or -V
 | `ompwire setup` | first machine: agent, provider and model, thinking, mode, yolo, cwd, MCP, gateway |
 | `ompwire status` | what it is set to and whether the gateway is running: model, mode, thinking, approvals, cwd, allowed users, token, MCP, gateway, sessions, log |
 | `ompwire doctor` | verify agent, session store, bot token and allow list, one line per check |
-| `ompwire gateway list\|add\|remove` | one bot per definition: credential, allow list, service |
-| `ompwire gateway start\|stop\|restart` | control that gateway's unit |
-| `ompwire serve --gateway NAME` | run one gateway in this terminal (one lock per gateway) |
-| `ompwire service install NAME` | keep that gateway running under systemd --user |
+| `ompwire gateway list\|add\|remove` | one bot per definition: credential, allow list |
+| `ompwire gateway run NAME` | run it in this terminal (`ompwire serve` is the same thing) |
+| `ompwire gateway install\|uninstall NAME` | keep it running under systemd --user (or `ompwire service`) |
+| `ompwire gateway start\|stop\|restart NAME` | control that unit |
+| `ompwire gateway status\|logs NAME` | state, unit path, journal |
 | `ompwire chat` | talk to the agent from this terminal (`-q` for one-shot) |
 | `ompwire sessions` | the `chat_key → sessionId` map |
 | `ompwire config` | merged config with secrets masked |
@@ -314,8 +315,8 @@ ok   token valid: @vidura_omp_bot
 allowed telegram user ids for @vidura_omp_bot (comma separated, blank = nobody): 749994884
 ok   allowed users: 749994884
 
-next:  ompwire service install telegram    # keep it running
-       ompwire serve --gateway telegram    # or run it in this terminal
+next:  ompwire gateway install telegram    # keep it running
+       ompwire gateway run telegram        # or run it in this terminal
 ```
 
 The token is verified with `getMe` before anything is written, and it lives in `.env`
@@ -340,7 +341,7 @@ definition that could never start.
 ### One gateway, one service
 
 ```bash
-$ ompwire service install telegram
+$ ompwire gateway install telegram
 ok   unit written: /home/you/.config/systemd/user/ompwire-telegram.service
 ok   started and enabled: ompwire-telegram.service
      logs:   journalctl --user -u ompwire-telegram.service -f
@@ -350,6 +351,18 @@ ok   started and enabled: ompwire-telegram.service
 Each gateway gets its own unit (`ompwire-telegram.service`, `ompwire-whatsapp.service`),
 so stopping one leaves the others alone, and `ompwire update` restarts every active
 gateway separately.
+
+Everything about a bot lives under one verb, the way `hermes gateway` works: `add`,
+`list`, `run`, `install`, `start|stop|restart`, `status`, `logs`, `remove`. `ompwire serve`
+and `ompwire service` still work — they are aliases, kept because older unit files and
+muscle memory point at them.
+
+```bash
+$ ompwire gateway status
+telegram  telegram  active
+  unit   /home/you/.config/systemd/user/ompwire-telegram.service
+  logs   journalctl --user -u ompwire-telegram.service -f
+```
 
 ### What several gateways cost
 

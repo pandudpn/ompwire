@@ -20,6 +20,7 @@ def sandbox(monkeypatch, tmp_path):
             return config_dir, config_dir / "config.toml", config_dir / ".env"
 
     monkeypatch.setattr("ompwire.setup._paths", Paths())
+    monkeypatch.setattr(gateways, "gateways_file", lambda: config_dir / "gateways.toml")
     monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
     monkeypatch.setattr("ompwire.service._systemd_available", lambda: False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
@@ -154,3 +155,50 @@ def test_serve_refuses_an_unimplemented_transport(sandbox, monkeypatch, capsys):
     gateways.add("whatsapp", "whatsapp")
     assert cli.main(["serve", "--gateway", "whatsapp"]) == 1
     assert "not implemented" in capsys.readouterr().err
+
+
+def test_status_reports_state_unit_and_logs(sandbox, capsys):
+    gateways.add("telegram", "telegram", allowed=[42])
+    assert cli.main(["gateway", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "telegram  telegram  no unit" in out
+    assert "ompwire-telegram.service" in out
+    assert "gateway install telegram" in out
+
+
+def test_status_for_one_gateway_only(sandbox, capsys):
+    gateways.add("telegram")
+    gateways.add("telegram-2")
+    assert cli.main(["gateway", "status", "telegram-2"]) == 0
+    out = capsys.readouterr().out
+    assert "telegram-2" in out and "telegram  telegram" not in out
+
+
+def test_install_without_systemd_says_so(sandbox, capsys):
+    gateways.add("telegram")
+    assert cli.main(["gateway", "install", "telegram"]) == 1
+    assert "systemd --user is not available" in capsys.readouterr().out
+
+
+def test_run_is_serve(sandbox, monkeypatch, capsys):
+    """`gateway run` and `serve` share one implementation."""
+    gateways.add("telegram")
+    called: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(cli, "_run_gateway",
+                        lambda config, name, force: called.append((str(config), name, force)) or 0)
+    assert cli.main(["gateway", "run", "telegram"]) == 0
+    assert cli.main(["serve", "--gateway", "telegram"]) == 0
+    assert called == [("None", "telegram", False), ("None", "telegram", False)]
+
+
+def test_logs_falls_back_to_journalctl(sandbox, monkeypatch, capsys):
+    gateways.add("telegram")
+
+    class Result:
+        returncode = 0
+        stdout = "line one\nline two"
+        stderr = ""
+
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: Result())
+    assert cli.main(["gateway", "logs", "telegram"]) == 0
+    assert "line one" in capsys.readouterr().out

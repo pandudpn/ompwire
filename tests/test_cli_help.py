@@ -11,14 +11,14 @@ def test_no_arguments_prints_help_instead_of_opening_a_chat(capsys):
     assert cli.main([]) == 0
     out = capsys.readouterr().out
     assert "usage: ompwire" in out
-    assert "ompwire setup" in out and "ompwire serve" in out
+    assert "ompwire setup" in out and "ompwire gateway list" in out
     assert "Run `ompwire chat`" in out
 
 
 def test_help_command_lists_commands(capsys):
     assert cli.main(["help"]) == 0
     out = capsys.readouterr().out
-    for command in ("setup", "serve", "doctor", "update", "uninstall", "chat"):
+    for command in ("setup", "gateway", "serve", "doctor", "update", "uninstall", "chat"):
         assert command in out
 
 

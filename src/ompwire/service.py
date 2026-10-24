@@ -57,7 +57,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory={workdir}
 EnvironmentFile={env_file}
-ExecStart={exec_start} serve --gateway {gateway}
+ExecStart={exec_start} gateway run {gateway}
 # Credentials live in {env_file} (chmod 600), loaded above rather than written
 # into this unit. One gateway per unit: stopping this one leaves the others alone.
 Restart=always

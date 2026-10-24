@@ -58,7 +58,7 @@ class TestUnit:
         body = service.render_unit("/home/you/.local/bin/ompwire",
                                    __import__("pathlib").Path("/home/you/.config/ompwire/.env"),
                                    "/home/you", "telegram")
-        assert "ExecStart=/home/you/.local/bin/ompwire serve --gateway telegram" in body
+        assert "ExecStart=/home/you/.local/bin/ompwire gateway run telegram" in body
         assert "Description=ompwire gateway: telegram" in body
         assert "EnvironmentFile=/home/you/.config/ompwire/.env" in body
         assert "WorkingDirectory=/home/you" in body
@@ -109,7 +109,7 @@ def test_install_writes_the_unit_and_enables_it(monkeypatch, tmp_path, capsys):
 
     assert service.install("telegram") == 0
     body = unit.read_text(encoding="utf-8")
-    assert "ExecStart=/home/you/.local/bin/ompwire serve --gateway telegram" in body
+    assert "ExecStart=/home/you/.local/bin/ompwire gateway run telegram" in body
     assert ["systemctl", "--user", "daemon-reload"] in calls
     assert ["systemctl", "--user", "enable", "--now", "ompwire-telegram.service"] in calls
     assert "journalctl --user -u ompwire-telegram.service -f" in capsys.readouterr().out
@@ -209,5 +209,5 @@ class TestOneGatewayOneUnit:
     def test_the_unit_runs_only_its_own_gateway(self):
         body = service.render_unit("/usr/bin/ompwire", __import__("pathlib").Path("/e"),
                                    "/w", "whatsapp")
-        assert "serve --gateway whatsapp" in body
+        assert "gateway run whatsapp" in body
         assert "telegram" not in body
