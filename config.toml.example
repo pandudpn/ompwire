@@ -1,0 +1,54 @@
+# ompwire configuration
+#
+# Non-secret settings only. Secrets (bot token, Honcho key) come from the
+# environment — see .env.example. Any key below can also be overridden by an
+# OMPWIRE_* env var; run `ompwire config` to see the merged result.
+
+[acp]
+# ACP agent to spawn. `--mode acp` is what makes omp a protocol agent; it is
+# not listed in `omp --help`, so pin the omp version you tested against.
+command = "omp"
+args = ["--mode", "acp"]
+startup_timeout = 60.0     # seconds for initialize / session load-new
+turn_timeout = 900.0       # seconds for one prompt turn
+
+[agent]
+cwd = "~"                  # working directory the agent gets
+model = ""                 # empty = whatever the ACP session defaults to
+mode = ""                  # "" | "default" | "plan"
+approval_mode = "always-ask"       # forwarded to omp as --approval-mode when set
+permission_policy = "allow"        # what we answer to session/request_permission
+
+[session]
+store = "~/.local/state/ompwire/sessions.db"
+idle_timeout = 1800        # reserved for the gateway: drop the subprocess after this
+
+[stream]
+enabled = true
+edit_interval = 1.0        # seconds between message edits (Telegram)
+show_tool_calls = true
+show_usage = true
+
+[memory]
+# Honcho prefetch: one context call before a turn, rendered as a preamble.
+# OMP itself has no external-memory hook (memory.backend = mnemopi|hindsight|local),
+# so this is how the harness supplies recalled context.
+enabled = false            # HONCHO_API_KEY must be exported when true
+prefetch = true
+honcho_url = "http://127.0.0.1:8000"
+honcho_workspace = "ompwire"
+honcho_observer = "ompwire"
+honcho_target = "user"
+timeout = 8.0
+
+[[mcp.servers]]
+# Passed to session/new so the agent gets these tools for the whole session.
+# Example: the official Honcho MCP server.
+name = "honcho"
+command = "bun"
+args = ["run", "/home/pandu/honcho/mcp/src/index.ts"]
+
+[telegram]
+bot_token = ""             # secret: set TELEGRAM_BOT_TOKEN instead
+allowed_users = []         # numeric Telegram user ids; empty = nobody
+home_channel = ""
