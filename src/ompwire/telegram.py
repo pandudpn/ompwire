@@ -232,10 +232,10 @@ class ChatAgent:
         args = list(self.config.get("acp", "args") or ["--mode", "acp"])
         approval = "yolo" if (yolo or self.yolo) else str(self.config.get("agent", "approval_mode", ""))
         hint = str(self.config.get("agent", "append_system_prompt", "") or "").strip()
-        if bool(self.config.get("agent", "protocol_hint", True)):
-            from .config import PROTOCOL_HINT
+        from .config import PROTOCOL_HINT
 
-            hint = f"{hint}\n\n{PROTOCOL_HINT}".strip()
+        # always: the markers are how a reply carries a file or a question, not a preference
+        hint = f"{hint}\n\n{PROTOCOL_HINT}".strip()
         if approval:
             args.append(f"--approval-mode={approval}")
         if hint:
@@ -402,10 +402,7 @@ class ChatAgent:
         The marker never reaches the chat, so a path that does not work would otherwise disappear
         without a trace. One short line names what was skipped and why.
         """
-        config = self.config
-        if not bool(config.get("files", "enabled", True)):
-            return
-        max_mb = float(config.get("files", "max_mb", 20.0))
+        max_mb = float(self.config.get("files", "max_mb", 20.0))
         _, files, rejected = extract_files(raw, root=self.cwd, max_mb=max_mb)
         for item in files:
             try:
@@ -943,8 +940,6 @@ class Transport:
         message = update.effective_message
         if message is None or message.document is None:
             return
-        if not bool(self.config.get("files", "enabled", True)):
-            return await message.reply_text("file handling is turned off (files.enabled = false)")
         chat_id = update.effective_chat.id
         document = message.document
         max_mb = float(self.config.get("files", "max_mb", 20.0))

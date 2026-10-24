@@ -29,7 +29,6 @@ ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "OMPWIRE_APPROVAL": ("agent", "approval_mode"),
     "OMPWIRE_STREAM_EDIT_INTERVAL": ("stream", "edit_interval"),
     "OMPWIRE_IDLE_TIMEOUT": ("session", "idle_timeout"),
-    "OMPWIRE_FILES_ENABLED": ("files", "enabled"),
     "OMPWIRE_FILES_MAX_MB": ("files", "max_mb"),
     "OMPWIRE_FILES_INCOMING_DIR": ("files", "incoming_dir"),
     "TELEGRAM_BOT_TOKEN": ("telegram", "bot_token"),
@@ -62,8 +61,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "approval_mode": "always-ask",
         # omp has no idea it is talking through a chat window, and its default voice
         # leaves commands inline. This hint is what makes replies render as code.
-        # the marker protocol rides on top of the prose below unless this is turned off
-        "protocol_hint": True,
         "append_system_prompt": (
             "You are answering inside a Telegram chat. Format every reply as markdown: "
             "put shell commands, file paths, diffs and multi-line output inside fenced code "
@@ -92,7 +89,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "timeout": 120.0,  # seconds to wait for a button before denying
     },
     "files": {
-        "enabled": True,  # attachments in both directions
         "max_mb": 20.0,  # per file, both directions
         # where documents sent into the chat are written for the agent to read
         "incoming_dir": "~/.local/state/ompwire/files",

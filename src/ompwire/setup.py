@@ -60,7 +60,6 @@ source = "{mcp_source}"
 hub_path = "{hub_path}"
 
 [files]
-enabled = true
 max_mb = 20
 incoming_dir = "~/.local/state/ompwire/files"
 

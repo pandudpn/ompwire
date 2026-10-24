@@ -152,9 +152,10 @@ with what is on disk, so pressing enter keeps a value and typing changes one thi
 MCP servers are not duplicated here. `[mcp] source = "mcp-hub"` reads a shared `servers.yaml`,
 and `exclude` or `[mcp.overrides.<name>]` adjust it per machine without editing the shared file.
 
-`[files]` controls attachments in both directions: `enabled`, `max_mb` (20 by default, applied to
+`[files]` sets the limits for attachments in both directions: `max_mb` (20 by default, applied to
 every file either way) and `incoming_dir`, where documents sent into the chat are written
-(`~/.local/state/ompwire/files` by default). The agent sends a file by naming it in the reply:
+(`~/.local/state/ompwire/files` by default). There is no on/off switch: a screenshot, a PDF or a
+file the agent produces travels without being configured first. The agent sends a file by naming it in the reply:
 
 ```
 Here is the chart you asked for.

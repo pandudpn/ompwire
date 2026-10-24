@@ -142,3 +142,41 @@ def test_a_tilde_path_is_expanded(monkeypatch, tmp_path):
     _clean, files, rejected = attachments.extract("<<file: ~/shot.png>>", root=tmp_path)
     assert [item.path.name for item in files] == ["shot.png"]
     assert rejected == []
+
+
+def test_a_leftover_enabled_key_cannot_turn_attachments_off(tmp_path):
+    """There is no switch. A config written before the key was removed still sends files."""
+    import asyncio
+    import types
+
+    from ompwire.config import load_config
+    from ompwire.telegram import ChatAgent
+
+    work = tmp_path / "work"
+    work.mkdir()
+    chart = work / "chart.png"
+    chart.write_bytes(b"x" * 64)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[agent]\ncwd = "{work}"\n[files]\nenabled = false\nmax_mb = 20\n'
+        f'[session]\nstore = "{tmp_path}/sessions.db"\n', encoding="utf-8")
+    config = load_config(str(cfg), env={})
+
+    sent = []
+
+    class Bot:
+        async def send_photo(self, chat_id, photo=None, **_kw):
+            sent.append("photo")
+
+        async def send_document(self, chat_id, document=None, **_kw):
+            sent.append("document")
+
+        async def send_message(self, chat_id, text, **_kw):
+            sent.append("message")
+
+    async def run():
+        agent = ChatAgent(config, chat_id=1, key="k", app=types.SimpleNamespace(bot=Bot()))
+        await agent.deliver_files(f"<<file: {chart}>>")
+
+    asyncio.run(run())
+    assert sent == ["photo"]

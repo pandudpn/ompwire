@@ -240,20 +240,23 @@ def test_chat_formatting_hint_is_forwarded_to_the_agent():
     assert "fenced code" in hint
 
 
-def test_hint_can_be_disabled():
+def test_the_markers_are_described_even_with_no_prose_configured():
+    """There is no switch: a reply that cannot carry a file is a reply this transport does not
+    understand, so the marker explanation is not something a config can drop."""
     from ompwire.config import load_config
     from ompwire.telegram import ChatAgent
 
     config = load_config(env={})
     config.data.setdefault("agent", {})["append_system_prompt"] = ""
-    config.data["agent"]["protocol_hint"] = False
     agent = ChatAgent.__new__(ChatAgent)
     agent.config = config
     agent.cwd = "/tmp"
     agent.yolo = False
     agent._on_update = None
     agent._on_permission = None
-    assert "--append-system-prompt" not in ChatAgent._build_client(agent).args
+
+    args = ChatAgent._build_client(agent).args
+    assert "--append-system-prompt" in args
 
 
 def test_the_marker_protocol_is_always_described():

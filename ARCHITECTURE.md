@@ -92,10 +92,12 @@ mime type and the size. The agent has a shell, so a readable path beats a conten
 transport would have to guess at. Images keep their own path: they go to the agent as an ACP
 image content block.
 
-The markers are documented to the agent in `PROTOCOL_HINT`, which is appended to the session on
-top of the configured `append_system_prompt` and can be turned off with `agent.protocol_hint`.
-It is appended rather than stored in the config because setup writes the config once: a protocol
-change would otherwise never reach an install that upgraded.
+The markers are documented to the agent in `PROTOCOL_HINT`, appended to the session on top of the
+configured `append_system_prompt`. There is no switch and no `[files] enabled` key: a reply that
+cannot carry a file is a reply this transport does not understand, so attachments are part of the
+protocol rather than a preference. The hint is appended rather than stored in the config because
+setup writes the config once: a marker added later would otherwise never reach an install that
+upgraded.
 
 ## Storage
 
