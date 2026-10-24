@@ -138,6 +138,20 @@ when the machine fills up. The name, the gateway and the calendar are all valida
 appears, and `systemd-analyze calendar` checks the expression, so an installed schedule is one
 systemd already agreed to run.
 
+## Who stops the agent
+
+`session/request_permission` is the only place a human can intervene, and omp only sends it in
+`write` and `yolo` (which sends none, since nothing is asked). Under `always-ask` and
+`always-ask-cached` a write is denied inside omp, with no request and therefore no button: the
+transport cannot ask for something it is never told about. `write` is the working gate.
+
+A denial is the safe default: the request expires after `[approval] timeout`, the slot reports
+`cancelled`, and omp fails that one tool call instead of the turn. That is why an approval left
+unanswered at 04:00 cannot silently approve itself.
+
+What this gate does not cover is a file the agent writes with its own write tool, which `write` mode
+allows by design. The appended prompt is what keeps that honest, and `yolo` removes both.
+
 ## What the stream carries
 
 `session/update` notifications arrive with these `sessionUpdate` values, and each one has a

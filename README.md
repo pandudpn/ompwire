@@ -166,6 +166,23 @@ against omp rather than guessed: `ask` reads only (a write is refused), `write` 
 scheduled job that cannot run git or kubectl is a job that does nothing; use `--approval ask` for a
 schedule that only reports.
 
+## Approval
+
+The agent runs with `approval_mode = write`: reads and file writes are free, and every shell
+command sends a permission request into the chat with Allow once, Always allow, Deny and Always
+deny. That is deliberate, and the mode names were measured rather than guessed. `always-ask` and
+`always-ask-cached` deny a write without ever sending a request, so the button never appears and the
+agent simply refuses; `write` is the only mode that both lets the agent work and reaches a human for
+the part that can clone, delete, or deploy. `yolo` asks nothing at all, which is why it is off by
+default and why `/yolo` is a per-chat decision, not a config default.
+
+An unanswered request is denied after `[approval] timeout` (600s). `ompwire doctor` says which gate
+is in force, and warns when yolo is on.
+
+The appended system prompt carries the rest: a read/check/explain request is read-only, a clone goes
+to `/tmp` or `~/.cache` and never the home directory, nothing outside the directory in question is
+modified, and anything touching production stops the agent so it can say what it would run.
+
 ## Thinking
 
 ACP carries the agent's reasoning as `agent_thought_chunk`. `/reasoning on` renders it above the
