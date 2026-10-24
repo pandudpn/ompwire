@@ -83,21 +83,29 @@ def _clip(text: str, lines: int = TOOL_OUTPUT_LINES, width: int = TOOL_LINE_WIDT
 
 
 def tool_block(kind: str, title: str, command: str = "", output: str = "", status: str = "") -> str:
-    """One tool call, shell-formatted: command in code, output in a pre block."""
-    if command:
-        head = f"🔧 <code>{esc(_clip(command, lines=1))}</code>"
-    else:
-        label = esc(kind or "tool")
-        head = f"🔧 <code>{label}</code>"
-        if title and title != kind:
-            head += f" {esc(_clip(title, lines=1, width=80))}"
+    """One tool call as a fenced block: the command and its output in one <pre>."""
+    head = f"🔧 <code>{esc(kind or 'tool')}</code>"
     if status == "in_progress":
         head += " · <i>running</i>"
     elif status and status not in {"completed", "pending"}:
         head += f" · <i>{esc(status)}</i>"
+
+    lines: list[str] = []
+    if command:
+        # inside a fence the command can keep its line breaks, so a heredoc or a
+        # chained pipeline stays readable instead of collapsing into one long line
+        head_lines = command.splitlines()[:6]
+        lines.append(f"$ {_clip(head_lines[0], lines=1, width=TOOL_LINE_WIDTH + 40)}")
+        lines.extend(f"  {_clip(line, lines=1, width=TOOL_LINE_WIDTH + 40)}" for line in head_lines[1:])
+        if len(command.splitlines()) > 6:
+            lines.append("  …")
+    elif title:
+        lines.append(_clip(title, lines=1, width=TOOL_LINE_WIDTH + 40))
     if output.strip():
-        return f"{head}\n<pre>{esc(_clip(output))}</pre>"
-    return head
+        lines.append(_clip(output))
+    if not lines:
+        return head
+    return f"{head}\n<pre>{esc(chr(10).join(lines))}</pre>"
 
 
 def help_sections(sections: Iterable[tuple[str, Iterable[tuple[str, str]]]]) -> str:

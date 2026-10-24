@@ -33,7 +33,7 @@ from .acp import AcpClient, AcpError, Update as AcpUpdate, pick_permission_optio
 from . import __version__
 from .config import Config, approval_policy, save_override
 from .format import card, change, esc, help_sections, now_wib, tool_block
-from .mcp_hub import hub_servers, normalize
+from .mcp_hub import hub_servers, merge_entry as merge_mcp_entry, normalize
 from .mdrender import to_html, to_plain
 from .format import uptime as fmt_uptime
 from .store import SessionStore
@@ -187,7 +187,7 @@ class ChatAgent:
             overrides = self.config.get("mcp", "overrides", {}) or {}
             for entry in entries:
                 patch = overrides.get(entry.get("name")) or {}
-                entry.update({key: value for key, value in patch.items() if value not in (None, "")})
+                merge_mcp_entry(entry, patch)
             return normalize(entries)
         return normalize(self.config.get("mcp", "servers", []) or [])
 

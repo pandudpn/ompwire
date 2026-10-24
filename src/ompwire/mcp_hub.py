@@ -112,6 +112,19 @@ def hub_servers(
     return entries
 
 
+def merge_entry(entry: dict[str, Any], patch: dict[str, Any]) -> None:
+    """Apply an override, merging env/headers by name so auth is never dropped."""
+    for key, value in (patch or {}).items():
+        if value in (None, ""):
+            continue
+        if key in {"env", "headers"}:
+            merged = {item["name"]: item["value"] for item in _env_list(entry.get(key))}
+            merged.update({item["name"]: item["value"] for item in _env_list(value)})
+            entry[key] = [{"name": name, "value": val} for name, val in merged.items()]
+            continue
+        entry[key] = value
+
+
 def normalize(servers: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """Fill the array fields omp requires so session/new cannot fail on shape."""
     out: list[dict[str, Any]] = []

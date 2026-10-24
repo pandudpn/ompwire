@@ -191,3 +191,31 @@ def test_mode_picker_stays_single_column():
     asyncio.run(transport._show_config(agent, 1, "mode"))
     _, keyboard = captured[-1]
     assert [[b.text for b in row] for row in keyboard.inline_keyboard] == [["• default"], ["plan"]]
+
+
+def test_tool_block_fences_command_and_output_together():
+    from ompwire.format import tool_block
+
+    block = tool_block("execute", "", command="ls -1 | head -2",
+                       output="a\nb", status="completed")
+    assert block.startswith("🔧 <code>execute</code>")
+    assert block.count("<pre>") == 1  # one fenced block, not inline code plus output
+    body = block.split("<pre>")[1].split("</pre>")[0]
+    assert body.splitlines()[0] == "$ ls -1 | head -2"
+    assert body.splitlines()[1:] == ["a", "b"]
+
+
+def test_tool_block_keeps_multiline_commands_readable():
+    from ompwire.format import tool_block
+
+    command = "python3 - <<'PY'\nprint(1)\nPY"
+    body = tool_block("execute", "", command=command).split("<pre>")[1].split("</pre>")[0]
+    assert body.splitlines()[0] == "$ python3 - &lt;&lt;'PY'"  # escaped for HTML
+    assert body.splitlines()[1] == "  print(1)"
+
+
+def test_tool_block_escapes_html_in_output():
+    from ompwire.format import tool_block
+
+    body = tool_block("execute", "", command="echo '<b>'", output="<b>x</b>")
+    assert "&lt;b&gt;" in body
