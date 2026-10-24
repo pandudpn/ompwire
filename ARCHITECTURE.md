@@ -256,15 +256,6 @@ deprecation cycle.
   prompt that tells the agent to check its session history and finish (at most `RESUME_LIMIT`
   tries). Polling also starts with `drop_pending_updates=False`, so a message sent during the
   restart window is answered instead of discarded.
-- **The answer streams as a draft, not as edits.** Editing one message every second hit
-  Telegram's flood control on long turns (a 255 s `RetryAfter` was observed), and a
-  half-written tag got the edit rejected. `[stream] answer = "draft"` streams the answer with
-  `sendMessageDraft` (Bot API 9.3, private chats; the same `draft_id` per turn animates the
-  change) and sends one final message at the end. Measured on this bot: 30 drafts at 4/s
-  without a 429, and an unclosed `<b>` in a draft is a 400, so a half-written preview is
-  resent as plain text. A refused draft switches the process to `final` (one message at the
-  end, tool trace still live); a group chat is `final` from the start; `edit` keeps the old
-  behaviour.
 - **Keep the process warm.** Each turn carries a large baseline of input tokens (the agent's own
   prompt), mostly cache-served on later turns. Spawning per message throws that away.
 - **`mcpServers` needs `env` as a list.** An entry whose `env` is an object, or missing, fails

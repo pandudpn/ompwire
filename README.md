@@ -16,8 +16,7 @@ Telegram  <->  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
 
 ## What you get
 
-- Answers stream as a native Telegram draft and land as one message; groups get the final text
-  in one piece (`[stream] answer = "draft" | "final" | "edit"`)
+- Answers stream into one message and are edited in place, not posted as a wall of new ones
 - Tool calls go to their own trace message, so the answer is never clobbered
 - Approvals arrive as buttons; `/approve` sets the policy, or run with `yolo` and skip them
 - Sessions survive restarts; `/new` starts one, `/resume` picks an old one
