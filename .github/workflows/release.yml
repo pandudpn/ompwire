@@ -41,6 +41,10 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
+      # The commit the tag points at. A dispatch checks out the commit that existed when the
+      # button was pressed, which is not the bump commit this job just pushed, so every
+      # downstream job has to be told which ref to test.
+      commit: ${{ steps.resolve.outputs.commit }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
@@ -93,10 +97,12 @@ jobs:
           fi
           version="${tag#v}"
           case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          commit=$(git rev-parse "${tag}^{commit}")
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
-          echo "releasing ${tag} (prerelease=${prerelease})"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "releasing ${tag} at ${commit} (prerelease=${prerelease})"
 
   verify:
     name: Tests and lint
@@ -105,6 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
+          ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
@@ -126,6 +133,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
+          ref: ${{ needs.prepare.outputs.commit }}
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
@@ -156,6 +164,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
+          ref: ${{ needs.prepare.outputs.commit }}
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
