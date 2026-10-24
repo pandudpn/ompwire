@@ -47,6 +47,35 @@ def _gateway_state() -> tuple[str, str]:
     return "stopped", "not running"
 
 
+def _gateway_rows() -> list[tuple[str, str]]:
+    """One row per configured gateway: identity, allow list, service state."""
+    from . import gateways, service
+
+    try:
+        items = gateways.load()
+    except gateways.GatewayError as exc:
+        return [("gateways", f"unreadable: {exc}")]
+    if not items:
+        return [("gateways", "none (run `ompwire gateway add telegram`)")]
+    rows: list[tuple[str, str]] = []
+    for item in items:
+        token = gateways.token(item)
+        if not token:
+            identity = "no credential"
+        else:
+            try:
+                from .setup import bot_identity
+
+                username = bot_identity(token)
+            except Exception:
+                username = ""
+            identity = f"@{username}" if username else "credential rejected"
+        allowed = ", ".join(str(user) for user in item.allowed) or "no users"
+        rows.append((f"gateway {item.name}",
+                     f"{item.kind} · {identity} · users {allowed} · {service.state(item.name)}"))
+    return rows
+
+
 def _sessions(store_path: str) -> str:
     from .store import SessionStore
 
@@ -106,12 +135,7 @@ def collect(config_path: str | None = None) -> list[tuple[str, str]]:
                                   f" · ompwire policy {approval_policy(config)}"))
     rows.append(("cwd", str(config.get("agent", "cwd", "") or "") or os.path.expanduser("~")))
 
-    allowed = [str(user) for user in (config.get("telegram", "allowed_users") or [])]
-    rows.append(("allowed users", ", ".join(allowed) if allowed
-                 else "none (nobody can talk to the bot)"))
-
-    token = str(config.get("telegram", "bot_token", "") or "")
-    rows.append(("telegram token", "set" if token else "missing (run ompwire setup)"))
+    rows.extend(_gateway_rows())
 
     source = str(config.get("mcp", "source", "none") or "none")
     servers = [str(server.get("name", "?")) for server in config.get("mcp", "servers") or []]
@@ -135,8 +159,7 @@ def collect(config_path: str | None = None) -> list[tuple[str, str]]:
         detail += f" · excluded: {', '.join(excludes)}"
     rows.append(("mcp", detail))
 
-    state, detail = _gateway_state()
-    rows.append(("gateway", f"{state} · {detail}"))
+    rows.append(("processes", _gateway_state()[1]))
     rows.append(("sessions", _sessions(str(config.get("session", "store")))))
     rows.append(("log", _log_line(config)))
     return rows

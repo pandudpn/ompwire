@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ompwire import __main__ as cli
 from ompwire import config as config_module
-from ompwire import status
+from ompwire import gateways, status
 
 CONFIG = """[agent]
 cwd = "/srv/app"
@@ -41,6 +41,14 @@ def _sandbox(monkeypatch, tmp_path):
         CONFIG.format(store=store, log=log), encoding="utf-8")
     monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(config_dir))
     monkeypatch.setattr(config_module, "_load_env_files", lambda env: None)
+    # gateways live in their own file now; the legacy [telegram] block is elsewhere
+    (config_dir / "gateways.toml").write_text(
+        '[gateway.telegram]\ntype = "telegram"\nenabled = true\n'
+        "allowed_users = [111, 222]\nhome_channel = 111\n", encoding="utf-8")
+    (config_dir / ".env").write_text("TELEGRAM_BOT_TOKEN=111:tok\n", encoding="utf-8")
+    monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
+    monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "test_bot")
+    monkeypatch.setattr("ompwire.service.state", lambda gateway="telegram": "active")
     monkeypatch.setattr(status, "_gateway_state", lambda: ("stopped", "not running"))
     monkeypatch.setattr(status, "_agent_version", lambda command, timeout=6.0: "omp/9.9.9")
     return config_dir / "config.toml", store, log
@@ -51,32 +59,42 @@ def test_status_shows_every_setting_that_decides_behaviour(monkeypatch, tmp_path
 
     rows = dict(status.collect(str(config_file)))
 
-    assert rows["allowed users"] == "111, 222"
+    assert rows["gateway telegram"] == \
+        "telegram · @test_bot · users 111, 222 · active"
     assert rows["model"] == "zai/glm-5.1"
     assert rows["thinking"] == "xhigh"
     assert rows["cwd"] == "/srv/app"
     assert rows["approvals"] == "yolo (bypassed)"
-    assert rows["telegram token"] == "missing (run ompwire setup)"
+    assert "telegram token" not in rows
     assert rows["mcp"] == "source none"
     assert str(store) in rows["sessions"]
     assert str(log) in rows["log"]
-    assert rows["gateway"].startswith("stopped")
+    assert rows["processes"] == "not running"
 
 
 def test_status_says_so_when_nobody_is_allowed(monkeypatch, tmp_path):
     config_file, _store, _log = _sandbox(monkeypatch, tmp_path)
-    text = config_file.read_text().replace("allowed_users = [111, 222]", "allowed_users = []")
-    config_file.write_text(text, encoding="utf-8")
+    target = config_file.parent / "gateways.toml"
+    target.write_text(target.read_text().replace("allowed_users = [111, 222]",
+                                                 "allowed_users = []"), encoding="utf-8")
 
     rows = dict(status.collect(str(config_file)))
-    assert "nobody can talk" in rows["allowed users"]
+    assert "users no users" in rows["gateway telegram"]
+
+
+def test_status_says_how_to_add_a_gateway(monkeypatch, tmp_path):
+    config_file, _store, _log = _sandbox(monkeypatch, tmp_path)
+    (config_file.parent / "gateways.toml").unlink()
+
+    rows = dict(status.collect(str(config_file)))
+    assert "gateway add telegram" in rows["gateways"]
 
 
 def test_status_exits_zero_and_prints_aligned_rows(monkeypatch, tmp_path, capsys):
     config_file, _store, _log = _sandbox(monkeypatch, tmp_path)
     assert status.run(str(config_file)) == 0
     out = capsys.readouterr().out
-    assert "allowed users" in out and "111, 222" in out
+    assert "gateway telegram" in out and "111, 222" in out
 
 
 def _doctor(monkeypatch, tmp_path, allowed: str):
@@ -113,6 +131,14 @@ def _doctor(monkeypatch, tmp_path, allowed: str):
         .replace("[111, 222]", allowed), encoding="utf-8")
     monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(config_dir))
     monkeypatch.setattr(config_module, "_load_env_files", lambda env: None)
+    # gateways live in their own file now; the legacy [telegram] block is elsewhere
+    (config_dir / "gateways.toml").write_text(
+        '[gateway.telegram]\ntype = "telegram"\nenabled = true\n'
+        f"allowed_users = {allowed}\nhome_channel = 111\n", encoding="utf-8")
+    (config_dir / ".env").write_text("TELEGRAM_BOT_TOKEN=111:tok\n", encoding="utf-8")
+    monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
+    monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "test_bot")
+    monkeypatch.setattr("ompwire.service.state", lambda gateway="telegram": "active")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/omp")
     monkeypatch.setattr(cli, "SessionStore", lambda path: _Closable())
     monkeypatch.setattr(cli, "AcpClient", Client)
@@ -127,11 +153,12 @@ class _Closable:
 def test_doctor_prints_the_allowed_users(monkeypatch, tmp_path, capsys):
     assert _doctor(monkeypatch, tmp_path, "[111, 222]") == 0
     out = capsys.readouterr().out
-    assert "ok   allowed users: 111, 222" in out
+    assert "ok   gateway telegram: @test_bot" in out
+    assert "ok   allowed users for telegram: 111, 222" in out
 
 
 def test_doctor_flags_an_empty_allow_list(monkeypatch, tmp_path, capsys):
     assert _doctor(monkeypatch, tmp_path, "[]") == 0
     out = capsys.readouterr().out
-    assert "allowed users: none" in out
+    assert "allowed users for telegram: none" in out
     assert "nobody can talk" in out

@@ -161,7 +161,7 @@ def _command_for(mode: str, ref: str) -> list[str]:
     return []
 
 
-SYSTEMD_UNIT = "ompwire"
+SYSTEMD_UNIT = "ompwire"      # the single-gateway unit from 0.9.x, still honoured
 
 
 def serving_processes() -> list[tuple[int, str]]:
@@ -170,13 +170,31 @@ def serving_processes() -> list[tuple[int, str]]:
     return running_serves()
 
 
-def _systemd_active() -> bool:
+def _systemd_active(unit: str = SYSTEMD_UNIT) -> bool:
     try:
-        result = subprocess.run(["systemctl", "--user", "is-active", SYSTEMD_UNIT],
+        result = subprocess.run(["systemctl", "--user", "is-active", unit],
                                 capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         return False
     return result.stdout.strip() == "active"
+
+
+def _active_units() -> list[str]:
+    """Every gateway unit that is running, so an update restarts all of them."""
+    units: list[str] = []
+    legacy = _systemd_active()
+    if legacy:
+        units.append(SYSTEMD_UNIT)
+    try:
+        from . import gateways
+
+        for item in gateways.load():
+            name = f"ompwire-{item.name}"
+            if name not in units and _systemd_active(name):
+                units.append(name)
+    except Exception:
+        pass
+    return units
 
 
 def _argv_of(pid: int) -> list[str]:
@@ -213,14 +231,19 @@ def _transport_command(pid: int, command: str) -> list[str]:
 
 def restart_gateway(timeout: float = 20.0) -> str:
     """Restart a running transport so an update actually takes effect."""
-    if _systemd_active():
-        try:
-            result = subprocess.run(["systemctl", "--user", "restart", SYSTEMD_UNIT],
-                                    capture_output=True, text=True, timeout=120, check=False)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return f"systemd restart failed: {exc}"
-        return ("restarted via systemd" if result.returncode == 0
-                else f"systemd restart exited {result.returncode}")
+    units = _active_units()
+    if units:
+        restarted: list[str] = []
+        for unit in units:
+            try:
+                result = subprocess.run(["systemctl", "--user", "restart", unit],
+                                        capture_output=True, text=True, timeout=120, check=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return f"systemd restart of {unit} failed: {exc}"
+            if result.returncode != 0:
+                return f"systemd restart of {unit} exited {result.returncode}"
+            restarted.append(unit)
+        return "restarted via systemd: " + ", ".join(restarted)
 
     serves = serving_processes()
     if not serves:

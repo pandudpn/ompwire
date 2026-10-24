@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tomllib
 
-from ompwire import setup
+from ompwire import gateways, setup
 
 CATALOG = {
     "models": ["zai/glm-5.1", "zai/glm-5.3-flash", "anthropic/claude-opus-5", "web/zai"],
@@ -41,6 +41,17 @@ def _answers(monkeypatch, mapping: dict[str, str] | None = None):
 
     monkeypatch.setattr(setup, "_ask", answer)
     monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+
+
+def _gateway_file(monkeypatch, tmp_path, body: str = ""):
+    """Where gateway definitions live, isolated from the real machine."""
+    target = tmp_path / "gateways.toml"
+    if body:
+        target.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(gateways, "gateways_file", lambda: target)
+    # the legacy fallback reads config.toml, which on a real machine has a [telegram] block
+    monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
+    return target
 
 
 def _token(monkeypatch, value: str = "123:abc", username: str = "test_bot"):
@@ -85,11 +96,11 @@ def test_config_is_written_and_parses(monkeypatch, tmp_path):
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert data["acp"]["command"] == "omp"
     assert data["acp"]["args"] == ["--mode", "acp"]
-    assert data["gateway"]["platform"] == "telegram"
+    assert "gateway" not in data and "telegram" not in data
     assert data["agent"]["mode"] == "default"
     assert data["agent"]["thinking"] == "xhigh"
     assert data["agent"]["yolo"] is True
-    assert data["telegram"]["allowed_users"] == []
+    assert "telegram" not in data
     assert data["mcp"]["source"] == "none"      # omp owns its servers; no hub merge by default
     assert "fenced code" in data["agent"]["append_system_prompt"]
 
@@ -132,7 +143,7 @@ def test_rerunning_setup_prefills_and_keeps_the_existing_values(monkeypatch, tmp
     assert data["agent"]["approval_mode"] == "write"
     assert data["approval"]["policy"] == "deny"          # ompwire's own policy, untouched
     assert data["agent"]["cwd"] == "/srv/app"
-    assert data["telegram"]["allowed_users"] == [42, 43]
+    assert "telegram" not in data          # gateways live in gateways.toml now
     assert (tmp_path / "config.toml.bak").is_file()
     out = capsys.readouterr().out
     assert "editing" in out and "press enter to keep" in out
@@ -160,7 +171,7 @@ def test_a_typed_answer_replaces_one_value_and_leaves_the_rest(monkeypatch, tmp_
     assert data["agent"]["thinking"] == "high"           # changed
     assert data["agent"]["model"] == "anthropic/claude-opus-5"   # kept
     assert data["agent"]["mode"] == "plan"               # kept
-    assert data["telegram"]["allowed_users"] == [99]     # changed
+    assert data["agent"]["thinking"] == "high"           # the typed value stuck
 
 
 def test_force_starts_from_the_agent_defaults_instead_of_the_file(monkeypatch, tmp_path):
@@ -174,87 +185,65 @@ def test_force_starts_from_the_agent_defaults_instead_of_the_file(monkeypatch, t
     data = tomllib.loads(config.read_text())
     assert data["agent"]["model"] == "zai/glm-5.1"       # the agent's current model
     assert data["agent"]["yolo"] is True
-    assert data["telegram"]["allowed_users"] == []
+    assert "telegram" not in data
 
 
-def test_an_existing_token_is_kept_without_asking(monkeypatch, tmp_path, capsys):
+def test_setup_never_asks_for_a_bot_token(monkeypatch, tmp_path, capsys):
+    """The gateway is its own command now; setup configures the agent only."""
     _sandbox(monkeypatch, tmp_path)
     _agent(monkeypatch)
-    _answers(monkeypatch)
-    (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=999:abc\n", encoding="utf-8")
-    monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "kept_bot")
-    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: (_ for _ in ()).throw(
-        AssertionError("must not ask for a token that already works")), raising=False)
+    _gateway_file(monkeypatch, tmp_path)
+    asked: list[str] = []
 
-    assert setup.run(yes=True) == 0
-    assert "999:abc" in (tmp_path / ".env").read_text()
-    assert "token valid: @kept_bot" in capsys.readouterr().out
+    def answer(prompt: str, default: str, *, yes: bool = False) -> str:
+        asked.append(prompt)
+        return default
 
-
-def test_token_goes_to_env_with_0600_and_is_verified(monkeypatch, tmp_path, capsys):
-    _sandbox(monkeypatch, tmp_path)
-    _agent(monkeypatch)
-    _answers(monkeypatch)
-    _token(monkeypatch, "123:abc", "my_bot")
+    monkeypatch.setattr(setup, "_ask", answer)
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+    monkeypatch.setattr(setup, "_ask_secret",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("setup asked for a secret")))
 
     assert setup.run(yes=False) == 0
-    env_file = tmp_path / ".env"
-    assert env_file.stat().st_mode & 0o777 == 0o600
-    assert env_file.read_text().strip() == "TELEGRAM_BOT_TOKEN=123:abc"
-    out = capsys.readouterr().out
-    assert "token valid: @my_bot" in out
-    assert "123:abc" not in out                       # never echoed back
-
-
-def test_allowed_users_are_parsed_and_the_first_becomes_home(monkeypatch, tmp_path):
-    _sandbox(monkeypatch, tmp_path)
-    _agent(monkeypatch)
-    _answers(monkeypatch, {"allowed telegram user ids": "111, 222 ,x"})
-    _token(monkeypatch)
-
-    assert setup.run(yes=False) == 0
-    data = tomllib.loads((tmp_path / "config.toml").read_text())
-    assert data["telegram"]["allowed_users"] == [111, 222]
-    assert data["telegram"]["home_channel"] == 111
-
-
-def test_no_token_fails_because_the_gateway_cannot_start(monkeypatch, tmp_path, capsys):
-    _sandbox(monkeypatch, tmp_path)
-    _agent(monkeypatch)
-    _answers(monkeypatch)
-    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: "", raising=False)
-
-    assert setup.run(yes=False) == 1
-    out = capsys.readouterr().out
-    assert "no usable TELEGRAM_BOT_TOKEN" in out
-    assert not (tmp_path / "config.toml").exists()     # nothing half-written
+    assert not any("token" in prompt for prompt in asked)
     assert not (tmp_path / ".env").exists()
-
-
-def test_unverified_token_is_retried_and_reported(monkeypatch, tmp_path, capsys):
-    _sandbox(monkeypatch, tmp_path)
-    _agent(monkeypatch)
-    _answers(monkeypatch)
-    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: "bad:token", raising=False)
-    monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "")
-
-    assert setup.run(yes=False) == 1
     out = capsys.readouterr().out
-    assert "failed getMe" in out
-    assert "bad:token" not in out
+    assert "ompwire gateway add telegram" in out
 
 
-def test_env_token_is_reused_without_prompting(monkeypatch, tmp_path):
+def test_setup_says_when_a_gateway_already_exists(monkeypatch, tmp_path, capsys):
     _sandbox(monkeypatch, tmp_path)
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "999:fromenv")
     _agent(monkeypatch)
-    _answers(monkeypatch)
-    monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "env_bot")
-    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: (_ for _ in ()).throw(
-        AssertionError("must not prompt when the env already has a token")), raising=False)
+    _gateway_file(monkeypatch, tmp_path, '[gateway.telegram]\ntype = "telegram"\n'
+                                         "allowed_users = [42]\n")
 
     assert setup.run(yes=True) == 0
-    assert "999:fromenv" in (tmp_path / ".env").read_text()
+    out = capsys.readouterr().out
+    assert "gateways already configured: telegram" in out
+    assert "gateway add" not in out
+
+
+def test_the_written_config_has_no_gateway_or_telegram_section(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    _agent(monkeypatch)
+    _gateway_file(monkeypatch, tmp_path)
+
+    assert setup.run(yes=True) == 0
+    data = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert "gateway" not in data
+    assert "telegram" not in data
+
+
+def test_a_rerun_leaves_the_gateway_file_alone(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    _agent(monkeypatch)
+    target = _gateway_file(monkeypatch, tmp_path,
+                           '[gateway.telegram]\ntype = "telegram"\nallowed_users = [7]\n')
+    before = target.read_text()
+
+    assert setup.run(yes=True) == 0
+    assert target.read_text() == before
 
 
 def test_approval_policy_is_asked_when_yolo_is_off(monkeypatch, tmp_path):
@@ -405,49 +394,3 @@ def test_provider_and_model_are_one_step(monkeypatch, tmp_path):
     assert seen[model_index][1] == ["zai/glm-5.1", "zai/glm-5.3-flash"]
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert data["agent"]["model"] == "zai/glm-5.1"
-
-
-def test_gateway_is_the_last_step_and_asks_for_the_token(monkeypatch, tmp_path):
-    _sandbox(monkeypatch, tmp_path)
-    _agent(monkeypatch)
-    order: list[str] = []
-
-    def answer(prompt: str, default: str, *, yes: bool = False) -> str:
-        order.append(prompt)
-        return default
-
-    def secret(prompt: str, yes: bool) -> str:
-        order.append(prompt)
-        return "123:abc"
-
-    monkeypatch.setattr(setup, "_ask", answer)
-    monkeypatch.setattr(setup, "_ask_secret", secret)
-    monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "late_bot")
-    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
-
-    assert setup.run(yes=False) == 0
-    token_index = next(i for i, prompt in enumerate(order) if "bot token" in prompt)
-    assert "yolo mode" in order[0]
-    assert token_index >= len(order) - 2          # the gateway comes last
-    assert "working directory" in " ".join(order[:token_index])
-
-
-def test_gateway_rejects_a_pasted_secret_without_echoing_it(monkeypatch, tmp_path, capsys):
-    _sandbox(monkeypatch, tmp_path)
-    _agent(monkeypatch)
-    _token(monkeypatch)
-    state = {"platform_tries": 0}
-
-    def answer(prompt: str, default: str, *, yes: bool = False) -> str:
-        if "gateway platform" in prompt:
-            state["platform_tries"] += 1
-            return "8384807287:AAEwqsecret" if state["platform_tries"] == 1 else "telegram"
-        return default
-
-    monkeypatch.setattr(setup, "_ask", answer)
-    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
-
-    assert setup.run(yes=False) == 0
-    out = capsys.readouterr().out
-    assert "AAEwqsecret" not in out
-    assert "looks like a secret" in out

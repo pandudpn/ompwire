@@ -62,6 +62,8 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    from . import gateways
+
     config = load_config(args.config)
     for warning in config.warnings:
         print(f"warn: {warning}", file=sys.stderr)
@@ -71,12 +73,19 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if agent_path(command) is None:
         print(f"FAIL agent not found: {command}. Run `ompwire setup` first.", file=sys.stderr)
         return 1
-    platform = str(config.get("gateway", "platform", "telegram"))
-    if platform != "telegram":
-        print(f"FAIL gateway platform {platform!r} is not implemented", file=sys.stderr)
+    try:
+        gateway = gateways.selected(config, args.gateway)
+    except gateways.GatewayError as exc:
+        print(f"FAIL {exc}", file=sys.stderr)
         return 1
+    if not gateway.implemented:
+        print(f"FAIL the {gateway.kind!r} transport is not implemented yet; "
+              f"`ompwire gateway list` shows what can run today", file=sys.stderr)
+        return 1
+    gateways.apply(config, gateway)
     if not str(config.get("telegram", "bot_token", "") or ""):
-        print("FAIL telegram bot token missing. Run `ompwire setup` or set TELEGRAM_BOT_TOKEN.",
+        print(f"FAIL no credential for gateway {gateway.name!r}. "
+              f"Run `ompwire gateway add {gateway.name}` or set {gateway.token_var()}.",
               file=sys.stderr)
         return 1
     from . import lock
@@ -87,12 +96,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
         handle = None
     else:
         try:
-            handle = lock.acquire()
+            handle = lock.acquire(lock.lock_path(gateway.name))
         except lock.AlreadyRunning as busy:
-            print(f"FAIL another gateway is already running (pid {busy.pid}).\n"
-                  f"     stop it, or use `ompwire restart`; `ompwire status` shows it.\n"
-                  f"     --force starts anyway, at the risk of Telegram 409 Conflict.",
-                  file=sys.stderr)
+            print(f"FAIL gateway {gateway.name!r} is already running (pid {busy.pid}).\n"
+                  f"     stop it, or use `ompwire gateway restart {gateway.name}`;\n"
+                  f"     `ompwire gateway list` shows it. --force starts anyway, at the "
+                  f"risk of Telegram 409 Conflict.", file=sys.stderr)
             return 1
 
     from .telegram import serve
@@ -100,7 +109,161 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         return serve(config)
     finally:
-        lock.release(handle)
+        lock.release(handle, lock.lock_path(gateway.name))
+
+
+def _ask_secret_line(prompt: str) -> str:
+    """A gateway credential, read hidden when a terminal is available."""
+    from .setup import _ask_secret, normalise_token
+
+    return normalise_token(_ask_secret(prompt, yes=False))
+
+
+def cmd_gateway(args: argparse.Namespace) -> int:
+    from . import gateways, service
+    from .setup import bot_identity
+
+    action = getattr(args, "gateway_action", "list") or "list"
+
+    if action == "types":
+        for index, kind in enumerate(gateways.KINDS, 1):
+            mark = "implemented" if kind in gateways.IMPLEMENTED else "not implemented yet"
+            print(f"  {index}. {kind:<9} {mark}")
+        return 0
+
+    if action == "list":
+        items = gateways.load()
+        if not items:
+            print("no gateway configured. Run `ompwire gateway add telegram`.")
+            return 0
+        width = max(len(item.name) for item in items)
+        for item in items:
+            token = gateways.token(item)
+            if not token:
+                identity = "no credential"
+            else:
+                username = bot_identity(token)
+                identity = f"@{username}" if username else "credential rejected"
+            allowed = ", ".join(str(user) for user in item.allowed) or "none"
+            print(f"{item.name.ljust(width)}  {item.kind:<9} {identity:<24} "
+                  f"users {allowed:<12} {service.state(item.name)}")
+        return 0
+
+    if action == "add":
+        return _gateway_add(args, gateways, service, bot_identity)
+
+    if action in ("remove", "rm"):
+        try:
+            item = gateways.remove(args.name)
+        except gateways.GatewayError as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 1
+        if service.state(item.name) not in ("no unit", "no systemd"):
+            service.uninstall(item.name)
+        print(f"ok   removed gateway {item.name!r} (credential left in .env: "
+              f"{item.token_var()})")
+        return 0
+
+    # start / stop / restart act on the unit, because one gateway is one service
+    try:
+        item = gateways.selected(load_config(args.config), getattr(args, "name", "") or "")
+    except gateways.GatewayError as exc:
+        print(f"FAIL {exc}", file=sys.stderr)
+        return 1
+    return getattr(service, action)(item.name)
+
+
+def _gateway_add(args: argparse.Namespace, gateways, service, bot_identity) -> int:
+    from .setup import normalise_token
+
+    kind = getattr(args, "kind", "") or ""
+    if not kind:
+        if args.yes:
+            kind = "telegram"
+        else:
+            print("gateway type:")
+            for index, name in enumerate(gateways.KINDS, 1):
+                mark = "" if name in gateways.IMPLEMENTED else "   (not implemented yet)"
+                print(f"  {index}. {name}{mark}")
+            answer = input("type [1-2, enter for telegram]: ").strip() or "1"
+            if answer.isdigit() and 1 <= int(answer) <= len(gateways.KINDS):
+                kind = gateways.KINDS[int(answer) - 1]
+            else:
+                kind = answer
+    kind = kind.lower()
+    if kind not in gateways.KINDS:
+        print(f"FAIL unknown gateway type {kind!r}; known: {', '.join(gateways.KINDS)}",
+              file=sys.stderr)
+        return 1
+    if kind not in gateways.IMPLEMENTED:
+        print(f"FAIL the {kind} transport is not implemented yet. The definition would point "
+              f"at code that does not exist, so nothing is written.\n"
+              f"     telegram is the transport that works today.", file=sys.stderr)
+        return 1
+
+    name = (getattr(args, "name", "") or kind).lower()
+    try:
+        existing = {item.name for item in gateways.load()}
+    except gateways.GatewayError as exc:
+        print(f"FAIL {exc}", file=sys.stderr)
+        return 1
+    if name in existing and not args.force:
+        print(f"FAIL a gateway named {name!r} already exists (pass --force to rewrite its "
+              f"credential)", file=sys.stderr)
+        return 1
+
+    token = normalise_token(getattr(args, "token", "") or "")
+    if not token and args.token_stdin:
+        import sys as _sys
+
+        token = normalise_token(_sys.stdin.readline())
+        if not token:
+            print("FAIL --token-stdin was given but stdin was empty", file=sys.stderr)
+            return 1
+    if not token and not args.yes:
+        token = normalise_token(_ask_secret_line("telegram bot token from @BotFather"))
+    if not token:
+        token = gateways.token(gateways.Gateway(name=name, kind=kind))
+    if not token:
+        print("FAIL no credential given; a gateway cannot start without one", file=sys.stderr)
+        return 1
+
+    username = bot_identity(token)
+    if not username:
+        print("FAIL that token failed getMe: Telegram rejected it. Nothing was written.",
+              file=sys.stderr)
+        return 1
+
+    if name in existing:
+        gateways.save([item if item.name != name else gateways.Gateway(
+            name=name, kind=kind, allowed=item.allowed, home=item.home) for item in
+            gateways.load()])
+        print(f"ok   gateway {name!r} already defined, credential replaced")
+    else:
+        gateways.add(name, kind, allowed=[], home=None)
+        print(f"ok   gateway added: {name} ({kind})")
+
+    env_path = gateways.set_token(gateways.Gateway(name=name, kind=kind), token)
+    print(f"ok   credential stored in {env_path} (0600)")
+    print(f"ok   token valid: @{username}")
+
+    items = gateways.load()
+    item = next(entry for entry in items if entry.name == name)
+    if not item.allowed and not args.yes:
+        answer = input(f"allowed telegram user ids for @{username} "
+                       f"(comma separated, blank = nobody): ").strip()
+        ids = [int(part) for part in answer.replace(" ", "").split(",") if part.isdigit()]
+        item.allowed = ids
+        item.home = ids[0] if ids else None
+        gateways.save(items)
+        if ids:
+            print(f"ok   allowed users: {', '.join(str(user) for user in ids)}")
+        else:
+            print("warn no allowed users: nobody can talk to this bot yet")
+
+    print(f"\nnext:  ompwire service install {name}    # keep it running")
+    print(f"       ompwire serve --gateway {name}    # or run it in this terminal")
+    return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -153,14 +316,37 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         names = [str(server.get("name", "?")) for server in config.get("mcp", "servers", [])]
         print(f"      mcp servers passed to session/new: {', '.join(names)}")
 
-    token = str(config.get("telegram", "bot_token", "") or "")
-    print(f"{'ok  ' if token else '--  '} telegram token {'set' if token else 'missing'}")
+    from . import gateways
 
-    allowed = [str(user) for user in (config.get("telegram", "allowed_users") or [])]
-    if allowed:
-        print(f"ok   allowed users: {', '.join(allowed)}")
-    else:
-        print("--   allowed users: none (nobody can talk to the bot; run ompwire setup)")
+    try:
+        items = gateways.load(config)
+    except gateways.GatewayError as exc:
+        print(f"FAIL gateways: {exc}")
+        failures += 1
+        items = []
+    if not items:
+        print("--   no gateway configured (run `ompwire gateway add telegram`)")
+    from .setup import bot_identity
+
+    for item in items:
+        token = gateways.token(item)
+        if not token:
+            print(f"FAIL gateway {item.name}: no credential "
+                  f"(`ompwire gateway add {item.name}` or set {item.token_var()})")
+        elif item.kind == "telegram":
+            username = bot_identity(token)
+            if username:
+                print(f"ok   gateway {item.name}: @{username}")
+            else:
+                print(f"--   gateway {item.name}: Telegram rejected the credential "
+                      f"(revoked or rotating; `ompwire gateway add {item.name} --force`)")
+        else:
+            print(f"ok   gateway {item.name}: credential set")
+        if item.allowed:
+            print(f"ok   allowed users for {item.name}: "
+                  f"{', '.join(str(user) for user in item.allowed)}")
+        else:
+            print(f"--   allowed users for {item.name}: none (nobody can talk to this bot)")
 
     print(f"\n{'FAILED' if failures else 'ready'} · ompwire {__version__}")
     return 1 if failures else 0
@@ -178,10 +364,10 @@ def cmd_service(args: argparse.Namespace) -> int:
 
     action = getattr(args, "service_action", "show")
     if action == "install":
-        return service.install(force=args.force, start=not args.no_start)
+        return service.install(args.name, force=args.force, start=not args.no_start)
     if action == "uninstall":
-        return service.uninstall(keep_unit_file=args.keep_unit_file)
-    return service.show()
+        return service.uninstall(args.name, keep_unit_file=args.keep_unit_file)
+    return service.show(args.name)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -198,9 +384,16 @@ def cmd_restart(_args: argparse.Namespace) -> int:
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
-    from .setup import run
+    from .setup import normalise_token, run
 
-    return run(yes=args.yes, force=args.force, install_omp=args.install_omp)
+    token = ""
+    if args.token_stdin:
+        # for terminals where the hidden prompt misbehaves: no echo, no history
+        token = normalise_token(sys.stdin.readline())
+        if not token:
+            print("FAIL --token-stdin was given but stdin was empty", file=sys.stderr)
+            return 1
+    return run(yes=args.yes, force=args.force, install_omp=args.install_omp, token=token)
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -313,6 +506,8 @@ def build_parser() -> argparse.ArgumentParser:
                    "and a verified bot token, and refuses to start twice: a second poller makes "
                    "Telegram answer 409 Conflict and drop updates.",
                    "  ompwire serve\n  ompwire serve --force   # skip the lock, on purpose")
+    serve_p.add_argument("--gateway", default="", metavar="NAME",
+                         help="which gateway to run (default: the only one configured)")
     serve_p.add_argument("--force", action="store_true",
                          help="start even if another gateway holds the lock")
     serve_p.set_defaults(func=cmd_serve)
@@ -355,6 +550,25 @@ def build_parser() -> argparse.ArgumentParser:
                     help="stop a running `ompwire serve` before removing")
     un.set_defaults(func=cmd_uninstall)
 
+    gw = _sub(sub, "gateway", "add, inspect and control gateway bots",
+              "A gateway is one bot on one platform: its own credential, its own allow "
+              "list, its own service. Types: telegram (works today), whatsapp (not yet).",
+              "  ompwire gateway list\n"
+              "  ompwire gateway add telegram --token-stdin < token.txt\n"
+              "  ompwire gateway start telegram")
+    gw.add_argument("gateway_action", nargs="?", default="list",
+                    choices=["list", "add", "remove", "rm", "start", "stop", "restart",
+                             "types"])
+    gw.add_argument("name", nargs="?", default="", help="gateway name")
+    gw.add_argument("--kind", default="", help="add: telegram | whatsapp")
+    gw.add_argument("--allowed", default="", help="add: comma separated user ids")
+    gw.add_argument("--token", default="", help="add: the bot token itself (prefer --token-stdin)")
+    gw.add_argument("--token-stdin", action="store_true",
+                    help="add: read the token from stdin")
+    gw.add_argument("--force", action="store_true", help="add: replace an existing credential")
+    gw.add_argument("--yes", action="store_true", help="add: take the defaults, no prompts")
+    gw.set_defaults(func=cmd_gateway)
+
     svc = _sub(sub, "service", "run the gateway under systemd --user",
                "A gateway started from a shell dies with that shell. This writes a user unit "
                "from the paths on this machine, then enables it.",
@@ -368,6 +582,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="enable the unit without starting it now")
     svc.add_argument("--keep-unit-file", action="store_true",
                      help="uninstall: disable, but leave the unit file in place")
+    svc.add_argument("name", nargs="?", default="telegram", help="gateway name")
     svc.set_defaults(func=cmd_service)
 
     st = _sub(sub, "status", "what this installation is set to, and whether it is running",

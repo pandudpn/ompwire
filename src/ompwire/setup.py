@@ -50,15 +50,8 @@ yolo = {yolo}
 approval_mode = "{approval}"
 append_system_prompt = \"\"\"{hint}\"\"\"
 
-[gateway]
-platform = "telegram"
-
-[telegram]
-allowed_users = [{allowed}]
-home_channel = {home}
-verbose = true
-
 [stream]
+verbose = true
 show_tool_calls = true
 show_usage = false
 
@@ -105,14 +98,45 @@ def _ask(prompt: str, default: str, *, yes: bool) -> str:
     return answer or default
 
 
-def _ask_secret(prompt: str, yes: bool) -> str:
+def normalise_token(raw: str) -> str:
+    """Whatever got pasted, keep only the token.
+
+    People paste the whole line from BotFather, or `TELEGRAM_BOT_TOKEN=…`, or with a
+    trailing newline from a clipboard. All of that used to reach getMe verbatim and fail
+    there, which looks like "the token is wrong" instead of "the paste was noisy".
+    """
+    from .catalog import strip_ansi
+
+    value = strip_ansi(str(raw or "")).strip().strip('"').strip("'").strip()
+    for prefix in ("TELEGRAM_BOT_TOKEN=", "export TELEGRAM_BOT_TOKEN="):
+        if value.startswith(prefix):
+            value = value[len(prefix):].strip()
+    if value.lower().startswith("bot"):
+        value = value[3:]
+    return "".join(value.split())
+
+
+def _ask_secret(prompt: str, yes: bool, attempts: int = 3) -> str:
+    """Read a secret, and say so when nothing arrives instead of giving up quietly."""
     if yes:
         return ""
-    try:
-        return getpass.getpass(f"{prompt}: ").strip()
-    except (EOFError, OSError):
-        # no tty (piped output, container, CI): treat it as "no token given"
-        return ""
+    for attempt in range(1, attempts + 1):
+        try:
+            raw = getpass.getpass(f"{prompt} (input hidden, paste is fine): ")
+        except (EOFError, OSError):
+            # no controlling terminal: a visible prompt still beats refusing to work
+            print("     no terminal for a hidden prompt, the value will be visible while you "
+                  "paste it")
+            try:
+                raw = input(f"{prompt}: ")
+            except (EOFError, OSError):
+                return ""
+        value = normalise_token(raw)
+        if value:
+            return value
+        print(f"--   nothing was read (attempt {attempt}/{attempts}). Paste the token and "
+              f"press enter; an empty line reads as empty.")
+    return ""
 
 
 def agent_path(command: str = "omp") -> str | None:
@@ -334,8 +358,8 @@ def _existing_env() -> dict[str, str]:
 
 def _next_steps() -> None:
     print("\nnext:")
-    print("  ompwire doctor     # verify agent, store, token")
-    print("  ompwire serve      # start the Telegram transport")
+    print("  ompwire doctor                 # verify agent and store")
+    print("  ompwire gateway list           # bots, credentials, services")
 
 
 def provider_of(model: str) -> str:
@@ -362,52 +386,6 @@ def pick_provider_and_model(catalog_values: dict[str, Any],
     default_model = current if current in pool else pool[0]
     model = choose(f"model ({provider})", pool, default_model, yes=yes)
     return model
-
-
-def _gateway_step(yes: bool, env_file: Path, replace_prompt: bool = False) -> tuple[bool, str]:
-    """Platform plus the credential that platform needs. Returns (ok, username)."""
-    platform = "telegram"
-    if not yes:
-        while True:
-            answer = _ask("gateway platform (telegram)", "telegram", yes=False).strip().lower()
-            if answer in ("", "telegram"):
-                platform = "telegram"
-                break
-            # never echo the answer back: a token pasted here would be a secret
-            shown = "that value looks like a secret, not a platform name" \
-                if ":" in answer or len(answer) > 24 else repr(answer)
-            print(f"--   {shown}; only telegram is implemented so far")
-
-    env_values = _existing_env()
-    token = env_values.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    if token and replace_prompt and not yes:
-        existing_name = bot_identity(token)
-        if existing_name:
-            print(f"ok   telegram token kept: @{existing_name}")
-            if _confirm("     replace the bot token? [y/N]: ") not in ("y", "yes"):
-                return True, existing_name
-            token = ""
-    username = ""
-    for attempt in range(1, 4):
-        if not token:
-            token = _ask_secret(f"{platform} bot token from @BotFather", yes)
-        if not token:
-            break
-        username = bot_identity(token) if platform == "telegram" else ""
-        if username:
-            env_file.parent.mkdir(parents=True, exist_ok=True)
-            env_file.write_text(f"TELEGRAM_BOT_TOKEN={token}\n", encoding="utf-8")
-            env_file.chmod(0o600)
-            print(f"ok   token stored in {env_file} (0600)")
-            print(f"ok   token valid: @{username}")
-            return True, username
-        print(f"--   that token failed getMe (attempt {attempt}/3)")
-        token = ""
-    print(f"\nFAIL no usable {platform.upper()}_BOT_TOKEN. "
-          "The gateway cannot start without it.\n"
-          f"     get one from @BotFather, then either re-run `ompwire setup` or write\n"
-          f"     TELEGRAM_BOT_TOKEN=… into {env_file} (chmod 600)")
-    return False, ""
 
 
 def existing_settings(config_file: Path) -> dict[str, Any]:
@@ -462,8 +440,9 @@ def _summary(settings: dict[str, Any]) -> str:
     return " · ".join(parts)
 
 
-def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) -> int:
-    config_dir, config_file, env_file = _paths()
+def run(*, yes: bool = False, force: bool = False, install_omp: bool = False,
+        token: str = "") -> int:
+    config_dir, config_file, _env_file = _paths()
     print("ompwire setup\n")
 
     # 1. agent
@@ -557,21 +536,8 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
           and _confirm(f"     merge servers from {hub} at runtime too? [y/N]: ") in ("y", "yes")):
         mcp_source = "mcp-hub"
 
-    # 8. gateway: platform, credential, and who may talk to it
-    ok, username = _gateway_step(yes, env_file, replace_prompt=bool(current_settings))
-    if not ok:
-        return 1
-    allowed_default = ", ".join(str(user) for user in current_settings.get("allowed") or [])
-    allowed = _ask(f"allowed telegram user ids for @{username or 'the bot'} "
-                   "(message @userinfobot to get yours, blank = nobody)",
-                   allowed_default, yes=yes)
-    allowed_list = ", ".join(part.strip() for part in allowed.split(",") if part.strip().isdigit())
-    home = allowed_list.split(",")[0].strip() if allowed_list else "0"
-    if not allowed_list:
-        print("warn no allowed users: nobody can talk to the bot until you add one")
-
     body = TEMPLATE.format(
-        cwd=cwd, approval=approval, hint=default_hint(), allowed=allowed_list, home=home,
+        cwd=cwd, approval=approval, hint=default_hint(),
         mcp_source=mcp_source, hub_path=str(hub) if mcp_source == "mcp-hub" else "",
         model=model, mode=mode, thinking=thinking, yolo="true" if yolo else "false",
         approval_policy=approval_policy,
@@ -590,9 +556,27 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
         "yolo": yolo,
         "approval_mode": approval,
         "cwd": cwd,
-        "allowed": [int(part) for part in allowed_list.split(",") if part.strip()],
     }
     print(f"     now: {_summary(written)}")
 
+    _gateway_hint()
     _next_steps()
     return 0
+
+
+def _gateway_hint() -> None:
+    """A gateway is its own thing now, so setup points at it instead of asking."""
+    from . import gateways
+
+    try:
+        items = gateways.load()
+    except gateways.GatewayError:
+        items = []
+    if items:
+        names = ", ".join(item.name for item in items)
+        print(f"\nok   gateways already configured: {names}")
+        print("     ompwire gateway list          # credential, allow list, service state")
+        return
+    print("\n--   no gateway yet: an agent alone cannot be talked to")
+    print("     ompwire gateway add telegram  # bot token and who may use it")
+    print("     ompwire service install telegram")

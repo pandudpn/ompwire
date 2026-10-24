@@ -217,8 +217,10 @@ ompwire --version        # or -V
 | `ompwire setup` | first machine: agent, provider and model, thinking, mode, yolo, cwd, MCP, gateway |
 | `ompwire status` | what it is set to and whether the gateway is running: model, mode, thinking, approvals, cwd, allowed users, token, MCP, gateway, sessions, log |
 | `ompwire doctor` | verify agent, session store, bot token and allow list, one line per check |
-| `ompwire serve` | run the Telegram transport (refuses to start twice: one lock per bot) |
-| `ompwire service install` | keep the gateway running under systemd --user |
+| `ompwire gateway list\|add\|remove` | one bot per definition: credential, allow list, service |
+| `ompwire gateway start\|stop\|restart` | control that gateway's unit |
+| `ompwire serve --gateway NAME` | run one gateway in this terminal (one lock per gateway) |
+| `ompwire service install NAME` | keep that gateway running under systemd --user |
 | `ompwire chat` | talk to the agent from this terminal (`-q` for one-shot) |
 | `ompwire sessions` | the `chat_key → sessionId` map |
 | `ompwire config` | merged config with secrets masked |
@@ -260,8 +262,13 @@ pre-filled with the value currently on disk, so pressing enter keeps it and typi
 changes one thing. The token is reused without asking while `getMe` still accepts it, and
 `--force` starts over from the agent's defaults when you want a clean rewrite.
 
+`ompwire setup` configures **the agent only**. A bot connection is a gateway, and
+gateways have their own command, so one machine can run several without setup ever
+asking for a token twice.
+
 `ompwire setup --yes` takes every default without prompting, which is what a
-provisioning script wants. Afterwards: `ompwire doctor`, then `ompwire serve`.
+provisioning script wants. Afterwards: `ompwire gateway add telegram`, then
+`ompwire doctor`.
 
 Working on ompwire itself: clone it, `uv venv && uv pip install -e '.[dev]'`, and
 run `.venv/bin/ompwire serve` — the checkout keeps its own session store.
@@ -289,17 +296,76 @@ code in memory and an update that is not picked up is an update that did not hap
 
 `--no-restart` leaves it running. `ompwire restart` does the same thing without updating.
 
-## Keep it running
+## Gateways
 
-A gateway started from a shell dies with that shell. One command hands it to systemd:
+A gateway is one bot on one platform, with its own credential, its own allow list and its
+own service:
 
 ```bash
-$ ompwire service install
-ok   unit written: /home/you/.config/systemd/user/ompwire.service
-ok   started and enabled: ompwire.service
-     logs:  journalctl --user -u ompwire -f
-     status: ompwire status
+$ ompwire gateway add telegram
+gateway type:
+  1. telegram  implemented
+  2. whatsapp  (not implemented yet)
+type [1-2, enter for telegram]: 1
+telegram bot token from @BotFather (input hidden, paste is fine):
+ok   gateway added: telegram (telegram)
+ok   credential stored in /home/you/.config/ompwire/.env (0600)
+ok   token valid: @vidura_omp_bot
+allowed telegram user ids for @vidura_omp_bot (comma separated, blank = nobody): 749994884
+ok   allowed users: 749994884
+
+next:  ompwire service install telegram    # keep it running
+       ompwire serve --gateway telegram    # or run it in this terminal
 ```
+
+The token is verified with `getMe` before anything is written, and it lives in `.env`
+(0600) next to the definition, never inside it. `--token-stdin` reads the token from a
+pipe, for terminals where a hidden prompt misbehaves:
+
+```bash
+read -rs TOK && printf '%s' "$TOK" | ompwire gateway add telegram --token-stdin
+```
+
+`ompwire gateway list` is the one screen that matters:
+
+```
+telegram   telegram  @vidura_omp_bot        users 749994884  active
+telegram-2 telegram  credential rejected    users 42         no unit
+```
+
+WhatsApp is named in the menu because the design is per-platform, but its transport does
+not exist yet: `gateway add whatsapp` refuses and writes nothing, rather than storing a
+definition that could never start.
+
+### One gateway, one service
+
+```bash
+$ ompwire service install telegram
+ok   unit written: /home/you/.config/systemd/user/ompwire-telegram.service
+ok   started and enabled: ompwire-telegram.service
+     logs:   journalctl --user -u ompwire-telegram.service -f
+     state:  ompwire gateway list
+```
+
+Each gateway gets its own unit (`ompwire-telegram.service`, `ompwire-whatsapp.service`),
+so stopping one leaves the others alone, and `ompwire update` restarts every active
+gateway separately.
+
+### What several gateways cost
+
+Measured on this machine, not estimated:
+
+- **one gateway process** (Python + the poller): roughly 60–90 MiB
+- **one agent subprocess** per live conversation (`omp --mode acp`): ~275 MiB, plus a
+  ~59 MiB child
+
+So a second gateway is cheap — tens of MiB — while a second *conversation* is expensive,
+because each chat owns its own agent. Two bots on one box is fine; two bots each holding
+five chats is a 3 GiB question. Every unit is capped with `MemoryMax=4G`, and the cap is
+per gateway so one runaway chat cannot take the other bot down.
+
+The alternative — a single process serving several transports — would save only the
+Python side and would put every bot in one failure domain. Not worth it.
 
 The unit is generated from this machine — the `ompwire` on your `PATH`, your
 `~/.config/ompwire/.env`, your configured working directory — because a checked-in unit
@@ -346,9 +412,9 @@ ok   ACP handshake: omp 18.12.6 (protocol 1)
      capabilities: loadSession=True sessions=['close', 'fork', 'list', 'resume']
 ok   session/new: 01a16c3e · config options ['mode', 'model', 'thinking']
      model now: omniroute/chat (174 available)
-ok   telegram token set
-ok   allowed users: 749994884
-ready · ompwire 0.8.0
+ok   gateway telegram: @vidura_omp_bot
+ok   allowed users for telegram: 749994884
+ready · ompwire 0.9.0
 ```
 
 doctor judges: it fails when the agent or the store is broken. `ompwire status` reports
@@ -365,16 +431,15 @@ mode            default
 thinking        xhigh
 approvals       yolo (bypassed)
 cwd             /home/you
-allowed users   749994884
-telegram token  set
+gateway telegram  telegram · @vidura_omp_bot · users 749994884 · active
 mcp             source mcp-hub · 22 server(s) from the hub · excluded: playwright, honcho
-gateway         process · running as pid 4242 (no systemd unit)
+processes       systemd · user unit ompwire-telegram is active
 sessions        7 session(s) in /home/you/.local/state/ompwire/sessions.db
 log             /home/you/.local/state/ompwire/ompwire.log (248 KiB)
 ```
 
 An empty allow list is the failure that looks like success: the bot starts, answers
-nobody, and logs nothing unusual. Both commands name it explicitly.
+nobody, and logs nothing unusual. Both commands name it explicitly, per gateway.
 
 ## Uninstall
 

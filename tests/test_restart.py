@@ -94,3 +94,27 @@ def test_no_restart_leaves_the_gateway_alone(monkeypatch, capsys):
     assert update.run(restart=False) == 0
     out = capsys.readouterr().out
     assert "left running" in out and "ompwire restart" in out
+
+
+def test_every_active_gateway_unit_is_restarted(monkeypatch):
+    """One gateway one unit means an update has to restart all of them, not just one."""
+    from ompwire import gateways
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    restarted: list[str] = []
+    monkeypatch.setattr(gateways, "load", lambda config=None: [
+        gateways.Gateway(name="telegram"), gateways.Gateway(name="telegram-2")])
+    monkeypatch.setattr(update, "_systemd_active",
+                        lambda unit="ompwire": unit in {"ompwire-telegram", "ompwire-telegram-2"})
+    monkeypatch.setattr(update, "serving_processes", lambda: [])
+    monkeypatch.setattr(update.subprocess, "run",
+                        lambda command, **kwargs: restarted.append(command[-1]) or Result())
+
+    message = update.restart_gateway()
+
+    assert restarted == ["ompwire-telegram", "ompwire-telegram-2"]
+    assert "ompwire-telegram-2" in message

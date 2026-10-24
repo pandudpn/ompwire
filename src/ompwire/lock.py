@@ -22,10 +22,12 @@ class AlreadyRunning(RuntimeError):
         super().__init__(f"another gateway is running (pid {pid}, lock {path})")
 
 
-def lock_path() -> Path:
+def lock_path(gateway: str = "") -> Path:
+    """Per gateway: two gateways may run side by side, the same one may not run twice."""
     from .config import default_state_dir
 
-    return default_state_dir() / "serve.lock"
+    name = f"-{gateway}" if gateway else ""
+    return default_state_dir() / f"serve{name}.lock"
 
 
 def holder(path: Path | None = None) -> int | None:
