@@ -74,6 +74,9 @@ def normalize_mcp_servers(servers: Iterable[dict[str, Any]]) -> list[dict[str, A
     return normalize(list(servers or []))
 
 
+# Choices that belong to the chat, not to one ACP session: /new must not reset them.
+PREF_KEYS = ("model", "mode", "thinking")
+
 FORWARD_HINT = (
     "Everything else is sent to the agent as a prompt. Its own commands work here, "
     "including /skill:<name> and /compact."
@@ -104,7 +107,8 @@ class ChatAgent:
         self.last_used = time.time()
         self.busy = False
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
-        self.yolo = False  # whether this agent runs with --approval-mode=yolo
+        # yolo survives /new: it is stored per chat, like model/mode/thinking
+        self.yolo = self.store.prefs(key).get("yolo") == "on"
         self.usage = {"input": 0, "output": 0, "cached": 0, "turns": 0}
         self.turns = 0
         self.tools_used = 0
@@ -191,13 +195,29 @@ class ChatAgent:
             return normalize(entries)
         return normalize(self.config.get("mcp", "servers", []) or [])
 
+    def prefs(self) -> dict[str, str]:
+        """Per-chat choices that must outlive a session (/new used to reset them)."""
+        return self.store.prefs(self.key)
+
     async def _apply_preferences(self) -> None:
-        for config_id in ("model", "mode"):
-            value = str(self.config.get("agent", config_id, "") or "")
+        stored = self.prefs()
+        for config_id in PREF_KEYS:
+            value = stored.get(config_id) or str(self.config.get("agent", config_id, "") or "")
             if not value or self.client is None:
                 continue
             try:
-                await asyncio.to_thread(self.client.set_config_option, self.session_id, config_id, value)
+                result = await asyncio.to_thread(
+                    self.client.set_config_option, self.session_id, config_id, value
+                )
+                # the reply carries the authoritative option set; without this the
+                # pickers keep showing the previous value after a restart or /new
+                updated = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
+                if updated:
+                    self.options = updated
+                log.info("preference applied %s=%s (session=%s, source=%s, effective=%s)",
+                         config_id, value, self.session_id[:8],
+                         "store" if stored.get(config_id) else "config",
+                         (self.options.get(config_id) or {}).get("currentValue"))
             except AcpError as exc:
                 log.warning("set %s=%s failed: %s", config_id, value, exc)
 
@@ -362,7 +382,16 @@ class ChatAgent:
                            entry.get("status", ""))
                 for entry in trace.values()
             ]
-            body = "\n".join(blocks)[-TELEGRAM_LIMIT:]
+            body = ""
+            dropped = 0
+            for block in reversed(blocks):
+                candidate = block if not body else f"{block}\n{body}"
+                if len(candidate) > TELEGRAM_LIMIT - 40:
+                    dropped += 1
+                    continue
+                body = candidate
+            if dropped:
+                body = f"… {dropped} earlier call(s)\n{body}" if body else f"… {dropped} call(s)"
             if state["tool_msg"] is None:
                 state["tool_msg"] = await self.app.bot.send_message(self.chat_id, body)
                 sent.append(state["tool_msg"])
@@ -489,6 +518,7 @@ class ChatAgent:
 
     async def respawn(self, yolo: bool) -> None:
         self.yolo = yolo
+        self.store.set_pref(self.key, "yolo", "on" if yolo else "off")
         if self.client is not None:
             await asyncio.to_thread(self.client.close, self.session_id)
         self.client = None
@@ -934,8 +964,10 @@ class Transport:
         result = await asyncio.to_thread(agent.client.set_config_option, agent.session_id, config_id, value)
         agent.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
         current = self._current(agent, config_id)
-        log.info("config change %s: %s -> %s (session=%s)", config_id, previous, current,
-                 agent.session_id[:8])
+        if config_id in PREF_KEYS and current:
+            agent.store.set_pref(agent.key, config_id, current)
+        log.info("config change %s: %s -> %s (session=%s, persisted=%s)", config_id, previous,
+                 current, agent.session_id[:8], config_id in PREF_KEYS)
         return previous, current
 
     async def cmd_model(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:

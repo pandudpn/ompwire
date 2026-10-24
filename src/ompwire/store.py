@@ -6,6 +6,7 @@ harness only has to remember *which* session belongs to a conversation.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -41,6 +42,34 @@ class SessionStore:
             )
             """
         )
+        # Per-chat preferences survive a new session: /model, /mode, /thinking and
+        # yolo belong to the conversation, not to one ACP session.
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prefs (
+                key   TEXT NOT NULL,
+                name  TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (key, name)
+            )
+            """
+        )
+        self._db.commit()
+
+    def prefs(self, key: str) -> dict[str, str]:
+        rows = self._db.execute("SELECT name, value FROM prefs WHERE key = ?", (key,)).fetchall()
+        return {row["name"]: row["value"] for row in rows}
+
+    def set_pref(self, key: str, name: str, value: str) -> None:
+        self._db.execute(
+            "INSERT INTO prefs (key, name, value) VALUES (?, ?, ?) "
+            "ON CONFLICT(key, name) DO UPDATE SET value = excluded.value",
+            (key, name, str(value)),
+        )
+        self._db.commit()
+
+    def drop_pref(self, key: str, name: str) -> None:
+        self._db.execute("DELETE FROM prefs WHERE key = ? AND name = ?", (key, name))
         self._db.commit()
 
     def get(self, key: str) -> SessionRecord | None:
