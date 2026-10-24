@@ -94,3 +94,28 @@ def test_single_pipe_line_is_left_alone():
     from ompwire.mdrender import to_html
 
     assert "<pre>" not in to_html("| not a table")
+
+
+def test_bold_can_wrap_inline_code():
+    """`**not `x` here**` used to leave the asterisks literal."""
+    from ompwire.mdrender import to_html
+
+    assert to_html("no **`MenuBarExtra`** at all") == "no <b><code>MenuBarExtra</code></b> at all"
+    wrapped = to_html("**`a/b` is dead.** Do not use it.")
+    assert wrapped == "<b><code>a/b</code> is dead.</b> Do not use it."
+
+
+def test_code_content_is_escaped_not_parsed():
+    from ompwire.mdrender import to_html
+
+    assert to_html("a `<tag>` and & here") == "a <code>&lt;tag&gt;</code> and &amp; here"
+
+
+def test_split_blocks_keeps_a_table_together():
+    from ompwire.mdrender import split_blocks, to_html
+
+    body = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n" + ("x" * 60)
+    chunks = split_blocks(body, 40)
+    table_chunk = next(c for c in chunks if "| a |" in c)
+    assert "| 1 | 2 |" in table_chunk            # header and body stayed together
+    assert "<pre>" in to_html(table_chunk)

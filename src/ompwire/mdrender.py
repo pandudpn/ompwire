@@ -113,22 +113,28 @@ def _monospace_runs(text: str) -> str:
 
 
 def _inline(text: str) -> str:
-    out: list[str] = []
-    for piece in INLINE_CODE_RE.split(text):
-        if piece.startswith("`") and piece.endswith("`") and len(piece) > 1:
-            out.append(f"<code>{_escape(piece[1:-1])}</code>")
-        else:
-            escaped = _escape(piece)
-            escaped = HEADING_RE.sub(lambda m: f"<b>{m.group(2)}</b>", escaped)
-            escaped = LINK_RE.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', escaped)
-            escaped = BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", escaped)
-            escaped = ITALIC_RE.sub(lambda m: f"<i>{m.group(1)}</i>", escaped)
-            escaped = STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", escaped)
-            escaped = BULLET_RE.sub("• ", escaped)
-            escaped = QUOTE_RE.sub(lambda m: f"<blockquote>{m.group(1)}</blockquote>", escaped)
-            escaped = _monospace_runs(escaped)
-            out.append(escaped)
-    return "".join(out)
+    # Inline code is stashed first so a bold span can wrap it: `**not `x` here**`
+    # used to break because the code split landed between the asterisks.
+    codes: dict[str, str] = {}
+
+    def stash(match: re.Match[str]) -> str:
+        key = f"\x00{len(codes)}\x00"
+        codes[key] = f"<code>{_escape(match.group(1))}</code>"
+        return key
+
+    work = INLINE_CODE_RE.sub(lambda m: stash(re.match(r"`([^`\n]+)`", m.group(0))), text)
+    work = _escape(work)
+    work = HEADING_RE.sub(lambda m: f"<b>{m.group(2)}</b>", work)
+    work = LINK_RE.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', work)
+    work = BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", work)
+    work = ITALIC_RE.sub(lambda m: f"<i>{m.group(1)}</i>", work)
+    work = STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", work)
+    work = BULLET_RE.sub("• ", work)
+    work = QUOTE_RE.sub(lambda m: f"<blockquote>{m.group(1)}</blockquote>", work)
+    work = _monospace_runs(work)
+    for key, rendered in codes.items():
+        work = work.replace(key, rendered)
+    return work
 
 
 def to_html(text: str) -> str:
@@ -145,6 +151,37 @@ def to_html(text: str) -> str:
         else:
             parts.append(_inline(chunk))
     return "".join(parts)
+
+
+def split_blocks(text: str, limit: int = 3200) -> list[str]:
+    """Split on blank lines so a table or a fence is never cut in half.
+
+    Rendering happens after splitting: a table that lost its header row would be
+    just a line of pipes again.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    for block in re.split(r"\n{2,}", text):
+        block = block.strip("\n")
+        if not block:
+            continue
+        candidate = "\n\n".join(current + [block])
+        if len(candidate) > limit and current:
+            blocks.append("\n\n".join(current))
+            current = [block]
+        else:
+            current.append(block)
+    if current:
+        blocks.append("\n\n".join(current))
+
+    out: list[str] = []
+    for block in blocks:
+        while len(block) > limit:
+            out.append(block[:limit])
+            block = block[limit:]
+        if block:
+            out.append(block)
+    return out
 
 
 def strip_html(text: str) -> str:

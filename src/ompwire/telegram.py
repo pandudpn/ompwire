@@ -37,7 +37,8 @@ from .config import Config, approval_policy, save_override
 from .format import card, change, esc, help_sections, now_wib, tool_block
 from .login import LoginSession
 from .mcp_hub import hub_servers, merge_entry as merge_mcp_entry, normalize
-from .mdrender import strip_agent_noise, strip_html, to_html, to_plain
+from .mdrender import (split_blocks, strip_agent_noise, strip_html, to_html,
+                       to_plain)
 from .format import uptime as fmt_uptime
 from .store import SessionStore
 
@@ -877,9 +878,10 @@ class Transport:
         log.info("skill opened chat=%s name=%s chars=%s", chat_id, skill.name, len(body))
         await self.send_html(chat_id, card("🧩 " + skill.name, skill.description[:160] or str(skill.path),
                                   [("file", str(skill.path)), ("size", f"{len(body)} chars")]))
-        for chunk in _chunks(body, 3200)[:4]:
+        chunks = split_blocks(body, 3200)
+        for chunk in chunks[:4]:
             await self.send_md(chat_id, chunk)
-        if len(body) > 3200:
+        if len(chunks) > 4:
             await self.app.bot.send_message(
                 chat_id, f"<i>truncated · full text in {esc(str(skill.path))}</i>",
                 parse_mode=ParseMode.HTML,
