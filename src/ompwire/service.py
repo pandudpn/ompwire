@@ -48,7 +48,7 @@ Type=simple
 WorkingDirectory={workdir}
 EnvironmentFile={env_file}
 ExecStart={exec_start} serve
-# The bot token lives in {env_file.name} (chmod 600), loaded above rather than
+# The bot token lives in {env_file} (chmod 600), loaded above rather than
 # written into this unit.
 Restart=always
 RestartSec=5
