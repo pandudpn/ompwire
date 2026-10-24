@@ -53,7 +53,38 @@ class SessionStore:
             )
             """
         )
+        # A turn that was running when the gateway went down. A clean end deletes the row; a
+        # restart leaves it, and the next start resumes the turn instead of leaving the chat
+        # waiting on an answer that is never coming.
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS inflight (
+                key        TEXT PRIMARY KEY,
+                prompt     TEXT NOT NULL,
+                resumes    INTEGER NOT NULL DEFAULT 0,
+                started_at REAL NOT NULL
+            )
+            """
+        )
         self._db.commit()
+
+    def begin_turn(self, key: str, prompt: str, resumes: int = 0) -> None:
+        self._db.execute(
+            "INSERT INTO inflight (key, prompt, resumes, started_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET prompt = excluded.prompt, resumes = excluded.resumes, "
+            "started_at = excluded.started_at",
+            (key, prompt, resumes, time.time()),
+        )
+        self._db.commit()
+
+    def end_turn(self, key: str) -> None:
+        self._db.execute("DELETE FROM inflight WHERE key = ?", (key,))
+        self._db.commit()
+
+    def interrupted(self) -> list[tuple[str, str, int]]:
+        """(key, prompt, resumes) for every turn a previous process did not finish."""
+        rows = self._db.execute("SELECT key, prompt, resumes FROM inflight").fetchall()
+        return [(row["key"], row["prompt"], int(row["resumes"])) for row in rows]
 
     def prefs(self, key: str) -> dict[str, str]:
         rows = self._db.execute("SELECT name, value FROM prefs WHERE key = ?", (key,)).fetchall()

@@ -388,3 +388,28 @@ def test_a_read_only_command_does_not_wait_for_a_click(rendered):
 
     asyncio.run(go())
     assert answered == ["allow_once"]
+
+
+
+def test_a_long_answer_is_sent_once_per_chunk(monkeypatch):
+    """Past 3600 chars the tail chunk was re-sent on every streaming flush, not edited."""
+    config = load_config(env={})
+    config.data["stream"].update({"show_tool_calls": False, "edit_interval": 0.0})
+    sends: list[str] = []
+
+    class Bot(FakeBot):
+        async def send_message(self, chat_id, text, **kw):
+            sends.append(text)
+            return await super().send_message(chat_id, text, **kw)
+
+    async def go():
+        agent = telegram.ChatAgent(config, chat_id=1, key="chunks",
+                                   app=types.SimpleNamespace(bot=Bot()))
+        agent.client = FakeClient([message("a" * 3700)] + [message(f" step{i}") for i in range(5)])
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        await agent.ask("halo")
+
+    asyncio.run(go())
+    answer_sends = [body for body in sends if "aaaa" in body or "step" in body]
+    assert len(answer_sends) == 2

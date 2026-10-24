@@ -212,7 +212,7 @@ deprecation cycle.
 | `session/fork` | to agent | `/fork` |
 | `session/list` | to agent | `/sessions` |
 | `session/close` | to agent | idle eviction |
-| `_session/steering` | to agent | `/steer`, experimental extension |
+| `_session/steering` | to agent | a message sent mid-turn, and `/steer` (request, not notification) |
 | `session/update` | from agent | prose chunks, tool calls, usage, available commands |
 | `session/request_permission` | from agent | approval prompts |
 
@@ -239,12 +239,23 @@ deprecation cycle.
   `{outcome: {outcome: "selected", optionId}}`. Always pick from what the agent offered.
 - **Model selection is a config option.** There is no model field in ACP; it is the
   `configOptions` entry with `id = "model"`, set through `session/set_config_option`.
-- **A second prompt into a running turn cancels it.** Measured: `session/prompt` while a turn is
-  running ends that turn with `stopReason: "cancelled"` (reproduced three times), and
-  `_meta.steering.queue: "followUp"` does not help. `/queue` is implemented in the transport as
-  a FIFO for that reason. `_session/steering` notifications do not cancel, but on this agent
-  version the steering text never appeared in the reply in any of four payload shapes, so
-  `/steer` stays opt-in and labelled experimental.
+- **A second prompt into a running turn cancels it; steering is a request, not a notification.**
+  Measured: `session/prompt` while a turn is running ends that turn with `stopReason:
+  "cancelled"`. `_session/steering` works, but only as a JSON-RPC *request*
+  (`{sessionId, prompt: [content blocks]}`): omp's `extNotification` handler is empty, which is
+  why the earlier notification-based `/steer` never showed up in a reply. The request answers
+  `injected` (the running turn reads it, verified on omp 18.12.6), `promptRequired` (nothing was
+  running) or `failed`. A message sent while a turn runs is steered by default
+  (`[telegram] busy_message = "queue"` restores the FIFO); anything not injected falls back to
+  the queue, and `/queue` always queues.
+- **A permission answer must not block the reader.** The reply to `session/request_permission`
+  can take minutes; it is answered on its own thread so a steer sent during an approval returns.
+- **A turn cut by a restart is resumed.** `ask()` writes an `inflight` row before the prompt and
+  deletes it when the turn ends, unless it ended `cancelled` without `/stop`, `/kill` or `/new`:
+  that is systemd signalling the agent along with the gateway. On start, each row becomes a
+  prompt that tells the agent to check its session history and finish (at most `RESUME_LIMIT`
+  tries). Polling also starts with `drop_pending_updates=False`, so a message sent during the
+  restart window is answered instead of discarded.
 - **Keep the process warm.** Each turn carries a large baseline of input tokens (the agent's own
   prompt), mostly cache-served on later turns. Spawning per message throws that away.
 - **`mcpServers` needs `env` as a list.** An entry whose `env` is an object, or missing, fails

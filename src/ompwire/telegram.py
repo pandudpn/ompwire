@@ -62,6 +62,14 @@ log = logging.getLogger("ompwire.telegram")
 TELEGRAM_LIMIT = 4000  # leave headroom under the 4096 hard cap
 REASONING_CHARS = 1200  # the tail matters; the beginning usually restates the question
 PERMISSION_TIMEOUT = 120.0
+# One more try after a restart is worth it; a turn that keeps dying with the gateway is the cause.
+RESUME_LIMIT = 2
+RESUME_PROMPT = (
+    "The chat gateway restarted while you were working on the request below, and your previous "
+    "turn was cut off. Everything you did before the cut is in this session's history. Check "
+    "what is already done, do not repeat finished steps, and finish the request.\n\n"
+    "Original request:\n{prompt}"
+)
 IDLE_CHECK_INTERVAL = 60.0
 
 COMMANDS: list[tuple[str, str]] = [
@@ -84,8 +92,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("approve", "show or set the approval policy"),
     ("verbose", "toggle tool-call trace"),
     ("commands", "search the agent's own slash commands"),
-    ("queue", "queue a prompt for the next turn"),
-    ("steer", "steer the running turn (experimental)"),
+    ("queue", "queue a prompt behind the running turn"),
+    ("steer", "add an instruction to the running turn"),
     ("schedule", "scheduled turns: list, run now, remove"),
     ("reasoning", "show or hide the agent's thinking"),
     ("yolo", "respawn the agent with approvals off, for this chat only"),
@@ -240,6 +248,7 @@ class ChatAgent:
         self.pending_options: list[str] = []
         self.last_used = time.time()
         self.busy = False
+        self._user_cancel = False
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
         # yolo survives /new: it is stored per chat, like model/mode/thinking.
         # With no stored choice the config decides, so setup can ship yolo on.
@@ -644,12 +653,18 @@ class ChatAgent:
         log.warning("telegram rate limit: no edits for %.0fs (%s)", window, exc)
 
     # ------------------------------------------------------------------ turn
-    async def ask(self, text: str, message=None, images: list[dict[str, Any]] | None = None) -> str:
+    async def ask(self, text: str, message=None, images: list[dict[str, Any]] | None = None,
+                  resumes: int = 0, record: str | None = None) -> str:
         await self.ensure()
         self.busy = True
+        self._user_cancel = False
         self.last_used = time.time()
         started = time.time()
         self.turns += 1
+        # written before the prompt goes out, deleted only when the turn really ends: a gateway
+        # restart in between leaves the row, and the next start picks the turn back up. A resume
+        # records the person's words, not the resume wrapper, so a second restart does not nest it.
+        self.store.begin_turn(self.key, record or text, resumes)
         log.info("turn start chat=%s session=%s input_chars=%s", self.chat_id,
                  self.session_id[:8], len(text))
         text_buffer: list[str] = []
@@ -672,16 +687,21 @@ class ChatAgent:
             if not joined.strip():
                 return
             parts = _chunks(joined, 3600)
-            if state["text_msg"] is None:
-                state["text_msg"] = await self._send_answer(parts[0])
-                if state["text_msg"] is not None:
-                    sent.append(state["text_msg"])
-            elif joined != state["text"]:
-                await self._edit_answer(state["text_msg"], parts[0])
-                for extra in parts[1:]:
-                    message = await self._send_answer(extra)
-                    if message is not None:
-                        sent.append(message)
+            # one Telegram message per chunk, edited in place; sending parts[1:] on every flush
+            # posted the tail of a long answer again each second
+            chunk_msgs: list[Any] = state.setdefault("chunk_msgs", [])
+            if joined != state["text"]:
+                for index, part in enumerate(parts):
+                    if index < len(chunk_msgs):
+                        if index == len(chunk_msgs) - 1 or index == len(parts) - 1 or force:
+                            await self._edit_answer(chunk_msgs[index], part)
+                        continue
+                    sent_msg = await self._send_answer(part)
+                    if sent_msg is None:
+                        break
+                    chunk_msgs.append(sent_msg)
+                    sent.append(sent_msg)
+                state["text_msg"] = chunk_msgs[0] if chunk_msgs else None
             state["text"] = joined
             if force:
                 raw = "".join(text_buffer)
@@ -830,11 +850,20 @@ class ChatAgent:
                     timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
                 )
         except AcpError:
+            # A silent turn is abandoned here, so stop it in omp too: left running, its late
+            # chunks land in the next turn's stream and the chat sees the answer twice.
+            if self.client is not None and self.client.alive:
+                with contextlib.suppress(AcpError):
+                    self.client.cancel(self.session_id)
             # scheduled, not immediate: the sentinel must queue behind updates the reader thread
             # has already handed to the loop, or the last of a turn is dropped
             self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
             await drain_task
+            await flush_text(force=True)  # what did arrive is still worth showing
             self.busy = False
+            # the agent died under the turn; only a deliberate stop/kill means it is finished
+            if self._user_cancel:
+                self.store.end_turn(self.key)
             raise
         self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
         await drain_task
@@ -843,6 +872,11 @@ class ChatAgent:
         await flush_tools(force=True)
         self.busy = False
         self.store.touch(self.key)
+        # A cancel nobody asked for is the gateway going down (systemd signals the agent too).
+        # Keep the row so the next start resumes; /stop, /kill and /new clear it. A try/finally
+        # here would delete it on exactly the path this table exists for.
+        if result.stop_reason != "cancelled" or self._user_cancel:
+            self.store.end_turn(self.key)
 
         usage = result.usage or {}
         self.usage["input"] += int(usage.get("inputTokens") or 0)
@@ -905,12 +939,34 @@ class ChatAgent:
     async def cancel(self) -> bool:
         if self.client is None or not self.session_id:
             return False
+        self.forget_turn()
         self.client.cancel(self.session_id)
         return True
+
+    async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> tuple[str, str]:
+        """Hand a message to the running turn: (outcome, reason). `promptRequired` = idle."""
+        if self.client is None or not self.client.alive or not self.session_id:
+            return "promptRequired", ""
+        try:
+            outcome, reason = await asyncio.to_thread(
+                self.client.steer, self.session_id, text, images,
+                float(self.config.get("acp", "steer_timeout", 15.0)))
+        except AcpError as exc:
+            log.warning("steer failed chat=%s: %s", self.chat_id, exc)
+            return "failed", str(exc)
+        log.info("steer chat=%s outcome=%s chars=%s reason=%s", self.chat_id, outcome, len(text),
+                 reason or "-")
+        return outcome, reason
+
+    def forget_turn(self) -> None:
+        """The person ended this turn on purpose; a restart must not bring it back."""
+        self._user_cancel = True
+        self.store.end_turn(self.key)
 
     async def respawn(self, yolo: bool) -> None:
         self.yolo = yolo
         self.store.set_pref(self.key, "yolo", "on" if yolo else "off")
+        self.forget_turn()
         if self.client is not None:
             await asyncio.to_thread(self.client.close, self.session_id)
         self.client = None
@@ -923,6 +979,7 @@ class ChatAgent:
         self.store.close()
 
     async def new_session(self) -> str:
+        self.forget_turn()
         if self.client is not None and self.client.alive and self.session_id:
             await asyncio.to_thread(self.client.close, self.session_id)
         self.client = None
@@ -965,6 +1022,8 @@ class Transport:
         self.agents: dict[int, ChatAgent] = {}
         self.queues: dict[int, asyncio.Queue[tuple[str, Any]]] = {}
         self.workers: dict[int, asyncio.Task] = {}
+        # set on SIGTERM: the worker stops taking turns, so the interrupted one stays on record
+        self.stopping = False
 
     # ---------------------------------------------------------------- helpers
     async def send_html(self, chat_id: int, body: str):
@@ -1049,13 +1108,20 @@ class Transport:
                     return
                 continue
             try:
+                if self.stopping:
+                    # a turn started now would be cut by the shutdown and overwrite the record
+                    # of the one that was really interrupted
+                    continue
                 if kind == "prompt":
                     message = payload
                     try:
                         await agent.ask(message.text, message=message,
-                                        images=getattr(payload, "images", None))
+                                        images=getattr(payload, "images", None),
+                                        resumes=int(getattr(payload, "resumes", 0)),
+                                        record=getattr(payload, "original", None))
                     except AcpError as exc:
-                        await message.reply_text(f"agent error: {exc}")
+                        if not self.stopping:  # the shutdown killed it; the next start resumes
+                            await message.reply_text(f"agent error: {exc}")
                     except Exception as exc:
                         log.exception("turn failed")
                         await message.reply_text(f"turn failed: {exc}")
@@ -1087,12 +1153,42 @@ class Transport:
             return
         if message is None or not message.text:
             return
-        agent = self.agent_for(update.effective_chat.id)
-        if agent.busy:
-            depth = self.enqueue(update.effective_chat.id, "prompt", message)
-            await message.reply_text(f"queued (position {depth}). the running turn finishes first.")
+        await self.submit(update.effective_chat.id, message, message)
+
+    async def submit(self, chat_id: int, payload: Any, message: Any) -> None:
+        """Route one incoming message: into the running turn, or into the queue.
+
+        By default a message sent while the agent works steers that turn, the way a person
+        interrupts a colleague. `[telegram] busy_message = "queue"` restores the old FIFO, and
+        `/queue` always queues. Anything omp declines to inject still lands in the queue.
+        """
+        agent = self.agent_for(chat_id)
+        if not agent.busy:
+            self.enqueue(chat_id, "prompt", payload)
             return
-        self.enqueue(update.effective_chat.id, "prompt", message)
+        if str(self.config.get("telegram", "busy_message", "steer")) == "steer":
+            outcome, reason = await agent.steer(payload.text, getattr(payload, "images", None) or None)
+            if outcome == "injected":
+                await self._react(message, "👀", "steering the running turn")
+                return
+            if outcome == "promptRequired":
+                # the turn ended between the busy check and the steer: this is a fresh prompt
+                self.enqueue(chat_id, "prompt", payload)
+                return
+            log.warning("steer not accepted chat=%s outcome=%s reason=%s; queueing", chat_id,
+                        outcome, reason or "-")
+        depth = self.enqueue(chat_id, "prompt", payload)
+        await message.reply_text(f"queued (position {depth}). the running turn finishes first.")
+
+    async def _react(self, message: Any, emoji: str, fallback: str) -> None:
+        """Acknowledge without adding a message to the chat; a reply if reactions are refused."""
+        try:
+            await message.set_reaction(emoji)
+        except (TelegramError, AttributeError):
+            try:
+                await message.reply_text(fallback)
+            except TelegramError:
+                pass
 
     def _agent_gate(self, agent: ChatAgent) -> str:
         """What the agent itself was started with, which is what decides whether anything asks."""
@@ -1208,11 +1304,7 @@ class Transport:
         caption = (message.caption or "").strip() or "Describe this image."
         log.info("photo chat=%s bytes=%s caption=%r", chat_id, len(raw), caption[:120])
         payload = _TextOnly(caption, message, images=[block])
-        if self.agent_for(chat_id).busy:
-            depth = self.enqueue(chat_id, "prompt", payload)
-            await message.reply_text(f"queued (position {depth})")
-        else:
-            self.enqueue(chat_id, "prompt", payload)
+        await self.submit(chat_id, payload, message)
 
     async def on_document(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Save a document from the chat and hand the agent its path.
@@ -1247,11 +1339,7 @@ class Transport:
         log.info("document chat=%s saved=%s bytes=%s", chat_id, target, len(raw))
         payload = _TextOnly(
             incoming_summary(target, document.mime_type or "", message.caption or ""), message)
-        if self.agent_for(chat_id).busy:
-            depth = self.enqueue(chat_id, "prompt", payload)
-            await message.reply_text(f"queued (position {depth})")
-        else:
-            self.enqueue(chat_id, "prompt", payload)
+        await self.submit(chat_id, payload, message)
 
     SKILL_PAGE = 10   # two columns x five rows, same shape as the model picker
     LOGIN_PAGE = 10
@@ -1874,15 +1962,18 @@ class Transport:
             return await self._deny(update)
         if not ctx.args:
             return await update.effective_message.reply_text("usage: /steer <text>")
-        agent = self.agent_for(update.effective_chat.id)
-        if agent.client is None or not agent.session_id:
-            return await update.effective_message.reply_text("no session to steer")
-        if not agent.busy:
-            return await update.effective_message.reply_text("nothing running; send it as a normal message")
-        agent.client.notify("_session/steering", {"sessionId": agent.session_id, "message": " ".join(ctx.args)})
+        chat_id = update.effective_chat.id
+        text = " ".join(ctx.args)
+        agent = self.agent_for(chat_id)
+        outcome, reason = await agent.steer(text)
+        if outcome == "injected":
+            return await self._react(update.effective_message, "👀", "steering the running turn")
+        if outcome == "promptRequired":
+            # nothing to steer: the text is still what the person wants the agent to read
+            self.enqueue(chat_id, "prompt", _TextOnly(text, update.effective_message))
+            return await update.effective_message.reply_text("nothing running; sent as a new prompt")
         await update.effective_message.reply_text(
-            "steer sent (experimental: it will not cancel the turn, but this agent version may ignore it)"
-        )
+            f"steer was not accepted ({reason or outcome}); /queue it, or /stop and resend")
 
     async def cmd_yolo(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -1903,6 +1994,7 @@ class Transport:
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
         if agent.client is not None:
+            agent.forget_turn()
             await asyncio.to_thread(agent.client.close, agent.session_id)
             agent.client = None
             log.info("agent killed by user chat=%s", update.effective_chat.id)
@@ -2132,7 +2224,10 @@ class Transport:
         log.info("ompwire online as @%s (allowed users: %s)", me.username, sorted(self.allowed))
         await self.startup_banner(str(me.username))
         await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
+        # Kept, not dropped: a message sent during the few seconds of a restart is still a
+        # message the person expects an answer to.
+        await app.updater.start_polling(drop_pending_updates=False)
+        await self.resume_interrupted()
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -2145,12 +2240,48 @@ class Transport:
         try:
             await stop.wait()
         finally:
+            self.stopping = True
             await self.shutdown_notice()
             await app.updater.stop()
             await app.stop()
             self.close_logins()
             for agent in self.agents.values():
                 await agent.shutdown()
+
+    async def resume_interrupted(self) -> None:
+        """Pick up every turn the previous process was cut off in the middle of.
+
+        The session already holds what the agent did before the restart (omp writes it as it
+        goes), so the agent is told to check that and finish, not to start over. A turn that was
+        interrupted again after RESUME_LIMIT tries is dropped with a note instead of looping.
+        """
+        store = SessionStore(str(self.config.get("session", "store")))
+        try:
+            pending = store.interrupted()
+        finally:
+            store.close()
+        enabled = bool(self.config.get("telegram", "resume_interrupted", True))
+        for key, prompt, resumes in pending:
+            if not key.startswith("tg:"):
+                continue
+            try:
+                chat_id = int(key[3:])
+            except ValueError:
+                continue
+            agent = self.agent_for(chat_id)
+            if not enabled or resumes >= RESUME_LIMIT or chat_id not in self.allowed:
+                agent.store.end_turn(key)
+                log.warning("interrupted turn dropped chat=%s resumes=%s", chat_id, resumes)
+                if chat_id in self.allowed:
+                    await self.send_md(chat_id, "a turn was interrupted by a gateway restart and "
+                                                "was not resumed; send it again if you still need it")
+                continue
+            log.info("resuming interrupted turn chat=%s attempt=%s", chat_id, resumes + 1)
+            notice = await self.send_md(chat_id, "🔁 gateway restarted mid-turn, picking it back up")
+            payload = _TextOnly(RESUME_PROMPT.format(prompt=prompt), notice)
+            payload.original = prompt
+            payload.resumes = resumes + 1
+            self.enqueue(chat_id, "prompt", payload)
 
     def _home_chat(self) -> int | None:
         home = str(self.config.get("telegram", "home_channel", "") or "")
@@ -2242,8 +2373,13 @@ class _TextOnly:
         self.text = text
         self.images = images or []
         self._message = message
+        # set on a resumed turn: the person's own words, and how many restarts it has survived
+        self.original: str | None = None
+        self.resumes = 0
 
     async def reply_text(self, text: str) -> Any:
+        if self._message is None:  # a resumed turn whose notice could not be sent
+            return None
         return await self._message.reply_text(text)
 
 

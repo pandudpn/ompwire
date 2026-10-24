@@ -92,6 +92,7 @@ class AcpClient:
         self._stderr_tail: list[str] = []
         self._reader: threading.Thread | None = None
         self._env = env
+        self._last_activity = time.monotonic()
 
     # ---------------------------------------------------------------- process
     def start(self) -> None:
@@ -124,6 +125,7 @@ class AcpClient:
     def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
         for line in self._proc.stdout:
+            self._last_activity = time.monotonic()
             line = line.strip()
             if not line:
                 continue
@@ -157,17 +159,25 @@ class AcpClient:
         method = msg.get("method")
         params = msg.get("params") or {}
         if method == "session/request_permission":
-            option_id = None
-            if self.on_permission is not None:
-                option_id = self.on_permission(params)
-            if option_id is None:
-                result: dict[str, Any] = {"outcome": {"outcome": "cancelled"}}
-            else:
-                result = {"outcome": {"outcome": "selected", "optionId": option_id}}
-            self._respond(msg["id"], result)
+            # The answer can take minutes (a person taps a button). Waiting here would stall the
+            # reader, and every reply behind it: a steer sent during an approval never returned.
+            threading.Thread(target=self._answer_permission, args=(msg["id"], params),
+                             name="acp-permission", daemon=True).start()
             return
         self._respond(msg["id"], None, error={"code": -32601, "message": f"unsupported client method {method}"})
 
+    def _answer_permission(self, msg_id: Any, params: dict[str, Any]) -> None:
+        option_id = None
+        if self.on_permission is not None:
+            option_id = self.on_permission(params)
+        if option_id is None:
+            result: dict[str, Any] = {"outcome": {"outcome": "cancelled"}}
+        else:
+            result = {"outcome": {"outcome": "selected", "optionId": option_id}}
+        try:
+            self._respond(msg_id, result)
+        except AcpError:
+            pass  # the agent went away while the person was deciding
     # ------------------------------------------------------------------- rpc
     def _respond(self, msg_id: Any, result: Any, error: dict[str, Any] | None = None) -> None:
         msg: dict[str, Any] = {"jsonrpc": "2.0", "id": msg_id}
@@ -190,19 +200,33 @@ class AcpClient:
     def notify(self, method: str, params: dict[str, Any]) -> None:
         self._write({"jsonrpc": "2.0", "method": method, "params": params})
 
-    def request(self, method: str, params: dict[str, Any], timeout: float = 120.0) -> dict[str, Any]:
+    def request(self, method: str, params: dict[str, Any], timeout: float = 120.0,
+                idle: bool = False) -> dict[str, Any]:
+        """Send one request and wait for its reply.
+
+        With `idle`, `timeout` counts silence, not total time: any line from the agent (a chunk,
+        a tool update) resets it. A long turn that is still working is not a hung turn, and
+        abandoning it left omp running while the chat treated it as failed.
+        """
         self.start()
         with self._lock:
             self._next_id += 1
             msg_id = self._next_id
             slot: queue.Queue = queue.Queue(maxsize=1)
             self._pending[msg_id] = slot
+        self._last_activity = time.monotonic()
         self._write({"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params})
         try:
-            reply = slot.get(timeout=timeout)
-        except queue.Empty as exc:
-            self._pending.pop(msg_id, None)
-            raise AcpError(f"{method} timed out after {timeout}s ({self._stderr_hint()})") from exc
+            while True:
+                remaining = timeout - (time.monotonic() - self._last_activity) if idle else timeout
+                try:
+                    reply = slot.get(timeout=max(remaining, 0.05))
+                    break
+                except queue.Empty as exc:
+                    if idle and time.monotonic() - self._last_activity < timeout:
+                        continue
+                    kind = "silent for" if idle else "timed out after"
+                    raise AcpError(f"{method} {kind} {timeout}s ({self._stderr_hint()})") from exc
         finally:
             self._pending.pop(msg_id, None)
         if "error" in reply:
@@ -252,6 +276,20 @@ class AcpClient:
     def cancel(self, session_id: str) -> None:
         self.notify("session/cancel", {"sessionId": session_id})
 
+    def steer(self, session_id: str, text: str, images: list[dict[str, Any]] | None = None,
+              timeout: float = 30.0) -> tuple[str, str]:
+        """Inject a message into the running turn; returns omp's (outcome, reason).
+
+        `injected` means the turn will read it. `promptRequired` means no turn was running, so the
+        caller sends it as a normal prompt. `failed` carries omp's reason. It must be a request:
+        omp's `extNotification` handler is empty, so the same payload sent as a notification is
+        dropped without a word.
+        """
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": text}, *(images or [])]
+        result = self.request("_session/steering", {"sessionId": session_id, "prompt": blocks},
+                              timeout=timeout)
+        return str(result.get("outcome") or "failed"), str(result.get("reason") or "")
+
     def prompt(
         self,
         session_id: str,
@@ -279,7 +317,8 @@ class AcpClient:
         self.on_update = _capture
         try:
             result = self.request(
-                "session/prompt", {"sessionId": session_id, "prompt": blocks}, timeout=timeout
+                "session/prompt", {"sessionId": session_id, "prompt": blocks}, timeout=timeout,
+                idle=True,
             )
         finally:
             self.on_update = previous
