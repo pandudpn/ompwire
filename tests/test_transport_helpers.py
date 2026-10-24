@@ -111,3 +111,26 @@ def test_card_and_change_render_html():
     line = change("model", "old/model", "new/model", "note")
     assert "<s>old/model</s>" in line and "<code>new/model</code>" in line
     assert "note" in line
+
+
+def test_cards_never_put_html_inside_pre():
+    """<pre> is not parsed, so tags there would leak as literal text."""
+    import re
+
+    from ompwire.config import load_config
+    from ompwire.telegram import Transport
+
+    transport = Transport(load_config(env={}))
+    for body in (transport.approval_card("ask"), transport.approval_card("allow", "saved")):
+        for block in re.findall(r"<pre>(.*?)</pre>", body, re.DOTALL):
+            assert "<b>" not in block and "<i>" not in block
+        assert "ask" in body
+
+
+def test_approval_keyboard_marks_current_policy():
+    from ompwire.config import load_config
+    from ompwire.telegram import Transport
+
+    transport = Transport(load_config(env={}))
+    rows = [[button.text for button in row] for row in transport.approval_keyboard("deny").inline_keyboard]
+    assert rows == [["ask"], ["allow"], ["• deny"]]

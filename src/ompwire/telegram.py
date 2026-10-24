@@ -813,15 +813,15 @@ class Transport:
                 pass
         await self.app.bot.send_message(chat_id, text, reply_markup=markup)
 
-    async def _apply_pick(self, agent: ChatAgent, chat_id: int, config_id: str, value: str) -> None:
+    async def _apply_pick(self, agent: ChatAgent, config_id: str, value: str) -> tuple[str, str]:
+        """Set a config option; returns (previous, current) so the caller can render once."""
         previous = self._current(agent, config_id)
         result = await asyncio.to_thread(agent.client.set_config_option, agent.session_id, config_id, value)
         agent.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
         current = self._current(agent, config_id)
-        log.info("config change %s: %s -> %s (chat=%s)", config_id, previous, current, chat_id)
-        if current != previous:
-            await self.announce(chat_id, change(config_id, previous, current,
-                                                f"session {agent.session_id[:8]}"))
+        log.info("config change %s: %s -> %s (session=%s)", config_id, previous, current,
+                 agent.session_id[:8])
+        return previous, current
 
     async def cmd_model(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -852,36 +852,56 @@ class Transport:
         except TelegramError as exc:
             log.warning("notice send failed chat=%s: %s", chat_id, exc)
 
+    def approval_card(self, policy: str, footer: str = "") -> str:
+        timeout = float(self.config.get("approval", "timeout", 120))
+        rows = [
+            ("ask", "buttons in chat, then allow or reject"),
+            ("allow", "every tool call auto-approved"),
+            ("deny", "every tool call auto-rejected"),
+            ("timeout", f"{timeout:.0f}s, then deny"),
+        ]
+        return card("🛡️ approval", f"{policy} · {now_wib()}", rows,
+                    footer or "pick a policy below")
+
+    def approval_keyboard(self, policy: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(("• " if value == policy else "") + value, callback_data=f"ap:{value}")]
+            for value in ("ask", "allow", "deny")
+        ])
+
     async def cmd_approve(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
         chat_id = update.effective_chat.id
         policy = approval_policy(self.config)
         if not ctx.args:
-            rows = [[InlineKeyboardButton(("• " if value == policy else "") + value,
-                                          callback_data=f"ap:{value}")]
-                    for value in ("ask", "allow", "deny")]
-            body = card("🛡️ approval", policy, [
-                ("ask", "buttons in chat, then allow or reject"),
-                ("allow", "every tool call auto-approved"),
-                ("deny", "every tool call auto-rejected"),
-                ("timeout", f"{float(self.config.get('approval', 'timeout', 120)):.0f}s, then deny"),
-            ])
             return await update.effective_message.reply_text(
-                body, reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML
+                self.approval_card(policy), reply_markup=self.approval_keyboard(policy),
+                parse_mode=ParseMode.HTML,
             )
         value = ctx.args[0].lower()
         if value not in {"ask", "allow", "deny"}:
             return await update.effective_message.reply_text("usage: /approve [ask|allow|deny]")
         await self.set_policy(chat_id, value)
 
-    async def set_policy(self, chat_id: int, value: str) -> None:
+    async def set_policy(self, chat_id: int, value: str, anchor: Any = None) -> str:
+        """Persist a new approval policy. Returns changed | unchanged."""
         previous = approval_policy(self.config)
+        if value == previous:
+            log.info("approval.policy unchanged (%s) chat=%s", value, chat_id)
+            return "unchanged"
         self.config.data.setdefault("approval", {})["policy"] = value
         path = save_override("approval", "policy", value)
         log.info("config change approval.policy %s -> %s (persisted to %s)", previous, value, path)
-        await self.announce(chat_id, change("approval.policy", previous, value,
-                                            "ask = buttons · allow = auto-approve · deny = auto-reject"))
+        body = self.approval_card(value, f"saved · {previous} → {value} · persisted")
+        if anchor is not None:
+            try:
+                await anchor.edit_text(body, parse_mode=ParseMode.HTML)
+                return "changed"
+            except BadRequest as exc:
+                log.debug("approval anchor edit failed: %s", exc)
+        await self.announce(chat_id, body)
+        return "changed"
 
     async def cmd_verbose(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -992,8 +1012,9 @@ class Transport:
         agent = self.agent_for(chat_id)
 
         if data.startswith("ap:"):
-            await query.answer()
-            await self.set_policy(chat_id, data.split(":", 1)[1])
+            value = data.split(":", 1)[1]
+            outcome = await self.set_policy(chat_id, value, anchor=query.message)
+            await query.answer("already " + value if outcome == "unchanged" else f"policy: {value}")
             return
 
         if data.startswith("o:"):
@@ -1007,9 +1028,17 @@ class Transport:
                 await agent.ensure()
                 if screen == "s":
                     value = self._values(agent, config_id)[a]
-                    await self._apply_pick(agent, chat_id, config_id, value)
-                    await query.answer(f"{config_id} set")
-                    await query.edit_message_text(f"{config_id} = {value}")
+                    previous, current = await self._apply_pick(agent, config_id, value)
+                    await query.answer(f"{config_id}: {value}")
+                    body = card(
+                        f"⚙️ {config_id}", f"{current} · {now_wib()}",
+                        [("previous", previous), ("session", agent.session_id[:8])],
+                        "selection applied" if current != previous else "already selected",
+                    )
+                    try:
+                        await query.edit_message_text(body, parse_mode=ParseMode.HTML)
+                    except BadRequest as exc:
+                        log.debug("picker edit failed: %s", exc)
                     return
                 if screen == "p":
                     await query.answer()
