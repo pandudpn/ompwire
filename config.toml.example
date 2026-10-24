@@ -20,6 +20,17 @@ mode = ""                  # "" | "default" | "plan"
 approval_mode = "always-ask"       # forwarded to the agent as --approval-mode
 permission_policy = "ask"          # allow | deny | ask (Telegram shows buttons)
 
+[approval]
+# ask   = approval buttons in chat (waits [approval].timeout, then denies)
+# allow = auto-approve every tool call
+# deny  = auto-reject every tool call
+policy = "ask"
+timeout = 120.0
+
+[logging]
+level = "INFO"
+file = "~/.local/state/ompwire/ompwire.log"   # empty = stderr only
+
 [session]
 store = "~/.local/state/ompwire/sessions.db"
 idle_timeout = 1800        # drop the ACP subprocess after this many idle seconds
@@ -28,7 +39,7 @@ idle_timeout = 1800        # drop the ACP subprocess after this many idle second
 enabled = true
 edit_interval = 1.0        # seconds between message edits (Telegram edit-in-place)
 show_tool_calls = true
-show_usage = true
+show_usage = false       # per-turn token line; use /usage instead
 
 [[mcp.servers]]
 # Tools the agent should have for the whole session, passed straight through to

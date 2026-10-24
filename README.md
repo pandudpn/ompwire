@@ -168,7 +168,8 @@ The transport owns session routing, approvals, streaming and cost reporting. Any
 | `/stop` | `session/cancel` |
 | `/status` | transport state: session id, cwd, model/mode/thinking, process age |
 | `/usage` | accumulated `usage_update` frames per session |
-| `/verbose` | toggle `tool_call` frame rendering |
+| `/approve` | show or set the approval policy (`ask` / `allow` / `deny`), persisted to `overrides.json` |
+| `/verbose` | toggle the tool-call trace |
 | `/queue <text>` | harness FIFO, dispatched after the running turn ends |
 | `/steer <text>` | `_session/steering` extension, experimental (see below) |
 | `/cwd <path>` | new session in that directory, old id kept |
@@ -177,6 +178,14 @@ The transport owns session routing, approvals, streaming and cost reporting. Any
 | `/help`, `/whoami` | transport metadata |
 
 `/model`, `/mode` and `/thinking` open inline keyboards rather than printing a list: for the model you pick a provider first (grouped from the `provider/model` id), then page through that provider's models; the current value is marked with a dot. Turns show Telegram's native typing indicator, so no "working…" placeholder is posted into the chat.
+
+### Chat rendering
+
+Agent prose and tool activity are kept apart, because they are different things: the assistant's answer streams into its own message, while tool calls go to a separate `🔧` trace message that is edited in place. `/verbose` toggles the trace. Token usage is not posted per turn (`stream.show_usage = false`); `/usage` reports the running totals for the session.
+
+### Lifecycle
+
+Startup posts what actually came up: ompwire version, agent version, session id, model/mode/thinking, cwd, approval policy, MCP servers, allowed users and the session store path. Shutdown posts uptime and how many agent processes were closed. Every config change is announced with the old and new value, and persisted so a restart keeps it.
 
 ## Queue vs steer
 

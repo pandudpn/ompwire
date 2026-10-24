@@ -7,6 +7,7 @@ which is why every secret key is marked ``secret = true`` in the schema.
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -54,7 +55,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "enabled": True,
         "edit_interval": 1.0,
         "show_tool_calls": True,
-        "show_usage": True,
+        "show_usage": False,  # per-turn token line; /usage covers it on demand
+    },
+    "approval": {
+        "policy": "ask",  # ask | allow | deny
+        "timeout": 120.0,  # seconds to wait for a button before denying
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "",  # empty = stderr only
     },
     "mcp": {
         "servers": [],  # list of {name, command, args, env} passed to session/new
@@ -123,6 +132,27 @@ def find_config_path(explicit: str | Path | None = None) -> Path | None:
     return None
 
 
+OVERRIDES_PATH = Path("~/.local/state/ompwire/overrides.json")
+
+
+def load_overrides(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    target = path or OVERRIDES_PATH.expanduser()
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_override(section: str, key: str, value: Any, path: Path | None = None) -> Path:
+    """Persist a runtime setting without touching the user's annotated config.toml."""
+    target = (path or OVERRIDES_PATH).expanduser()
+    data = load_overrides(target)
+    data.setdefault(section, {})[key] = value
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return target
+
+
 DEFAULT_ENV_PATHS = (
     Path("~/.config/ompwire/.env"),
     Path("~/.ompwire/.env"),
@@ -166,7 +196,8 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
     if path is None and explicit:
         warnings.append(f"config file not found: {explicit} (using defaults + env)")
 
-    merged = _deep_merge(DEFAULTS, file_data)
+    merged = _deep_merge(DEFAULTS, load_overrides())
+    merged = _deep_merge(merged, file_data)
 
     for env_name, (section, key) in ENV_OVERRIDES.items():
         if env_name in env and env[env_name] != "":
@@ -182,6 +213,14 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
     merged["session"]["store"] = str(Path(merged["session"]["store"]).expanduser())
 
     return Config(data=merged, path=path, warnings=warnings)
+
+
+def approval_policy(config: Config) -> str:
+    """Approval policy, honouring the new [approval] section and the old alias."""
+    policy = str(config.get("approval", "policy", "") or "")
+    if policy:
+        return policy
+    return str(config.get("agent", "permission_policy", "ask") or "ask")
 
 
 def config_search_paths() -> list[str]:

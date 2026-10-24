@@ -15,6 +15,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import logging.handlers
+import pathlib
+import signal
 import time
 from collections.abc import Iterable
 from typing import Any
@@ -26,7 +29,8 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
                           MessageHandler, filters)
 
 from .acp import AcpClient, AcpError, Update as AcpUpdate, pick_permission_option
-from .config import Config
+from . import __version__
+from .config import Config, approval_policy, save_override
 from .store import SessionStore
 
 log = logging.getLogger("ompwire.telegram")
@@ -48,7 +52,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("model", "show or set the model"),
     ("mode", "show or set default|plan"),
     ("thinking", "show or set the thinking level"),
-    ("verbose", "toggle tool-call output"),
+    ("approve", "show or set the approval policy"),
+    ("verbose", "toggle tool-call trace"),
     ("skills", "search the agent's own commands and skills"),
     ("queue", "queue a prompt for the next turn"),
     ("steer", "steer the running turn (experimental)"),
@@ -113,8 +118,12 @@ class ChatAgent:
         self.busy = False
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
         self.usage = {"input": 0, "output": 0, "cached": 0, "turns": 0}
+        self.turns = 0
+        self.tools_used = 0
         self.options: dict[str, dict[str, Any]] = {}
         self.mcp_warning = ""
+        self.info: dict[str, Any] = {}
+        self.agent_version = ""
         self.picker: dict[str, Any] = {}
         self.advertised_commands: list[str] = []
         self._updates: asyncio.Queue[AcpUpdate | None] = asyncio.Queue()
@@ -143,7 +152,11 @@ class ChatAgent:
         self.client = self._build_client(yolo=yolo)
         info = await asyncio.to_thread(self.client.initialize)
         agent = info.get("agentInfo") or {}
-        log.info("agent up for %s: %s %s", self.chat_id, agent.get("name"), agent.get("version"))
+        self.agent_version = str(agent.get("version") or "")
+        self.info = info
+        log.info("agent up for %s: %s %s (approval=%s, mcp=%d)", self.chat_id,
+                 agent.get("name"), agent.get("version"),
+                 approval_policy(self.config), len(self._mcp_servers()))
         record = self.store.get(self.key)
         previous = self.client.on_update
         self.client.on_update = None  # session/load replays the transcript
@@ -197,20 +210,25 @@ class ChatAgent:
         self._loop.call_soon_threadsafe(self._updates.put_nowait, update)
 
     def _on_permission(self, params: dict[str, Any]) -> str | None:
-        policy = str(self.config.get("agent", "permission_policy", "ask"))
+        policy = approval_policy(self.config)
+        title = params.get("title") or (params.get("toolCall") or {}).get("title") or "tool call"
         if policy in {"allow", "deny"}:
+            log.info("permission auto-%s chat=%s tool=%s", policy, self.chat_id, title)
             return pick_permission_option(params, policy)
         token = f"perm-{int(time.time() * 1000)}"
         slot: dict[str, Any] = {"optionId": None, "params": params}
         self._pending_perm[token] = slot
         self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._ask_permission(token, params)))
-        deadline = time.time() + PERMISSION_TIMEOUT
+        log.info("permission requested chat=%s tool=%s options=%s", self.chat_id, title,
+                 [o.get("kind") for o in (params.get("options") or [])])
+        deadline = time.time() + float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
         while time.time() < deadline:
             if slot.get("optionId") is not None:
                 self._pending_perm.pop(token, None)
                 return slot["optionId"]
             time.sleep(0.2)
         self._pending_perm.pop(token, None)
+        log.warning("permission timed out chat=%s tool=%s (denied)", self.chat_id, title)
         return None
 
     async def _ask_permission(self, token: str, params: dict[str, Any]) -> None:
@@ -239,43 +257,60 @@ class ChatAgent:
         options = slot["params"].get("options") or []
         if 0 <= index < len(options):
             slot["optionId"] = options[index].get("optionId")
+            log.info("permission answered chat=%s choice=%s", self.chat_id,
+                     options[index].get("kind") or options[index].get("name"))
             return True
         return False
 
     # ------------------------------------------------------------------ turn
     async def ask(self, text: str, message=None) -> str:
         await self.ensure()
-        await self.app.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
         self.busy = True
         self.last_used = time.time()
-        buffer: list[str] = []
+        started = time.time()
+        self.turns += 1
+        log.info("turn start chat=%s session=%s input_chars=%s", self.chat_id,
+                 self.session_id[:8], len(text))
+        text_buffer: list[str] = []
+        tool_buffer: list[str] = []
         sent: list[Any] = []
-        state = {"msg": None, "last_edit": 0.0, "text": ""}
+        state = {"text_msg": None, "tool_msg": None, "last_edit": 0.0, "text": "", "tools": 0}
 
-        async def flush(force: bool = False) -> None:
-            now = time.time()
-            interval = float(self.config.get("stream", "edit_interval", 1.0))
-            joined = "".join(buffer)
+        async def flush_text(force: bool = False) -> None:
+            joined = "".join(text_buffer)
             if not joined.strip():
                 return
+            now = time.time()
+            interval = float(self.config.get("stream", "edit_interval", 1.0))
             if not force and now - state["last_edit"] < interval:
                 return
             state["last_edit"] = now
-            if state["msg"] is None:
-                state["msg"] = await self.app.bot.send_message(self.chat_id, _chunks(joined)[0])
-                sent.append(state["msg"])
-                return
-            if joined == state["text"]:
-                return
-            state["text"] = joined
             parts = _chunks(joined)
-            try:
-                await state["msg"].edit_text(parts[0])
+            if state["text_msg"] is None:
+                state["text_msg"] = await self.app.bot.send_message(self.chat_id, parts[0])
+                sent.append(state["text_msg"])
+            elif joined != state["text"]:
+                try:
+                    await state["text_msg"].edit_text(parts[0])
+                except BadRequest as exc:
+                    if "not modified" not in str(exc).lower():
+                        log.debug("text edit failed: %s", exc)
                 for extra in parts[1:]:
                     sent.append(await self.app.bot.send_message(self.chat_id, extra))
-            except BadRequest as exc:
-                if "not modified" not in str(exc).lower():
-                    log.debug("edit failed: %s", exc)
+            state["text"] = joined
+
+        async def flush_tools() -> None:
+            if not tool_buffer:
+                return
+            body = "\n".join(tool_buffer)[:TELEGRAM_LIMIT]
+            if state["tool_msg"] is None:
+                state["tool_msg"] = await self.app.bot.send_message(self.chat_id, body)
+                sent.append(state["tool_msg"])
+                return
+            try:
+                await state["tool_msg"].edit_text(body)
+            except BadRequest:
+                pass
 
         async def drain() -> None:
             while True:
@@ -283,11 +318,14 @@ class ChatAgent:
                 if update is None:
                     return
                 if update.kind == "agent_message_chunk" and update.text:
-                    buffer.append(update.text)
-                    await flush()
+                    text_buffer.append(update.text)
+                    await flush_text()
                 elif update.kind == "tool_call" and self.verbose:
-                    buffer.append(f"\n_{update.tool_title or 'tool'}_\n")
-                    await flush(force=True)
+                    state["tools"] += 1
+                    self.tools_used += 1
+                    tool_buffer.append(f"🔧 {update.tool_title or 'tool'}")
+                    log.info("tool call chat=%s title=%s", self.chat_id, update.tool_title)
+                    await flush_tools()
 
         drain_task = asyncio.create_task(drain())
         try:
@@ -303,7 +341,8 @@ class ChatAgent:
             raise
         self._updates.put_nowait(None)
         await drain_task
-        await flush(force=True)
+        await flush_text(force=True)
+        await flush_tools()
         self.busy = False
         self.store.touch(self.key)
 
@@ -312,7 +351,11 @@ class ChatAgent:
         self.usage["output"] += int(usage.get("outputTokens") or 0)
         self.usage["cached"] += int(usage.get("cachedReadTokens") or 0)
         self.usage["turns"] += 1
-        anchor = state["msg"] or message
+        log.info("turn end chat=%s stop=%s tools=%s in=%s out=%s cached=%s duration=%.1fs",
+                 self.chat_id, result.stop_reason, state["tools"],
+                 usage.get("inputTokens"), usage.get("outputTokens"),
+                 usage.get("cachedReadTokens"), time.time() - started)
+        anchor = state["text_msg"] or message
         if self.config.get("stream", "show_usage", True) and anchor is not None:
             try:
                 await anchor.reply_text(
@@ -393,6 +436,7 @@ class ChatAgent:
 class Transport:
     def __init__(self, config: Config) -> None:
         self.config = config
+        self.started_at = time.time()
         self.token = str(config.get("telegram", "bot_token", "") or "")
         self.allowed = {int(str(u)) for u in (config.get("telegram", "allowed_users") or []) if str(u).strip()}
         self.agents: dict[int, ChatAgent] = {}
@@ -504,11 +548,12 @@ class Transport:
         thinking = (options.get("thinking") or {}).get("currentValue", "-")
         uptime = int(time.time() - agent.started_at) if alive else 0
         await update.effective_message.reply_text(
-            f"session {agent.session_id[:8] or '-'}\n"
+            f"ompwire {__version__} · session {agent.session_id[:8] or '-'}\n"
             f"cwd {agent.cwd}\n"
             f"model {model} · mode {mode} · thinking {thinking}\n"
             f"process {'alive' if alive else 'stopped'} ({uptime}s) · busy={agent.busy}\n"
-            f"queue {queue.qsize() if queue else 0} · verbose={agent.verbose}"
+            f"queue {queue.qsize() if queue else 0} · verbose={agent.verbose}\n"
+            f"approval {approval_policy(self.config)} · turns {agent.turns} · tools {agent.tools_used}"
         )
 
     async def cmd_usage(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -682,9 +727,14 @@ class Transport:
                 pass
         await self.app.bot.send_message(chat_id, text, reply_markup=markup)
 
-    async def _apply_pick(self, agent: ChatAgent, config_id: str, value: str) -> None:
+    async def _apply_pick(self, agent: ChatAgent, chat_id: int, config_id: str, value: str) -> None:
+        previous = self._current(agent, config_id)
         result = await asyncio.to_thread(agent.client.set_config_option, agent.session_id, config_id, value)
         agent.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
+        current = self._current(agent, config_id)
+        log.info("config change %s: %s -> %s (chat=%s)", config_id, previous, current, chat_id)
+        if current != previous:
+            await self.announce(chat_id, f"{config_id}: {previous} → {current}")
 
     async def cmd_model(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -707,12 +757,46 @@ class Transport:
         await agent.ensure()
         await self._show_config(agent, update.effective_chat.id, "thinking")
 
+    async def announce(self, chat_id: int, line: str) -> None:
+        """Post a one-line status/config notice and mirror it into the log."""
+        log.info("notice chat=%s %s", chat_id, line.replace("\n", " | "))
+        try:
+            await self.app.bot.send_message(chat_id, line)
+        except TelegramError as exc:
+            log.warning("notice send failed chat=%s: %s", chat_id, exc)
+
+    async def cmd_approve(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return await self._deny(update)
+        chat_id = update.effective_chat.id
+        policy = approval_policy(self.config)
+        if not ctx.args:
+            rows = [[InlineKeyboardButton(("• " if value == policy else "") + value,
+                                          callback_data=f"ap:{value}")]
+                    for value in ("ask", "allow", "deny")]
+            return await update.effective_message.reply_text(
+                f"approval: {policy}\nask = buttons · allow = auto-approve · deny = auto-reject",
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+        value = ctx.args[0].lower()
+        if value not in {"ask", "allow", "deny"}:
+            return await update.effective_message.reply_text("usage: /approve [ask|allow|deny]")
+        await self.set_policy(chat_id, value)
+
+    async def set_policy(self, chat_id: int, value: str) -> None:
+        previous = approval_policy(self.config)
+        self.config.data.setdefault("approval", {})["policy"] = value
+        path = save_override("approval", "policy", value)
+        log.info("config change approval.policy %s -> %s (persisted to %s)", previous, value, path)
+        await self.announce(chat_id, f"approval policy: {previous} → {value}")
+
     async def cmd_verbose(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
         agent.verbose = not agent.verbose
-        await update.effective_message.reply_text(f"tool output {'on' if agent.verbose else 'off'}")
+        await self.announce(update.effective_chat.id,
+                           f"tool trace: {'on' if agent.verbose else 'off'}")
 
     async def cmd_skills(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -762,8 +846,10 @@ class Transport:
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
+        log.warning("yolo respawn chat=%s", update.effective_chat.id)
         await agent.respawn(yolo=True)
-        await update.effective_message.reply_text("agent respawned with approvals off. /new to reset, /kill to undo.")
+        await self.announce(update.effective_chat.id,
+                            "agent respawned with --approval-mode=yolo (approvals bypassed) · /new to reset")
 
     async def cmd_kill(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -772,7 +858,8 @@ class Transport:
         if agent.client is not None:
             await asyncio.to_thread(agent.client.close, agent.session_id)
             agent.client = None
-            await update.effective_message.reply_text("agent process stopped")
+            log.info("agent killed by user chat=%s", update.effective_chat.id)
+            await self.announce(update.effective_chat.id, "agent process stopped")
         else:
             await update.effective_message.reply_text("no process running")
 
@@ -797,6 +884,11 @@ class Transport:
         chat_id = update.effective_chat.id
         agent = self.agent_for(chat_id)
 
+        if data.startswith("ap:"):
+            await query.answer()
+            await self.set_policy(chat_id, data.split(":", 1)[1])
+            return
+
         if data.startswith("o:"):
             parts = data.split(":")
             if len(parts) < 3 or parts[1] == "noop":
@@ -808,8 +900,8 @@ class Transport:
                 await agent.ensure()
                 if screen == "s":
                     value = self._values(agent, config_id)[a]
-                    await self._apply_pick(agent, config_id, value)
-                    await query.answer("model set" if config_id == "model" else f"{config_id} set")
+                    await self._apply_pick(agent, chat_id, config_id, value)
+                    await query.answer(f"{config_id} set")
                     await query.edit_message_text(f"{config_id} = {value}")
                     return
                 if screen == "p":
@@ -837,6 +929,14 @@ class Transport:
         except (ValueError, AttributeError):
             await query.answer("bad callback")
 
+    async def log_update(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        message = update.effective_message
+        body = (message.text if message and message.text else "")
+        log.info("update chat=%s user=%s authorized=%s text=%r",
+                 update.effective_chat.id if update.effective_chat else "?",
+                 user.id if user else "?", self._authorized(update), body[:200])
+
     async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("handler failed", exc_info=context.error)
         try:
@@ -862,6 +962,7 @@ class Transport:
         app.add_handler(CommandHandler("model", self.cmd_model))
         app.add_handler(CommandHandler("mode", self.cmd_mode))
         app.add_handler(CommandHandler("thinking", self.cmd_thinking))
+        app.add_handler(CommandHandler("approve", self.cmd_approve))
         app.add_handler(CommandHandler("verbose", self.cmd_verbose))
         app.add_handler(CommandHandler("skills", self.cmd_skills))
         app.add_handler(CommandHandler("queue", self.cmd_queue))
@@ -874,26 +975,94 @@ class Transport:
         app.add_handler(CallbackQueryHandler(self.on_callback))
         app.add_error_handler(self.on_error)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
+        app.add_handler(MessageHandler(filters.ALL, self.log_update), group=-1)
 
         await app.initialize()
         await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
         me = await app.bot.get_me()
         log.info("ompwire online as @%s (allowed users: %s)", me.username, sorted(self.allowed))
-        home = str(self.config.get("telegram", "home_channel", "") or "")
-        if home:
-            try:
-                await app.bot.send_message(int(home), f"ompwire online as @{me.username}")
-            except TelegramError as exc:
-                log.warning("home channel ping failed: %s", exc)
+        await self.startup_banner(str(me.username))
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for signal_name in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(signal_name, stop.set)
+            except (NotImplementedError, RuntimeError):
+                pass
+
         try:
-            await asyncio.Event().wait()
+            await stop.wait()
         finally:
+            await self.shutdown_notice()
             await app.updater.stop()
             await app.stop()
             for agent in self.agents.values():
                 await agent.shutdown()
+
+    def _home_chat(self) -> int | None:
+        home = str(self.config.get("telegram", "home_channel", "") or "")
+        if home.strip():
+            try:
+                return int(home)
+            except ValueError:
+                return None
+        return next(iter(sorted(self.allowed)), None)
+
+    async def startup_banner(self, username: str) -> None:
+        """Say what actually came up, not just that the process started."""
+        chat_id = self._home_chat()
+        if chat_id is None:
+            return
+        lines = [f"ompwire {__version__} online as @{username}"]
+        try:
+            agent = self.agent_for(chat_id)
+            await agent.ensure()
+            info = agent.client.initialize() if not agent.info else agent.info
+        except Exception as exc:  # noqa: BLE001 - a banner must never block startup
+            lines.append(f"agent: failed to start ({exc})")
+            log.warning("startup banner agent probe failed: %s", exc)
+        else:
+            options = getattr(agent, "options", {}) or {}
+            lines += [
+                f"agent: omp {agent.agent_version or '?'} · session {agent.session_id[:8]}",
+                f"model: {(options.get('model') or {}).get('currentValue', '?')}"
+                f" · mode {(options.get('mode') or {}).get('currentValue', '?')}"
+                f" · thinking {(options.get('thinking') or {}).get('currentValue', '-')}",
+                f"cwd: {agent.cwd}",
+            ]
+        servers = [str(s.get("name")) for s in (self.config.get("mcp", "servers") or [])]
+        lines += [
+            f"approval: {approval_policy(self.config)}",
+            f"mcp: {', '.join(servers) if servers else 'none'}",
+            f"allowed users: {', '.join(str(u) for u in sorted(self.allowed))}",
+            f"store: {self.config.get('session', 'store')}",
+        ]
+        body = "\n".join(lines)
+        log.info("startup banner: %s", body.replace("\n", " | "))
+        try:
+            await app_send(self.app, chat_id, body)
+        except TelegramError as exc:
+            log.warning("startup banner send failed: %s", exc)
+
+    async def shutdown_notice(self) -> None:
+        chat_id = self._home_chat()
+        if chat_id is None:
+            return
+        uptime = int(time.time() - self.started_at)
+        active = [cid for cid, a in self.agents.items() if a.client is not None and a.client.alive]
+        body = (f"ompwire stopping · uptime {uptime}s · {len(active)} agent process(es) closed")
+        log.info("shutdown notice: %s", body)
+        try:
+            await app_send(self.app, chat_id, body)
+        except TelegramError as exc:
+            log.warning("shutdown notice send failed: %s", exc)
+
+
+async def app_send(app: Application, chat_id: int, text: str) -> None:
+    await app.bot.send_message(chat_id, text)
 
 
 class _TextOnly:
@@ -907,8 +1076,24 @@ class _TextOnly:
         return await self._message.reply_text(text)
 
 
+def configure_logging(config: Config) -> None:
+    level = getattr(logging, str(config.get("logging", "level", "INFO")).upper(), logging.INFO)
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    target = str(config.get("logging", "file", "") or "")
+    if target:
+        path = pathlib.Path(target).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.handlers.RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3))
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
 def serve(config: Config) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    configure_logging(config)
     transport = Transport(config)
     if not transport.token:
         print("error: TELEGRAM_BOT_TOKEN is not set")
