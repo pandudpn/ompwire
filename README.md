@@ -149,12 +149,20 @@ If a feature needs agent state, it belongs upstream in OMP, not here.
 
 ## Install
 
-One command, on a machine that may not have anything yet:
+One script, `install.sh`, at the repo root. On a machine that may not have anything yet:
 
 ```bash
-gh api repos/pandudpn/ompwire/contents/scripts/install.sh \
-   -H "Accept: application/vnd.github.raw" | sh
+# while the repo is private, go through your own gh auth
+gh api repos/pandudpn/ompwire/contents/install.sh \
+   -H "Accept: application/vnd.github.raw" | bash
+
+# once the repo is public this is enough
+curl -fsSL https://raw.githubusercontent.com/pandudpn/ompwire/main/install.sh | bash
 ```
+
+Flags: `--ref vX.Y.Z` (default: newest release), `--no-setup`, `--no-omp`, `--no-path`,
+`--help`. The same values work as `OMPWIRE_*` environment variables, which matters when
+the script arrives on stdin: `curl … | bash -s -- --ref v0.7.0`.
 
 It installs `omp` if it is missing (official installer, after asking), installs ompwire
 from the newest release tag, **puts `~/.local/bin` on `PATH` for your shell** (zsh, bash,
@@ -170,7 +178,7 @@ From a clone, the same script runs directly:
 ```bash
 git clone https://github.com/pandudpn/ompwire.git
 cd ompwire && uv venv && uv pip install -e '.[dev]'
-./scripts/install.sh          # or skip it and use .venv/bin/ompwire
+./install.sh                  # or skip it and use .venv/bin/ompwire
 ```
 
 Manual install, when you would rather see each step:
@@ -249,6 +257,11 @@ first:
    hidden input, then verified with `getMe` and reported as `token valid: @name`.
    The token is never echoed back and never lands in `config.toml`.
 
+Re-running `ompwire setup` edits the config instead of replacing it: every prompt is
+pre-filled with the value currently on disk, so pressing enter keeps it and typing
+changes one thing. The token is reused without asking while `getMe` still accepts it, and
+`--force` starts over from the agent's defaults when you want a clean rewrite.
+
 `ompwire setup --yes` takes every default without prompting, which is what a
 provisioning script wants. Afterwards: `ompwire doctor`, then `ompwire serve`.
 
@@ -267,6 +280,16 @@ ompwire version           # installed version, commit, and which installer owns 
 `update` inspects how ompwire was installed (uv tool, pipx, or a git checkout) and
 runs the matching command, so the same verb works everywhere. On a checkout it
 prints the `git fetch --tags && git checkout <ref>` line instead of guessing.
+
+A successful update **restarts the gateway**, because a running transport keeps the old
+code in memory and an update that is not picked up is an update that did not happen:
+
+- an active systemd user unit (`ompwire`) is restarted with `systemctl --user restart`;
+- otherwise the transport process is stopped and respawned with the same interpreter
+  line, output going to the configured log file. A shell wrapper (`zsh -lic … | tee`) is
+  not respawned, since that would stack a second `tee`.
+
+`--no-restart` leaves it running. `ompwire restart` does the same thing without updating.
 
 
 ```bash

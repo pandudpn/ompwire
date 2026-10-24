@@ -67,7 +67,7 @@ source = "{mcp_source}"
 hub_path = "{hub_path}"
 
 [approval]
-policy = "{approval}"
+policy = "{approval_policy}"
 
 [logging]
 level = "INFO"
@@ -344,10 +344,10 @@ def provider_of(model: str) -> str:
 
 def pick_provider_and_model(catalog_values: dict[str, Any],
                             logged_in: dict[str, tuple[str, str]],
-                            *, yes: bool) -> str:
+                            *, yes: bool, default_model: str = "") -> str:
     """One step, two answers: a model id is meaningless without its provider."""
     models = [str(model) for model in (catalog_values.get("models") or [])]
-    current = str((catalog_values.get("current") or {}).get("model") or "")
+    current = default_model or str((catalog_values.get("current") or {}).get("model") or "")
     if not models:
         return _ask("model (provider/model)", current, yes=yes)
 
@@ -364,7 +364,7 @@ def pick_provider_and_model(catalog_values: dict[str, Any],
     return model if provider_of(model) else model
 
 
-def _gateway_step(yes: bool, env_file: Path) -> tuple[bool, str]:
+def _gateway_step(yes: bool, env_file: Path, replace_prompt: bool = False) -> tuple[bool, str]:
     """Platform plus the credential that platform needs. Returns (ok, username)."""
     platform = "telegram"
     if not yes:
@@ -380,6 +380,13 @@ def _gateway_step(yes: bool, env_file: Path) -> tuple[bool, str]:
 
     env_values = _existing_env()
     token = env_values.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if token and replace_prompt and not yes:
+        existing_name = bot_identity(token)
+        if existing_name:
+            print(f"ok   telegram token kept: @{existing_name}")
+            if _confirm("     replace the bot token? [y/N]: ") not in ("y", "yes"):
+                return True, existing_name
+            token = ""
     username = ""
     for attempt in range(1, 4):
         if not token:
@@ -401,6 +408,58 @@ def _gateway_step(yes: bool, env_file: Path) -> tuple[bool, str]:
           f"     get one from @BotFather, then either re-run `ompwire setup` or write\n"
           f"     TELEGRAM_BOT_TOKEN=… into {env_file} (chmod 600)")
     return False, ""
+
+
+def existing_settings(config_file: Path) -> dict[str, Any]:
+    """Read the file itself, not the merged view.
+
+    load_config() layers overrides.json and environment variables on top, so asking it
+    what the config says would report a per-chat override as if the user had chosen it.
+    """
+    import tomllib
+
+    if not config_file.is_file():
+        return {}
+    try:
+        data = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    agent = data.get("agent") or {}
+    telegram = data.get("telegram") or {}
+    allowed = []
+    for value in telegram.get("allowed_users") or []:
+        try:
+            allowed.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return {
+        "cwd": str(agent.get("cwd") or ""),
+        "model": str(agent.get("model") or ""),
+        "mode": str(agent.get("mode") or "default"),
+        "thinking": str(agent.get("thinking") or "xhigh"),
+        "yolo": bool(agent.get("yolo", True)),
+        "approval_mode": str(agent.get("approval_mode") or "always-ask"),
+        "approval_policy": str((data.get("approval") or {}).get("policy") or "ask"),
+        "allowed": allowed,
+        "mcp_source": str((data.get("mcp") or {}).get("source") or "none"),
+    }
+
+
+def _summary(settings: dict[str, Any]) -> str:
+    if not settings:
+        return ""
+    parts = []
+    if settings.get("model"):
+        parts.append(str(settings["model"]))
+    parts.append(f"mode={settings.get('mode')}")
+    parts.append(f"thinking={settings.get('thinking')}")
+    parts.append("yolo" if settings.get("yolo")
+                 else f"approval={settings.get('approval_mode')}")
+    if settings.get("cwd"):
+        parts.append(f"cwd={settings['cwd']}")
+    if settings.get("allowed"):
+        parts.append("users=" + ",".join(str(user) for user in settings["allowed"]))
+    return " · ".join(parts)
 
 
 def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) -> int:
@@ -445,47 +504,67 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
             print("warn no provider logged in: the bot starts but cannot answer until you "
                   "run `omp login` or `/login` in the chat")
 
-    config_exists = config_file.is_file() and not force
-    if config_exists:
-        print(f"ok   config kept: {config_file}  (use --force to rewrite)")
-        _next_steps()
-        return 0
+    # an existing config is the starting point, not a wall: every prompt is pre-filled
+    current_settings = {} if force else existing_settings(config_file)
+    if current_settings:
+        print(f"ok   editing {config_file}")
+        print(f"     now: {_summary(current_settings)}")
+        print("     press enter to keep a value, type to change it")
+    elif config_file.is_file():
+        print(f"ok   rewriting {config_file} from defaults (--force)")
 
-    catalog_values = agent_catalog(os.path.expanduser("~"))
-    model = pick_provider_and_model(catalog_values, logged_in, yes=yes)
+    catalog_values = agent_catalog(os.path.expanduser(current_settings.get("cwd") or "~"))
+    current = catalog_values.get("current") or {}
+    model = pick_provider_and_model(
+        catalog_values, logged_in, yes=yes,
+        default_model=str(current_settings.get("model") or current.get("model") or ""),
+    )
 
     # 3. thinking, 4. mode
-    current = catalog_values.get("current") or {}
     thinking = choose("thinking", catalog_values.get("thinking") or [],
-                      str(current.get("thinking") or "xhigh"), yes=yes)
+                      str(current_settings.get("thinking") or current.get("thinking") or "xhigh"),
+                      yes=yes)
     mode = choose("mode", catalog_values.get("modes") or [],
-                  str(current.get("mode") or "default"), yes=yes)
+                  str(current_settings.get("mode") or current.get("mode") or "default"), yes=yes)
 
     # 5. yolo decides whether an approval policy is needed at all
-    yolo_answer = _ask("yolo mode (approvals bypassed)", "yes", yes=yes)
+    yolo_default = "yes" if current_settings.get("yolo", True) else "no"
+    yolo_answer = _ask("yolo mode (approvals bypassed)", yolo_default, yes=yes)
     yolo = yolo_answer.strip().lower() in ("yes", "y", "true", "on", "1")
-    approval = "always-ask"
+    # omp's own vocabulary: always-ask | always-ask-cached | write. Writing "yolo" here
+    # would keep bypassing approvals even after the chat turns yolo off, so it is never
+    # written: the boolean above is the only switch.
+    approval = str(current_settings.get("approval_mode") or "always-ask")
+    if approval == "yolo":
+        approval = "always-ask"
     if not yolo:
-        approval = _ask("approval policy (always-ask|write)", "always-ask", yes=yes)
+        approval = _ask("agent approval mode (always-ask|always-ask-cached|write)", approval,
+                        yes=yes)
+    approval_policy = str(current_settings.get("approval_policy") or "ask")
 
     # 6. working directory
-    cwd = _ask("agent working directory", os.path.expanduser("~"), yes=yes)
+    cwd = _ask("agent working directory",
+               str(current_settings.get("cwd") or os.path.expanduser("~")), yes=yes)
 
     # 7. MCP belongs to omp itself
     print(f"\nmcp: server definitions live in omp itself ({OMP_MCP_FILE})")
     _mcp_wizard(yes)
     hub = Path("~/mcp-hub/servers.yaml").expanduser()
-    mcp_source = "none"
-    if not yes and hub.is_file():
+    mcp_source = str(current_settings.get("mcp_source") or "none")
+    if mcp_source == "mcp-hub":
+        print(f"     merging {hub} at runtime (from the existing config)")
+    elif not yes and hub.is_file():
         if _confirm(f"     merge servers from {hub} at runtime too? [y/N]: ") in ("y", "yes"):
             mcp_source = "mcp-hub"
 
     # 8. gateway: platform, credential, and who may talk to it
-    ok, username = _gateway_step(yes, env_file)
+    ok, username = _gateway_step(yes, env_file, replace_prompt=bool(current_settings))
     if not ok:
         return 1
+    allowed_default = ", ".join(str(user) for user in current_settings.get("allowed") or [])
     allowed = _ask(f"allowed telegram user ids for @{username or 'the bot'} "
-                   "(message @userinfobot to get yours, blank = nobody)", "", yes=yes)
+                   "(message @userinfobot to get yours, blank = nobody)",
+                   allowed_default, yes=yes)
     allowed_list = ", ".join(part.strip() for part in allowed.split(",") if part.strip().isdigit())
     home = allowed_list.split(",")[0].strip() if allowed_list else "0"
     if not allowed_list:
@@ -495,6 +574,7 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
         cwd=cwd, approval=approval, hint=default_hint(), allowed=allowed_list, home=home,
         mcp_source=mcp_source, hub_path=str(hub) if mcp_source == "mcp-hub" else "",
         model=model, mode=mode, thinking=thinking, yolo="true" if yolo else "false",
+        approval_policy=approval_policy,
     )
     config_dir.mkdir(parents=True, exist_ok=True)
     if config_file.is_file():
@@ -503,6 +583,16 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
         print(f"     previous config moved to {backup}")
     config_file.write_text(body, encoding="utf-8")
     print(f"ok   config written: {config_file}")
+    written = {
+        "model": model,
+        "mode": mode,
+        "thinking": thinking,
+        "yolo": yolo,
+        "approval_mode": approval,
+        "cwd": cwd,
+        "allowed": [int(part) for part in allowed_list.split(",") if part.strip()],
+    }
+    print(f"     now: {_summary(written)}")
 
     _next_steps()
     return 0

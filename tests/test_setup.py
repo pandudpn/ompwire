@@ -94,20 +94,101 @@ def test_config_is_written_and_parses(monkeypatch, tmp_path):
     assert "fenced code" in data["agent"]["append_system_prompt"]
 
 
-def test_existing_config_is_kept_unless_forced(monkeypatch, tmp_path, capsys):
+EXISTING = """[agent]
+cwd = "/srv/app"
+model = "anthropic/claude-opus-5"
+mode = "plan"
+thinking = "low"
+yolo = false
+approval_mode = "write"
+
+[approval]
+policy = "deny"
+
+[telegram]
+allowed_users = [42, 43]
+home_channel = 42
+
+[mcp]
+source = "none"
+"""
+
+
+def test_rerunning_setup_prefills_and_keeps_the_existing_values(monkeypatch, tmp_path, capsys):
+    """A second run edits the config; it does not silently replace it."""
     _sandbox(monkeypatch, tmp_path)
     _agent(monkeypatch)
     _token(monkeypatch)
     config = tmp_path / "config.toml"
-    config.write_text('[acp]\ncommand = "mine"\n', encoding="utf-8")
+    config.write_text(EXISTING, encoding="utf-8")
 
-    assert setup.run(yes=True) == 0
-    assert "mine" in config.read_text()
-    assert "config kept" in capsys.readouterr().out
+    assert setup.run(yes=True) == 0                      # yes = accept every current value
+
+    data = tomllib.loads(config.read_text())
+    assert data["agent"]["model"] == "anthropic/claude-opus-5"
+    assert data["agent"]["mode"] == "plan"
+    assert data["agent"]["thinking"] == "low"
+    assert data["agent"]["yolo"] is False
+    assert data["agent"]["approval_mode"] == "write"
+    assert data["approval"]["policy"] == "deny"          # ompwire's own policy, untouched
+    assert data["agent"]["cwd"] == "/srv/app"
+    assert data["telegram"]["allowed_users"] == [42, 43]
+    assert (tmp_path / "config.toml.bak").is_file()
+    out = capsys.readouterr().out
+    assert "editing" in out and "press enter to keep" in out
+
+
+def test_a_typed_answer_replaces_one_value_and_leaves_the_rest(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    _agent(monkeypatch)
+    _token(monkeypatch)
+    config = tmp_path / "config.toml"
+    config.write_text(EXISTING, encoding="utf-8")
+
+    def answer(prompt: str, default: str, *, yes: bool = False) -> str:
+        if prompt.startswith("allowed telegram user ids"):
+            return "99"
+        return default
+
+    monkeypatch.setattr(setup, "_ask", answer)
+    monkeypatch.setattr(setup, "choose",
+                        lambda prompt, choices, default, **kwargs: "high" if prompt == "thinking"
+                        else default)
+
+    assert setup.run(yes=False) == 0
+    data = tomllib.loads(config.read_text())
+    assert data["agent"]["thinking"] == "high"           # changed
+    assert data["agent"]["model"] == "anthropic/claude-opus-5"   # kept
+    assert data["agent"]["mode"] == "plan"               # kept
+    assert data["telegram"]["allowed_users"] == [99]     # changed
+
+
+def test_force_starts_from_the_agent_defaults_instead_of_the_file(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    _agent(monkeypatch)
+    _token(monkeypatch)
+    config = tmp_path / "config.toml"
+    config.write_text(EXISTING, encoding="utf-8")
 
     assert setup.run(yes=True, force=True) == 0
-    assert (tmp_path / "config.toml.bak").is_file()
-    assert "mine" not in config.read_text()
+    data = tomllib.loads(config.read_text())
+    assert data["agent"]["model"] == "zai/glm-5.1"       # the agent's current model
+    assert data["agent"]["yolo"] is True
+    assert data["telegram"]["allowed_users"] == []
+
+
+def test_an_existing_token_is_kept_without_asking(monkeypatch, tmp_path, capsys):
+    _sandbox(monkeypatch, tmp_path)
+    _agent(monkeypatch)
+    _answers(monkeypatch)
+    (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=999:abc\n", encoding="utf-8")
+    monkeypatch.setattr(setup, "bot_identity", lambda token, timeout=10.0: "kept_bot")
+    monkeypatch.setattr(setup, "_ask_secret", lambda prompt, yes: (_ for _ in ()).throw(
+        AssertionError("must not ask for a token that already works")), raising=False)
+
+    assert setup.run(yes=True) == 0
+    assert "999:abc" in (tmp_path / ".env").read_text()
+    assert "token valid: @kept_bot" in capsys.readouterr().out
 
 
 def test_token_goes_to_env_with_0600_and_is_verified(monkeypatch, tmp_path, capsys):
@@ -186,7 +267,7 @@ def test_approval_policy_is_asked_when_yolo_is_off(monkeypatch, tmp_path):
         asked.append(prompt)
         if "yolo mode" in prompt:
             return "no"
-        if "approval policy" in prompt:
+        if "agent approval mode" in prompt:
             return "write"
         return default
 
@@ -196,8 +277,9 @@ def test_approval_policy_is_asked_when_yolo_is_off(monkeypatch, tmp_path):
     assert setup.run(yes=False) == 0
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert data["agent"]["yolo"] is False
-    assert data["approval"]["policy"] == "write"
-    assert any("approval policy" in prompt for prompt in asked)
+    assert data["agent"]["approval_mode"] == "write"
+    assert data["approval"]["policy"] == "ask"           # ompwire's own policy, separate
+    assert any("agent approval mode" in prompt for prompt in asked)
 
 
 def test_yolo_on_skips_the_approval_question(monkeypatch, tmp_path):
@@ -214,7 +296,9 @@ def test_yolo_on_skips_the_approval_question(monkeypatch, tmp_path):
     monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
 
     assert setup.run(yes=False) == 0
-    assert not any("approval policy" in prompt for prompt in asked)
+    assert not any("agent approval mode" in prompt for prompt in asked)
+    data = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert data["agent"]["approval_mode"] == "always-ask"   # fallback, never "yolo"
 
 
 def test_missing_provider_warns_but_does_not_block(monkeypatch, tmp_path, capsys):

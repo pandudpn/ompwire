@@ -143,7 +143,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_update(args: argparse.Namespace) -> int:
     from .update import run
 
-    return run(edge=args.edge, check=args.check, force=args.force)
+    return run(edge=args.edge, check=args.check, force=args.force,
+               restart=not args.no_restart)
+
+
+def cmd_restart(_args: argparse.Namespace) -> int:
+    from .update import restart_gateway
+
+    print(f"gateway: {restart_gateway()}")
+    return 0
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -204,7 +212,8 @@ common flows:
   ompwire doctor                    verify agent, session store and bot token
   ompwire serve                     run the Telegram transport
   ompwire chat                      chat with the agent from this terminal
-  ompwire update [--edge]           newest release, or the tip of main
+  ompwire update [--edge]           newest release, or the tip of main (restarts the gateway)
+  ompwire restart                   restart the gateway without updating
   ompwire uninstall --dry-run       see what uninstalling would remove
 
 config: ~/.config/ompwire/config.toml (+ .env for the bot token)
@@ -272,6 +281,8 @@ def build_parser() -> argparse.ArgumentParser:
     upd.add_argument("--stable", action="store_true", help="track the newest release (default)")
     upd.add_argument("--check", action="store_true", help="report what an update would do")
     upd.add_argument("--force", action="store_true", help="for a source checkout, run git checkout")
+    upd.add_argument("--no-restart", action="store_true",
+                     help="leave a running gateway alone instead of restarting it")
     upd.set_defaults(func=cmd_update)
 
     setup = _sub(sub, "setup", "check for omp, then write config and .env",
@@ -295,6 +306,12 @@ def build_parser() -> argparse.ArgumentParser:
     un.add_argument("--force", action="store_true",
                     help="stop a running `ompwire serve` before removing")
     un.set_defaults(func=cmd_uninstall)
+
+    rst = _sub(sub, "restart", "restart a running gateway so new code is used",
+               "Restarts the systemd user unit when it is active, otherwise respawns the "
+               "transport process it finds.",
+               "  ompwire restart")
+    rst.set_defaults(func=cmd_restart)
 
     scrub = _sub(sub, "scrub-logs", "replace bot tokens already written to a log file",
                  "New log lines are redacted as they are written; this cleans files written "

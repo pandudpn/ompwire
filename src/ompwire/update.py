@@ -8,11 +8,15 @@ command decides how: uv tool, pipx, or a plain checkout that pulls.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+
 REPO = "pandudpn/ompwire"
 GIT_URL = f"git+https://github.com/{REPO}.git"
 PACKAGE = "ompwire"
@@ -143,8 +147,6 @@ def install_mode() -> str:
                 return "pipx"
         except (OSError, subprocess.SubprocessError):
             pass
-    from pathlib import Path
-
     if (Path(_checkout_root()) / ".git").is_dir():
         return "checkout"
     return "unknown"
@@ -159,7 +161,127 @@ def _command_for(mode: str, ref: str) -> list[str]:
     return []
 
 
-def run(*, edge: bool = False, check: bool = False, force: bool = False) -> int:
+SYSTEMD_UNIT = "ompwire"
+
+
+def serving_processes() -> list[tuple[int, str]]:
+    from .uninstall import running_serves
+
+    return running_serves()
+
+
+def _systemd_active() -> bool:
+    try:
+        result = subprocess.run(["systemctl", "--user", "is-active", SYSTEMD_UNIT],
+                                capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.stdout.strip() == "active"
+
+
+def _argv_of(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode() for part in raw.split(b"\0") if part]
+
+
+def _cwd_of(pid: int) -> str | None:
+    try:
+        return str(Path(f"/proc/{pid}/cwd").resolve())
+    except OSError:
+        return None
+
+
+def _transport_command(pid: int, command: str) -> list[str]:
+    """The command to respawn.
+
+    A shell wrapper (`zsh -lic ... | tee`) is not what should come back: respawning it
+    would stack a second tee. The interpreter line that actually runs the transport is.
+    """
+    argv = _argv_of(pid)
+    if not argv:
+        return []
+    if argv[0].endswith(("python", "python3")) or "python" in Path(argv[0]).name:
+        return argv
+    for index, part in enumerate(argv):
+        if part.endswith("ompwire") and index + 1 < len(argv) and argv[index + 1] == "serve":
+            return argv[index:]
+    return argv if "serve" in command else []
+
+
+def restart_gateway(timeout: float = 20.0) -> str:
+    """Restart a running transport so an update actually takes effect."""
+    if _systemd_active():
+        try:
+            result = subprocess.run(["systemctl", "--user", "restart", SYSTEMD_UNIT],
+                                    capture_output=True, text=True, timeout=120, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"systemd restart failed: {exc}"
+        return ("restarted via systemd" if result.returncode == 0
+                else f"systemd restart exited {result.returncode}")
+
+    serves = serving_processes()
+    if not serves:
+        return "no transport running, nothing to restart"
+
+    from .config import load_config
+
+    try:
+        log_target = str(load_config().get("logging", "file", "") or "")
+    except Exception:  # noqa: BLE001 - a broken config must not block a restart
+        log_target = ""
+    log_path = Path(log_target).expanduser() if log_target else None
+
+    restarted: list[int] = []
+    problems: list[str] = []
+    deepest = max(serves, key=lambda item: len(_argv_of(item[0])))
+    planned = _transport_command(deepest[0], deepest[1])
+
+    for pid, _command in serves:
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            continue
+    deadline = time.time() + timeout
+    for pid, _command in serves:
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+
+    if not planned:
+        return "stopped the transport but could not tell how to start it again"
+
+    stream = subprocess.DEVNULL
+    handle = None
+    if log_path is not None:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 - lives with the child
+            stream = handle
+        except OSError:
+            stream = subprocess.DEVNULL
+    try:
+        child = subprocess.Popen(planned, cwd=_cwd_of(deepest[0]) or None, stdin=subprocess.DEVNULL,
+                                 stdout=stream, stderr=stream, start_new_session=True)
+        restarted.append(child.pid)
+    except (OSError, subprocess.SubprocessError) as exc:
+        problems.append(str(exc))
+    finally:
+        if handle is not None:
+            handle.close()
+
+    if restarted:
+        return f"restarted (pid {', '.join(str(pid) for pid in restarted)})"
+    return "stopped the transport but respawn failed: " + "; ".join(problems)
+
+
+def run(*, edge: bool = False, check: bool = False, force: bool = False,
+        restart: bool = True) -> int:
     mode = install_mode()
     ref, description = latest_edge() if edge else latest_stable()
     channel = EDGE if edge else STABLE
@@ -177,7 +299,12 @@ def run(*, edge: bool = False, check: bool = False, force: bool = False) -> int:
     if mode == "checkout":
         print(f"\nthis is a source checkout, so update it with git:\n"
               f"  git -C {_checkout_root()} fetch --tags && git -C {_checkout_root()} checkout {ref}")
-        return _git_checkout(ref) if force else 0
+        if not force:
+            return 0
+        code = _git_checkout(ref)
+        if code == 0 and restart:
+            print(f"gateway   : {restart_gateway()}")
+        return code
 
     command = _command_for(mode, ref)
     if not command:
@@ -194,7 +321,11 @@ def run(*, edge: bool = False, check: bool = False, force: bool = False) -> int:
     if result.returncode != 0:
         print(f"update failed with exit code {result.returncode}", file=sys.stderr)
         return result.returncode
-    print(f"\nupdated to {ref}. Restart the transport to pick it up:  ompwire serve")
+    print(f"\nupdated to {ref}.")
+    if restart:
+        print(f"gateway   : {restart_gateway()}")
+    else:
+        print("gateway   : left running (--no-restart). Restart it with: ompwire restart")
     return 0
 
 
