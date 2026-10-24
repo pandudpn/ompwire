@@ -718,11 +718,13 @@ class ChatAgent:
                     timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
                 )
         except AcpError:
-            self._updates.put_nowait(None)
+            # scheduled, not immediate: the sentinel must queue behind updates the reader thread
+            # has already handed to the loop, or the last of a turn is dropped
+            self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
             await drain_task
             self.busy = False
             raise
-        self._updates.put_nowait(None)
+        self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
         await drain_task
         await flush_reasoning(force=True)
         await flush_text(force=True)
