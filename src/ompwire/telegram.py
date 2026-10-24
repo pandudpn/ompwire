@@ -66,7 +66,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("thinking", "show or set the thinking level"),
     ("approve", "show or set the approval policy"),
     ("verbose", "toggle tool-call trace"),
-    ("skills", "search the agent's own commands and skills"),
+    ("commands", "search the agent's own slash commands"),
     ("queue", "queue a prompt for the next turn"),
     ("steer", "steer the running turn (experimental)"),
     ("yolo", "respawn the agent with approvals off"),
@@ -98,6 +98,18 @@ FORWARD_HINT = (
     "Everything else is sent to the agent as a prompt. Its own commands work here, "
     "including /skill:<name> and /compact."
 )
+
+
+def _unique_commands() -> list[tuple[str, str]]:
+    """Telegram rejects a duplicate command name, so the menu is deduped."""
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for name, description in COMMANDS:
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append((name, description))
+    return out
 
 
 def _chunks(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
@@ -1597,7 +1609,7 @@ class Transport:
         app.add_handler(MessageHandler(filters.ALL, self.log_update), group=-1)
 
         await app.initialize()
-        await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
+        await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in _unique_commands()])
         me = await app.bot.get_me()
         log.info("ompwire online as @%s (allowed users: %s)", me.username, sorted(self.allowed))
         await self.startup_banner(str(me.username))
