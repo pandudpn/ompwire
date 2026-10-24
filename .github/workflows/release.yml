@@ -143,7 +143,11 @@ jobs:
       - name: pytest
         run: python -m pytest -q
       - name: The tag still matches the files it ships
-        run: python -m scripts.release.version check "${{ needs.prepare.outputs.tag }}"
+        # Through the environment, never interpolated into the script: an expression inside a
+        # run block is text the shell will execute, and a tag is a name someone else can push.
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: python -m scripts.release.version check "$TAG"
 
   install-smoke:
     name: The tag installs the way a user installs it
