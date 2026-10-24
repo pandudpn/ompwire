@@ -149,20 +149,15 @@ If a feature needs agent state, it belongs upstream in OMP, not here.
 
 ## Install
 
-One script, `install.sh`, at the repo root. On a machine that may not have anything yet:
+One script, `install.sh`, at the repo root:
 
 ```bash
-# while the repo is private, go through your own gh auth
-gh api repos/pandudpn/ompwire/contents/install.sh \
-   -H "Accept: application/vnd.github.raw" | bash
-
-# once the repo is public this is enough
 curl -fsSL https://raw.githubusercontent.com/pandudpn/ompwire/main/install.sh | bash
 ```
 
 Flags: `--ref vX.Y.Z` (default: newest release), `--no-setup`, `--no-omp`, `--no-path`,
-`--help`. The same values work as `OMPWIRE_*` environment variables, which matters when
-the script arrives on stdin: `curl … | bash -s -- --ref v0.7.0`.
+`--help`. The same values work as `OMPWIRE_*` environment variables, which is how they
+are passed when the script arrives on stdin: `curl … | bash -s -- --ref v0.7.0`.
 
 It installs `omp` if it is missing (official installer, after asking), installs ompwire
 from the newest release tag, **puts `~/.local/bin` on `PATH` for your shell** (zsh, bash,
@@ -170,8 +165,8 @@ fish or plain sh — one guarded line, written once), and hands over to `ompwire
 `ompwire` works in the next shell without a manual `export`. Set `OMPWIRE_NO_PATH_EDIT=1`
 to leave your shell config alone.
 
-The repo is private, so the entry point goes through your own `gh` auth instead of an
-anonymous `curl`.
+Nothing is fetched from anywhere else, and the script runs read-only inspection of your
+machine until it decides what to install.
 
 From a clone, the same script runs directly:
 
@@ -304,8 +299,8 @@ Verify the wire before using it:
 
 ```bash
 $ ompwire doctor
-ok   agent command: /home/pandu/.local/bin/omp
-ok   session store writable: /home/pandu/.local/state/ompwire/sessions.db
+ok   agent command: /home/you/.local/bin/omp
+ok   session store writable: /home/you/.local/state/ompwire/sessions.db
 ok   ACP handshake: omp 18.12.6 (protocol 1)
      capabilities: loadSession=True sessions=['close', 'fork', 'list', 'resume']
 ok   session/new: 01a16c3e · config options ['mode', 'model', 'thinking']
@@ -353,7 +348,7 @@ A resumed turn looks like this. The process is new, the conversation is not:
 
 ```
 $ ompwire chat -q "what did I ask you to remember?"
-ompwire · omp 18.12.6 · session resumed 01a16c3e · cwd /home/pandu
+ompwire · omp 18.12.6 · session resumed 01a16c3e · cwd /home/you
 OMPWIRE-OK
   [turn] end_turn · in 114 out 7 cached 45952
 ```

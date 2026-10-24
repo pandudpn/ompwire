@@ -3,12 +3,6 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/pandudpn/ompwire/main/install.sh | bash
 #
-# The repo is private today, so the anonymous curl above needs the repo to be public.
-# Until then either pipe it through gh auth:
-#
-#   gh api repos/pandudpn/ompwire/contents/install.sh \
-#      -H "Accept: application/vnd.github.raw" | bash
-#
 # or run it from a clone:  ./install.sh
 #
 # Flags:
@@ -23,7 +17,7 @@
 set -eu
 
 usage() {
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do

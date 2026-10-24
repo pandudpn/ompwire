@@ -66,7 +66,7 @@ exclude = []      # names to leave out
 # Patch one hub entry without editing the shared hub file, e.g. point a server at
 # a working binary when its npx cache is broken:
 # [mcp.overrides.mongo-nonprod]
-# command = "/home/pandu/.local/share/ompwire/mcp/mongo/node_modules/.bin/mongodb-mcp-server"
+# command = "/home/you/.local/share/ompwire/mcp/mongo/node_modules/.bin/mongodb-mcp-server"
 # args = []
 
 [[mcp.servers]]

@@ -96,9 +96,9 @@ def test_uptime_is_compact():
 def test_grid_pads_labels_and_escapes_values():
     from ompwire.format import grid
 
-    block = grid([("cwd", "/home/pandu"), ("model", "a<b")])
+    block = grid([("cwd", "/home/you"), ("model", "a<b")])
     assert block.startswith("<pre>") and block.endswith("</pre>")
-    assert "cwd    /home/pandu" in block
+    assert "cwd    /home/you" in block
     assert "a&lt;b" in block
 
 
