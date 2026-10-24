@@ -67,12 +67,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     for warning in config.warnings:
         print(f"warn: {warning}", file=sys.stderr)
-    from .setup import agent_path
-
-    command = str(config.get("acp", "command", "omp"))
-    if agent_path(command) is None:
-        print(f"FAIL agent not found: {command}. Run `ompwire setup` first.", file=sys.stderr)
-        return 1
 
     try:
         gateway = gateways.selected(config, args.gateway)
@@ -82,6 +76,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if not gateway.implemented:
         print(f"FAIL the {gateway.kind!r} transport is not implemented yet; "
               f"`ompwire gateway list` shows what can run today", file=sys.stderr)
+        return 1
+
+    # the agent comes after the gateway: a mistyped gateway name is the question the
+    # user just asked, so answer that before complaining about something else
+    from .setup import agent_path
+
+    command = str(config.get("acp", "command", "omp"))
+    if agent_path(command) is None:
+        print(f"FAIL agent not found: {command}. Run `ompwire setup` first.", file=sys.stderr)
         return 1
     gateways.apply(config, gateway)
     if not str(config.get("telegram", "bot_token", "") or ""):
