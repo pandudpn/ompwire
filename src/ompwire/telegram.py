@@ -127,8 +127,11 @@ class ChatAgent:
     def _build_client(self, yolo: bool = False) -> AcpClient:
         args = list(self.config.get("acp", "args") or ["--mode", "acp"])
         approval = "yolo" if (yolo or self.yolo) else str(self.config.get("agent", "approval_mode", ""))
+        hint = str(self.config.get("agent", "append_system_prompt", "") or "").strip()
         if approval:
             args.append(f"--approval-mode={approval}")
+        if hint:
+            args += ["--append-system-prompt", hint]
         return AcpClient(
             command=str(self.config.get("acp", "command", "omp")),
             args=args,

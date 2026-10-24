@@ -219,3 +219,37 @@ def test_tool_block_escapes_html_in_output():
 
     body = tool_block("execute", "", command="echo '<b>'", output="<b>x</b>")
     assert "&lt;b&gt;" in body
+
+
+def test_chat_formatting_hint_is_forwarded_to_the_agent():
+    """Without the hint the model writes commands inline; omp needs to be told."""
+    from ompwire.config import load_config
+    from ompwire.telegram import ChatAgent
+
+    config = load_config(env={})
+    agent = ChatAgent.__new__(ChatAgent)
+    agent.config = config
+    agent.cwd = "/tmp"
+    agent.yolo = False
+    agent._on_update = None
+    agent._on_permission = None
+    client = ChatAgent._build_client(agent)
+    args = client.args
+    assert "--append-system-prompt" in args
+    hint = args[args.index("--append-system-prompt") + 1]
+    assert "fenced code" in hint
+
+
+def test_hint_can_be_disabled():
+    from ompwire.config import load_config
+    from ompwire.telegram import ChatAgent
+
+    config = load_config(env={})
+    config.data.setdefault("agent", {})["append_system_prompt"] = ""
+    agent = ChatAgent.__new__(ChatAgent)
+    agent.config = config
+    agent.cwd = "/tmp"
+    agent.yolo = False
+    agent._on_update = None
+    agent._on_permission = None
+    assert "--append-system-prompt" not in ChatAgent._build_client(agent).args

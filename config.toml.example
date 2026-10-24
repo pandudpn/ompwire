@@ -20,8 +20,20 @@ mode = ""                  # "" | "default" | "plan"
 approval_mode = "always-ask"       # forwarded to the agent as --approval-mode
 permission_policy = "ask"          # allow | deny | ask (Telegram shows buttons)
 
+[agent]
+# omp does not know it is answering inside a chat window, and on its own it writes
+# commands inline. This hint is what makes replies render as code blocks.
+append_system_prompt = """You are answering inside a Telegram chat. Format every reply as markdown: put shell commands, file paths, diffs and multi-line output inside fenced code blocks with a language tag, use short paragraphs and bullets, and never paste raw tables where a short list reads better. Keep prose tight."""
+# Set to "" to send omp's prompt untouched.
+
 [approval]
-# ask   = approval buttons in chat (waits [approval].timeout, then denies)
+# ask   = approval buttons in chat (waits [agent]
+# omp does not know it is answering inside a chat window, and on its own it writes
+# commands inline. This hint is what makes replies render as code blocks.
+append_system_prompt = """You are answering inside a Telegram chat. Format every reply as markdown: put shell commands, file paths, diffs and multi-line output inside fenced code blocks with a language tag, use short paragraphs and bullets, and never paste raw tables where a short list reads better. Keep prose tight."""
+# Set to "" to send omp's prompt untouched.
+
+[approval].timeout, then denies)
 # allow = auto-approve every tool call
 # deny  = auto-reject every tool call
 policy = "ask"

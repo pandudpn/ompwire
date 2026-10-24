@@ -43,7 +43,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "cwd": "~",
         "model": "",  # empty => whatever the ACP session defaults to
         "mode": "",  # default | plan
-        "approval_mode": "always-ask",  # forwarded as --approval-mode when set
+        "approval_mode": "always-ask",
+        # omp has no idea it is talking through a chat window, and its default voice
+        # leaves commands inline. This hint is what makes replies render as code.
+        "append_system_prompt": (
+            "You are answering inside a Telegram chat. Format every reply as markdown: "
+            "put shell commands, file paths, diffs and multi-line output inside fenced code "
+            "blocks with a language tag, use short paragraphs and bullets, and never paste "
+            "raw tables where a short list reads better. Keep prose tight."
+        ),  # forwarded as --approval-mode when set
         "permission_policy": "ask",  # allow | deny | ask
         "extra_instructions": "",
     },

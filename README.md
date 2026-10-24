@@ -192,6 +192,10 @@ Agent prose and tool activity are kept apart, because they are different things.
 - Session changes (`/new`, `/fork`, `/resume`, `/cwd`) answer with a card showing session id, model, mode, thinking level, approval policy, yolo state and cwd.
 - Token usage is not posted per turn (`stream.show_usage = false`); `/usage` reports the session totals.
 
+### Formatting comes from the prompt, not from luck
+
+omp does not know it is writing into a chat window, and left alone it emits commands inline. ompwire appends a short system prompt (`agent.append_system_prompt`) telling it to use fenced code blocks with language tags, short paragraphs and bullets. Set it to `""` to send omp's prompt untouched. Verified on a live turn: without the hint the reply had no fence, with it the reply came back as a `bash` block.
+
 ### Lifecycle
 
 Startup posts what actually came up: ompwire version, agent version, session id, model/mode/thinking, cwd, approval policy, MCP servers, allowed users and the session store path. Shutdown posts uptime and how many agent processes were closed. Every config change is announced with the old and new value, and persisted so a restart keeps it.
