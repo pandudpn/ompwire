@@ -201,6 +201,20 @@ Two lists come straight from omp, so they cannot drift from it:
 - **`/login`** reads omp's own login menu and marks the entries that already hold credentials (`omp auth export`, provider names only, never the secrets). Ten per page, two columns, like the model picker. Tapping a provider starts `omp login` on a pty; when the OAuth URL appears it is posted with a button, and once omp asks for the authorization code the next message typed into the chat is forwarded to it. Providers without a known CLI id are selected through omp's numbered menu instead.
 - **`/skills`** lists every `SKILL.md` omp can load, ten per page. Tapping one sends its body rendered as markdown, clipped with a pointer to the file when it is long.
 
+### Answers as buttons
+
+omp's `ask` tool is interactive-mode only, so an ACP session cannot pop up a
+picker. The transport asks the model to end a question with
+
+```
+<<options: postgres | mysql | sqlite>>
+```
+
+The marker is stripped from the message and turned into one button per option
+plus **Other answer**, which simply invites free text; the chosen text is sent as
+the next prompt. Without the marker everything behaves as before, so a forgotten
+marker costs nothing.
+
 ### Formatting comes from the prompt, not from luck
 
 omp does not know it is writing into a chat window, and left alone it emits commands inline. ompwire appends a short system prompt (`agent.append_system_prompt`) telling it to use fenced code blocks with language tags, short paragraphs and bullets. Set it to `""` to send omp's prompt untouched. Verified on a live turn: without the hint the reply had no fence, with it the reply came back as a `bash` block.

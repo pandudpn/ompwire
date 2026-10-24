@@ -39,6 +39,7 @@ from .login import LoginSession
 from .mcp_hub import hub_servers, merge_entry as merge_mcp_entry, normalize
 from .mdrender import (split_blocks, strip_agent_noise, strip_html, to_html,
                        to_plain)
+from .questions import extract as extract_options, hide_partial
 from .format import uptime as fmt_uptime
 from .store import SessionStore
 
@@ -152,6 +153,7 @@ class ChatAgent:
         self.session_id = ""
         self.cwd = str(config.get("agent", "cwd") or "~")
         self.started_at = time.time()
+        self.pending_options: list[str] = []
         self.last_used = time.time()
         self.busy = False
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
@@ -350,6 +352,21 @@ class ChatAgent:
         except TelegramError as exc:
             log.warning("could not send approval prompt: %s", exc)
 
+    async def offer_options(self, options: list[str], chat_id: int | None = None) -> None:
+        """Buttons for the answers the agent offered, plus a free-text escape hatch."""
+        target = chat_id or self.chat_id
+        self.pending_options = options
+        rows = [[InlineKeyboardButton(option[:60], callback_data=f"qo:{index}")]
+                for index, option in enumerate(options)]
+        rows.append([InlineKeyboardButton("✏️ Other answer", callback_data="qo:other")])
+        log.info("question offered chat=%s options=%s", target, options)
+        await self.app.bot.send_message(
+            target,
+            card("❓ pick an answer", "tap one, or choose Other and just type it", [],
+                 "the chosen text is sent as your next message"),
+            reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
+        )
+
     async def handle_permission_callback(self, token: str, index: int) -> str | None:
         """Record the user's choice, then rewrite the prompt into the decision."""
         slot = self._pending_perm.get(token)
@@ -390,6 +407,8 @@ class ChatAgent:
                 await message.edit_text(body, parse_mode=ParseMode.HTML)
             except BadRequest:
                 pass
+            except Exception as exc:  # noqa: BLE001 - expiry must never crash the loop
+                log.debug("could not rewrite the expired approval prompt: %s", exc)
 
     # ------------------------------------------------------------------ turn
     async def ask(self, text: str, message=None, images: list[dict[str, Any]] | None = None) -> str:
@@ -414,6 +433,9 @@ class ChatAgent:
             if not force and now - state["last_edit"] < interval:
                 return
             state["last_edit"] = now
+            joined = hide_partial(joined, final=force)
+            if not joined.strip():
+                return
             parts = _chunks(joined, 3600)
             if state["text_msg"] is None:
                 state["text_msg"] = await self.send_md(parts[0])
@@ -423,6 +445,10 @@ class ChatAgent:
                 for extra in parts[1:]:
                     sent.append(await self.send_md(extra))
             state["text"] = joined
+            if force:
+                _, options = extract_options("".join(text_buffer))
+                if options:
+                    await self.offer_options(options)
 
         async def flush_tools() -> None:
             if not trace:
@@ -1490,6 +1516,34 @@ class Transport:
         data = str(query.data or "")
         chat_id = update.effective_chat.id
         agent = self.agent_for(chat_id)
+
+        if data.startswith("qo:"):
+            agent = self.agent_for(chat_id)
+            choice = data.split(":", 1)[1]
+            if choice == "other":
+                await query.answer("type your answer")
+                await self.app.bot.send_message(
+                    chat_id, "✏️ go ahead, type your answer — it goes straight to the agent.")
+                return
+            try:
+                answer = agent.pending_options[int(choice)]
+            except (ValueError, IndexError):
+                await query.answer("that option expired")
+                return
+            await query.answer("sent")
+            agent.pending_options = []
+            log.info("question answered chat=%s answer=%r", chat_id, answer)
+            try:
+                await query.edit_message_text(
+                    card("❓ answer sent", answer, [], "waiting for the agent"), parse_mode=ParseMode.HTML)
+            except BadRequest:
+                pass
+            if agent.busy:
+                depth = self.enqueue(chat_id, "prompt", _TextOnly(answer, query.message))
+                await self.app.bot.send_message(chat_id, f"queued (position {depth})")
+            else:
+                self.enqueue(chat_id, "prompt", _TextOnly(answer, query.message))
+            return
 
         if data.startswith("skv:"):
             await query.answer()

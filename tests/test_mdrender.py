@@ -119,3 +119,53 @@ def test_split_blocks_keeps_a_table_together():
     table_chunk = next(c for c in chunks if "| a |" in c)
     assert "| 1 | 2 |" in table_chunk            # header and body stayed together
     assert "<pre>" in to_html(table_chunk)
+
+
+def test_options_marker_is_extracted_and_hidden():
+    from ompwire.questions import extract, hide_partial
+
+    text = "Which database should we use?\n\n<<options: postgres | mysql | sqlite>>"
+    cleaned, options = extract(text)
+    assert cleaned == "Which database should we use?"
+    assert options == ["postgres", "mysql", "sqlite"]
+
+    assert extract("no marker here") == ("no marker here", [])
+    assert hide_partial("pick one <<options: a | b", final=False) == "pick one"
+    assert hide_partial("done", final=True) == "done"
+
+
+def test_options_are_deduped_and_capped():
+    from ompwire.questions import extract
+
+    many = " | ".join(f"o{i}" for i in range(12))
+    _, options = extract(f"q <<options: {many}>>")
+    assert len(options) == 6
+    _, deduped = extract("q <<options: a | a | b>>")
+    assert deduped == ["a", "b"]
+
+
+def test_options_card_has_a_free_text_button():
+    import asyncio
+    from types import SimpleNamespace
+
+    from ompwire.config import load_config
+    from ompwire.telegram import ChatAgent
+
+    sent = {}
+
+    async def fake_send_message(chat_id, text, reply_markup=None, **kwargs):
+        sent["text"], sent["kb"] = text, reply_markup
+        return SimpleNamespace(chat_id=chat_id)
+
+    async def main():
+        # ChatAgent binds the loop at construction time, so build it inside one
+        agent = ChatAgent(load_config(env={}), 5, "tg:5", SimpleNamespace(bot=SimpleNamespace(
+            send_message=fake_send_message)))
+        await agent.offer_options(["postgres", "mysql"])
+        return agent
+
+    agent = asyncio.run(main())
+    labels = [button.text for row in sent["kb"].inline_keyboard for button in row]
+    assert labels == ["postgres", "mysql", "✏️ Other answer"]
+    assert sent["kb"].inline_keyboard[-1][0].callback_data == "qo:other"
+    assert agent.pending_options == ["postgres", "mysql"]

@@ -50,7 +50,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "You are answering inside a Telegram chat. Format every reply as markdown: "
             "put shell commands, file paths, diffs and multi-line output inside fenced code "
             "blocks with a language tag, use short paragraphs and bullets, and never paste "
-            "raw tables where a short list reads better. Keep prose tight."
+            "raw tables where a short list reads better. Keep prose tight. "
+            "When you need me to choose between concrete options, end the reply with "
+            "a single line of the form <<options: first | second | third>> and do not "
+            "enumerate the choices in prose; I get them as buttons."
         ),  # forwarded as --approval-mode when set
         "permission_policy": "ask",  # allow | deny | ask
         "extra_instructions": "",
