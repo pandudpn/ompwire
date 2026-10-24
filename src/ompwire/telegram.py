@@ -120,6 +120,7 @@ class ChatAgent:
         self.last_used = time.time()
         self.busy = False
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
+        self.yolo = False  # whether this agent runs with --approval-mode=yolo
         self.usage = {"input": 0, "output": 0, "cached": 0, "turns": 0}
         self.turns = 0
         self.tools_used = 0
@@ -137,7 +138,7 @@ class ChatAgent:
     # ------------------------------------------------------------------ setup
     def _build_client(self, yolo: bool = False) -> AcpClient:
         args = list(self.config.get("acp", "args") or ["--mode", "acp"])
-        approval = "yolo" if yolo else str(self.config.get("agent", "approval_mode", ""))
+        approval = "yolo" if (yolo or self.yolo) else str(self.config.get("agent", "approval_mode", ""))
         if approval:
             args.append(f"--approval-mode={approval}")
         return AcpClient(
@@ -432,6 +433,7 @@ class ChatAgent:
         return True
 
     async def respawn(self, yolo: bool) -> None:
+        self.yolo = yolo
         if self.client is not None:
             await asyncio.to_thread(self.client.close, self.session_id)
         self.client = None
@@ -570,6 +572,7 @@ class Transport:
             ("mode", (options.get("mode") or {}).get("currentValue", "?")),
             ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
             ("approval", approval_policy(self.config)),
+            ("yolo", "on · approvals bypassed" if agent.yolo else "off"),
             ("cwd", agent.cwd),
         ]
         return card(title, now_wib(), rows, note)
@@ -609,6 +612,7 @@ class Transport:
             ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
             ("cwd", agent.cwd),
             ("approval", approval_policy(self.config)),
+            ("yolo", "on" if agent.yolo else "off"),
             ("trace", "verbose" if agent.verbose else "quiet"),
             ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
             ("clock", now_wib()),
@@ -935,10 +939,15 @@ class Transport:
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
-        log.warning("yolo respawn chat=%s", update.effective_chat.id)
-        await agent.respawn(yolo=True)
-        await self.announce(update.effective_chat.id,
-                            "agent respawned with --approval-mode=yolo (approvals bypassed) · /new to reset")
+        target = not agent.yolo
+        log.warning("yolo toggle chat=%s -> %s", update.effective_chat.id, target)
+        await agent.respawn(yolo=target)
+        await self.announce(
+            update.effective_chat.id,
+            change("yolo", "off" if target else "on", "on" if target else "off",
+                   "agent respawned with --approval-mode=yolo" if target
+                   else "agent respawned with the configured approval mode"),
+        )
 
     async def cmd_kill(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -1133,6 +1142,7 @@ class Transport:
         servers = [str(server.get("name")) for server in (self.config.get("mcp", "servers") or [])]
         rows += [
             ("approval", f"{approval_policy(self.config)} · {float(self.config.get('approval', 'timeout', 120)):.0f}s"),
+            ("yolo", "on" if agent.yolo else "off"),
             ("mcp", ", ".join(servers) if servers else "none"),
             ("users", ", ".join(str(u) for u in sorted(self.allowed)) or "none"),
             ("store", self.config.get("session", "store", "")),

@@ -185,7 +185,7 @@ Agent prose and tool activity are kept apart, because they are different things.
 
 - Answers render as markdown: headings, bold, italic, links, bullets and fenced code blocks become Telegram HTML (`mdrender.py`). A half-streamed message still produces valid HTML, and a rejected parse falls back to plain text instead of dropping the reply.
 - Tool calls stream into a separate trace message, shell-styled: the command in `<code>`, its output in a `<pre>` block, status while it runs. `/verbose` toggles it.
-- Session changes (`/new`, `/fork`, `/resume`, `/cwd`) answer with a card showing session id, model, mode, thinking level, approval policy and cwd.
+- Session changes (`/new`, `/fork`, `/resume`, `/cwd`) answer with a card showing session id, model, mode, thinking level, approval policy, yolo state and cwd.
 - Token usage is not posted per turn (`stream.show_usage = false`); `/usage` reports the session totals.
 
 ### Lifecycle
