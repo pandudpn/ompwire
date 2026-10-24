@@ -18,6 +18,7 @@ tests/test_acp_contract.py asserts today's shapes and fails loudly on upstream d
 
 from __future__ import annotations
 
+import contextlib
 import json
 import queue
 import subprocess
@@ -351,7 +352,12 @@ class AcpClient:
             proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             proc.kill()
-            time.sleep(0.1)
+            proc.wait(timeout=grace)
+        # the pipes outlive the process otherwise: one leaked descriptor set per respawn
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
 
     @property
     def alive(self) -> bool:

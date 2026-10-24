@@ -17,6 +17,7 @@ import base64
 import contextlib
 import logging
 import logging.handlers
+import os
 import pathlib
 import re
 import signal
@@ -25,6 +26,10 @@ import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, ClassVar
+
+# PTB 22 warns on every RetryAfter.retry_after read until a process opts into the timedelta it
+# returns from v23. _retry_window already takes either, so opt in rather than log noise.
+os.environ.setdefault("PTB_TIMEDELTA", "true")
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
