@@ -6,11 +6,12 @@ OMP keeps the memory, the skills, the tools and the agent loop. ompwire is the t
 takes a message from Telegram, sends it to `omp --mode acp`, and streams the answer back
 into the same message. One conversation, one session, one agent process.
 
-Single user by design. No database to run, no web UI, no second agent loop.
+Single user by design: no database server, no web UI, no second agent loop. The one thing
+ompwire stores is a SQLite file, `~/.local/state/ompwire/sessions.db`, which maps a chat to a
+session id.
 
 ```
-Telegram  ->  ompwire  ->  omp --mode acp  ->  tools, skills, MCP servers
-                     <-  streamed edits    <-
+Telegram  <->  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
 ```
 
 ## What you get
@@ -142,7 +143,7 @@ it after the turn ends.
 Precedence is defaults, then `config.toml`, then environment variables. Sections in
 `config.toml`: `[acp]`, `[agent]`, `[stream]`, `[mcp]`, `[approval]`, `[logging]`.
 `ompwire config` prints the merged result with secrets masked. `OMPWIRE_CONFIG_DIR` points
-everything at another directory, which is how the test suite stays off your home directory.
+everything at another directory, for a second install or a throwaway experiment.
 
 `ompwire setup` rewrites the file with your answers. Running it again pre-fills every prompt
 with what is on disk, so pressing enter keeps a value and typing changes one thing.
