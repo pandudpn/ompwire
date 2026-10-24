@@ -168,3 +168,31 @@ def test_env_token_is_reused_without_prompting(monkeypatch, tmp_path):
 
     assert setup.run(yes=True) == 0
     assert "999:fromenv" in (tmp_path / ".env").read_text()
+
+
+def test_choose_pins_the_current_value_into_the_window(monkeypatch):
+    """Alphabetical lists can put the current model past the cut-off."""
+    choices = [f"prov/model-{index}" for index in range(40)]
+    current = "zzz/current-model"
+    choices.append(current)
+    printed: list[str] = []
+    monkeypatch.setattr("builtins.print", lambda *args, **kwargs: printed.append(" ".join(map(str, args))))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+
+    picked = setup.choose("model", choices, current, yes=False, limit=5)
+    assert picked == current
+    assert any(current in line for line in printed)
+
+
+def test_platform_error_does_not_echo_something_that_looks_like_a_token(
+        monkeypatch, tmp_path, capsys):
+    _sandbox(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup, "agent_path", lambda command="omp": "/usr/bin/omp")
+    monkeypatch.setattr(setup, "choose", lambda prompt, choices, default, **kwargs: default)
+    monkeypatch.setattr(setup, "_ask", lambda prompt, default, yes=False:
+                        "8384807287:AAEwqLnYsecret" if "platform" in prompt else default)
+
+    assert setup.run(yes=False) == 1
+    out = capsys.readouterr().out
+    assert "AAEwqLnYsecret" not in out
+    assert "looks like a secret" in out

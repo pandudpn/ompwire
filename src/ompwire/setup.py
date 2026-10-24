@@ -171,6 +171,9 @@ def choose(prompt: str, choices: list[str], default: str, *, yes: bool, limit: i
     if yes:
         return default if default in choices else choices[0]
     shown = choices[:limit]
+    if default and default in choices and default not in shown:
+        # the current value must be visible even when the list starts alphabetically
+        shown = [default] + [choice for choice in shown if choice != default][: limit - 1]
     print(f"\n{prompt}:")
     for index, choice in enumerate(shown, 1):
         mark = "*" if choice == default else " "
@@ -270,7 +273,10 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
         mcp_source = _ask("mcp servers (none|inline|mcp-hub)", default_source, yes=yes)
         platform = _ask("gateway platform (telegram)", "telegram", yes=yes).strip().lower()
         if platform != "telegram":
-            print(f"--   {platform!r} is not implemented yet; only telegram is available")
+            # never echo the answer back: a token pasted into the wrong prompt is a secret
+            shown = "that value looks like a secret, not a platform name" \
+                if ":" in platform or len(platform) > 24 else repr(platform)
+            print(f"--   {shown}; only telegram is implemented")
             return 1
         allowed = _ask("allowed telegram user ids (comma separated, empty = nobody)",
                        "", yes=yes)
