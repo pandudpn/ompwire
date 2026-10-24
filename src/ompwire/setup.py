@@ -54,6 +54,7 @@ append_system_prompt = \"\"\"{hint}\"\"\"
 verbose = true
 show_tool_calls = true
 show_usage = false
+show_reasoning = {show_reasoning}
 
 [mcp]
 source = "{mcp_source}"
@@ -422,6 +423,7 @@ def existing_settings(config_file: Path) -> dict[str, Any]:
         "yolo": bool(agent.get("yolo", True)),
         "approval_mode": str(agent.get("approval_mode") or "always-ask"),
         "approval_policy": str((data.get("approval") or {}).get("policy") or "ask"),
+        "show_reasoning": bool((data.get("stream") or {}).get("show_reasoning", False)),
         "allowed": allowed,
         "mcp_source": str((data.get("mcp") or {}).get("source") or "none"),
     }
@@ -529,7 +531,12 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False,
     cwd = _ask("agent working directory",
                str(current_settings.get("cwd") or os.path.expanduser("~")), yes=yes)
 
-    # 7. MCP belongs to omp itself
+    # 7. does the chat show what the agent is thinking? ACP carries it; the transport hid it
+    reasoning_default = "yes" if current_settings.get("show_reasoning", False) else "no"
+    reasoning = _ask("show the agent's thinking in the chat (thinking=high is verbose)",
+                     reasoning_default, yes=yes).strip().lower() in ("yes", "y", "true", "on", "1")
+
+    # 8. MCP belongs to omp itself
     print(f"\nmcp: server definitions live in omp itself ({OMP_MCP_FILE})")
     _mcp_wizard(yes)
     hub = Path("~/mcp-hub/servers.yaml").expanduser()
@@ -545,6 +552,7 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False,
         mcp_source=mcp_source, hub_path=str(hub) if mcp_source == "mcp-hub" else "",
         model=model, mode=mode, thinking=thinking, yolo="true" if yolo else "false",
         approval_policy=approval_policy,
+        show_reasoning="true" if reasoning else "false",
     )
     config_dir.mkdir(parents=True, exist_ok=True)
     if config_file.is_file():
@@ -558,6 +566,7 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False,
         "mode": mode,
         "thinking": thinking,
         "yolo": yolo,
+        "show_reasoning": reasoning,
         "approval_mode": approval,
         "cwd": cwd,
     }

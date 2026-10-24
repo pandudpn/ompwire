@@ -36,11 +36,10 @@ def _client(item: schedules.Schedule, config: Any) -> AcpClient:
     args = list(config.get("acp", "args") or ["--mode", "acp"])
     if item.ephemeral and "--no-session" not in args:
         args.append("--no-session")
-    # omp accepts always-ask | always-ask-cached | write | yolo. There is no "deny" mode, and none
-    # is needed: this client installs no permission handler, and acp answers "cancelled" to every
-    # request it cannot answer. A tool that needs a human is refused at once instead of waiting.
-    approval = "yolo" if item.yolo else "always-ask"
-    args.append(f"--approval-mode={approval}")
+    # omp accepts always-ask | always-ask-cached | write | yolo. This client installs no
+    # permission handler, so acp answers "cancelled" to every request it cannot answer: whatever
+    # the mode still asks for is refused at once instead of waiting for a human who is asleep.
+    args.append(f"--approval-mode={schedules.agent_approval(item.approval)}")
     hint = str(config.get("agent", "append_system_prompt", "") or "").strip()
     args += ["--append-system-prompt", f"{hint}\n\n{PROTOCOL_HINT}".strip()]
     cwd = str(config.get("agent", "cwd", "") or "") or "~"

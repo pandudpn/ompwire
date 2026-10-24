@@ -153,6 +153,21 @@ def test_a_half_written_marker_is_hidden_while_streaming():
     assert schedules.hide_partial("ok <<schedule: 0 7 * * * | x>>", final=True) == "ok"
 
 
+@pytest.mark.parametrize(("name", "expected"), [
+    ("ask", "always-ask"),
+    ("write", "write"),
+    ("yolo", "yolo"),
+    ("ALWAYS-ASK", "always-ask"),
+])
+def test_approval_names_map_to_what_the_agent_accepts(name, expected):
+    assert schedules.agent_approval(name) == expected
+
+
+def test_an_unknown_approval_is_refused():
+    with pytest.raises(schedules.ScheduleError, match="is not one of"):
+        schedules.agent_approval("deny")
+
+
 def test_the_timezone_must_exist(monkeypatch):
     monkeypatch.setattr(schedules, "validate_calendar", lambda _expression: None)
     monkeypatch.setattr(schedules.gateways, "load", lambda config=None: [])

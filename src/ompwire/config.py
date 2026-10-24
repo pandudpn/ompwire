@@ -83,6 +83,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "edit_interval": 1.0,
         "show_tool_calls": True,
         "show_usage": False,  # per-turn token line; /usage covers it on demand
+        # the agent's thinking arrives over ACP as agent_thought_chunk; off by default because
+        # at thinking=xhigh it is long, and /reasoning turns it on for the turns that need it
+        "show_reasoning": False,
     },
     "approval": {
         "policy": "ask",  # ask | allow | deny

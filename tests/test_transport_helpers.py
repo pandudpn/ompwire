@@ -276,3 +276,23 @@ def test_the_marker_protocol_is_always_described():
     args = ChatAgent._build_client(agent).args
     hint = args[args.index("--append-system-prompt") + 1]
     assert "<<file:" in hint and "<<options:" in hint
+
+
+def test_the_subagent_is_named_in_the_tool_block():
+    """omp runs subagents through the `task` tool; ACP has no event of its own for them."""
+    from ompwire.format import tool_block
+
+    block = tool_block("other", "Reading note.txt via subagent", "", "", "in_progress",
+                       "ReadNote (sonic)")
+    assert "subagent: ReadNote (sonic)" in block
+
+
+def test_reasoning_is_off_until_asked():
+    from ompwire.config import load_config
+    from ompwire.telegram import ChatAgent
+
+    config = load_config(env={})
+    agent = ChatAgent.__new__(ChatAgent)
+    agent.config = config
+    agent.reasoning = bool(config.get("stream", "show_reasoning", False))
+    assert agent.reasoning is False

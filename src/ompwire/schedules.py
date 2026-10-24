@@ -41,7 +41,14 @@ class Schedule:
     calendar: str = ""
     gateway: str = "telegram"
     ephemeral: bool = True   # a run leaves no session behind unless asked
-    yolo: bool = False       # unattended runs refuse tools that need a human, unless asked
+    # What an unattended run may do without a human. Measured against omp, not assumed:
+    #   ask   - reads only; a write is refused, the shell is refused
+    #   write - reads and file writes; a shell command is refused
+    #   yolo  - everything, nothing is asked
+    # Default yolo, because a scheduled job that cannot run git or kubectl is a job that does
+    # nothing useful. The prompt is stored with the schedule, so what it may do is what the prompt
+    # says; `--approval ask` or `write` is there for a run that only reports.
+    approval: str = "yolo"
     timeout: float = 1800.0  # seconds, also the unit's TimeoutStartSec
     timezone: str = DEFAULT_TIMEZONE  # "0 7 * * *" means 07:00 here, not on the server's clock
     last_status: str = ""    # what the last run did, for /schedule to show
@@ -181,7 +188,7 @@ def load() -> dict[str, Schedule]:
             prompt=str(row.get("prompt", "")),
             gateway=str(row.get("gateway", "telegram")),
             ephemeral=bool(row.get("ephemeral", True)),
-            yolo=bool(row.get("yolo", False)),
+            approval=str(row.get("approval", "yolo")),
             timeout=float(row.get("timeout", 1800.0)),
             timezone=str(row.get("timezone", DEFAULT_TIMEZONE)),
             last_status=str(row.get("last_status", "")),
@@ -203,8 +210,8 @@ def render(items: dict[str, Schedule]) -> str:
         if item.timezone:
             lines.append(f"timezone = {_toml(item.timezone)}")
         lines.append(f"ephemeral = {str(item.ephemeral).lower()}")
-        lines.append(f"yolo = {str(item.yolo).lower()}")
         lines.append(f"timeout = {item.timeout:g}")
+        lines.append(f"approval = {_toml(item.approval)}")
         if item.last_status:
             lines.append(f"last_status = {_toml(item.last_status)}")
         lines.append("")
@@ -223,8 +230,21 @@ def save(items: dict[str, Schedule], path: Path | None = None) -> Path:
     return target
 
 
+APPROVAL_MODES = {"ask": "always-ask", "write": "write", "yolo": "yolo"}
+
+
+def agent_approval(value: str) -> str:
+    """Map the three names a person uses to the four omp accepts."""
+    key = (value or "").strip().lower()
+    if key in APPROVAL_MODES:
+        return APPROVAL_MODES[key]
+    if key in APPROVAL_MODES.values():
+        return key
+    raise ScheduleError(f"approval '{value}' is not one of: {', '.join(APPROVAL_MODES)}")
+
+
 def add(name: str, cron: str, prompt: str, gateway: str = "telegram", ephemeral: bool = True,
-        yolo: bool = False, timeout: float = 1800.0, calendar: str = "",
+        approval: str = "yolo", timeout: float = 1800.0, calendar: str = "",
         timezone: str = DEFAULT_TIMEZONE) -> Schedule:
     cleaned = validate_name(name)
     if not prompt.strip():
@@ -242,12 +262,13 @@ def add(name: str, cron: str, prompt: str, gateway: str = "telegram", ephemeral:
             raise ScheduleError(f"unknown timezone '{timezone}' ({exc})") from exc
     expression = calendar.strip() or to_on_calendar(cron)
     validate_calendar(f"{expression} {timezone}".strip())
+    agent_approval(approval)
     items = load()
     if cleaned in items:
         raise ScheduleError(f"schedule '{cleaned}' already exists; remove it first")
     item = Schedule(name=cleaned, cron=cron, prompt=prompt.strip(), gateway=gateway,
-                    ephemeral=ephemeral, yolo=yolo, timeout=timeout, calendar=calendar.strip(),
-                    timezone=timezone)
+                    ephemeral=ephemeral, approval=approval, timeout=timeout,
+                    calendar=calendar.strip(), timezone=timezone)
     items[cleaned] = item
     save(items)
     return item

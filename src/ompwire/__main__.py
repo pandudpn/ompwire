@@ -156,7 +156,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 prompt=args.prompt,
                 gateway=args.gateway,
                 ephemeral=not args.keep_session,
-                yolo=args.yolo,
+                approval=args.approval,
                 timeout=args.timeout,
                 timezone=args.timezone,
             )
@@ -200,7 +200,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         print(f"gateway   {item.gateway}")
         print(f"prompt    {item.prompt}")
         print(f"session   {'ephemeral' if item.ephemeral else 'persisted'}")
-        print(f"approval  {'yolo' if item.yolo else 'deny (unattended)'}")
+        print(f"approval  {item.approval} (unattended)")
         print(f"timeout   {item.timeout:g}s")
         print(f"last      {item.last_status or 'never run'}")
         print(f"next      {schedules.next_elapse(item.name) or '-'}")
@@ -714,8 +714,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="add: the clock the cron fields are read in")
     sc.add_argument("--keep-session", action="store_true",
                     help="add: persist the session instead of running ephemeral")
-    sc.add_argument("--yolo", action="store_true",
-                    help="add: let the run approve its own tools (unattended, on purpose)")
+    sc.add_argument("--approval", default="yolo", choices=["ask", "write", "yolo"],
+                    help="add: what the run may do unattended. ask=reads only, "
+                         "write=reads and file writes, yolo=everything (default)")
     sc.add_argument("--timeout", type=float, default=1800.0, help="add: seconds per run")
     sc.add_argument("--no-start", action="store_true",
                     help="add: write the schedule without installing the timer")

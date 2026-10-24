@@ -131,6 +131,27 @@ when the machine fills up. The name, the gateway and the calendar are all valida
 appears, and `systemd-analyze calendar` checks the expression, so an installed schedule is one
 systemd already agreed to run.
 
+## What the stream carries
+
+`session/update` notifications arrive with these `sessionUpdate` values, and each one has a
+decision behind it:
+
+| Kind | What the transport does |
+| --- | --- |
+| `agent_message_chunk` | the answer, streamed into the message being edited |
+| `agent_thought_chunk` | the reasoning, shown only with `/reasoning on`, kept to its tail |
+| `tool_call`, `tool_call_update` | the tool trace, when `stream.verbose` is on |
+| `usage_update`, `session_info_update` | read for accounting, never rendered |
+| `available_commands_update` | fills `/commands` |
+| `config_option_update`, `current_mode_update` | kept so the pickers show current values |
+
+A subagent has no event type of its own. omp runs one through its `task` tool, so a subagent shows
+up as a `tool_call` whose `rawInput.tasks[]` names it, which is why the trace can print
+`subagent: ReadNote (sonic)` and nothing more. Reasoning is not guaranteed either: omp only emits
+`agent_thought_chunk` on turns where the model actually reasons, so an empty thinking block means
+the turn had none, not that the transport dropped it. That is also why the display is tested
+against a fake stream rather than the live model.
+
 ## Storage
 
 | Path | Holds |

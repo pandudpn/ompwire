@@ -44,7 +44,9 @@ class Update:
 
     @property
     def text(self) -> str:
-        if self.kind == "agent_message_chunk":
+        # agent_thought_chunk carries the same content shape; it used to be dropped here, which
+        # made the reasoning display look broken for a reason that had nothing to do with display
+        if self.kind in {"agent_message_chunk", "agent_thought_chunk"}:
             content = self.raw.get("content") or {}
             if content.get("type") == "text":
                 return content.get("text") or ""

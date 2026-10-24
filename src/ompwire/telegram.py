@@ -60,6 +60,7 @@ from .store import SessionStore
 log = logging.getLogger("ompwire.telegram")
 
 TELEGRAM_LIMIT = 4000  # leave headroom under the 4096 hard cap
+REASONING_CHARS = 1200  # the tail matters; the beginning usually restates the question
 PERMISSION_TIMEOUT = 120.0
 IDLE_CHECK_INTERVAL = 60.0
 
@@ -86,6 +87,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("queue", "queue a prompt for the next turn"),
     ("steer", "steer the running turn (experimental)"),
     ("schedule", "scheduled turns: list, run now, remove"),
+    ("reasoning", "show or hide the agent's thinking"),
     ("yolo", "respawn the agent with approvals off"),
     ("kill", "stop the agent process for this chat"),
     ("whoami", "ids and transport info"),
@@ -204,6 +206,7 @@ class ChatAgent:
         self.client: AcpClient | None = None
         self.session_id = ""
         self.cwd = str(config.get("agent", "cwd") or "~")
+        self.reasoning = bool(config.get("stream", "show_reasoning", False))
         # the bot that receives a scheduled result defaults to the bot being talked to
         self.gateway_name = str(config.get("_gateway", "name", "telegram") or "telegram")
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
@@ -576,7 +579,8 @@ class ChatAgent:
         text_buffer: list[str] = []
         trace: dict[str, dict[str, str]] = {}
         sent: list[Any] = []
-        state = {"text_msg": None, "tool_msg": None, "last_edit": 0.0, "text": "", "tools": 0}
+        state = {"text_msg": None, "tool_msg": None, "reason_msg": None, "reasoning": "",
+                 "last_edit": 0.0, "text": "", "tools": 0}
 
         async def flush_text(force: bool = False) -> None:
             joined = strip_agent_noise("".join(text_buffer))
@@ -616,7 +620,7 @@ class ChatAgent:
             blocks = [
                 tool_block(entry.get("kind", "tool"), entry.get("title", ""),
                            entry.get("command", ""), entry.get("output", ""),
-                           entry.get("status", ""))
+                           entry.get("status", ""), entry.get("subagent", ""))
                 for entry in trace.values()
             ]
             body = ""
@@ -644,6 +648,28 @@ class ChatAgent:
                 except BadRequest:
                     pass
 
+        async def flush_reasoning(force: bool = False) -> None:
+            if not self.reasoning or not state["reasoning"].strip():
+                return
+            now = time.time()
+            interval = float(self.config.get("stream", "edit_interval", 1.0))
+            if not force and now - state["last_edit"] < interval:
+                return
+            state["last_edit"] = now
+            shown = state["reasoning"].strip()
+            if len(shown) > REASONING_CHARS:
+                shown = "…\n" + shown[-REASONING_CHARS:]
+            body = f"💭 <i>thinking</i>\n<blockquote expandable>{esc(shown)}</blockquote>"
+            if state["reason_msg"] is None:
+                state["reason_msg"] = await self.send_html(body)
+                sent.append(state["reason_msg"])
+                return
+            try:
+                await state["reason_msg"].edit_text(body, parse_mode=ParseMode.HTML)
+            except BadRequest as exc:
+                if "not modified" not in str(exc).lower():
+                    log.debug("reasoning edit rejected: %s", exc)
+
         async def drain() -> None:
             while True:
                 update = await self._updates.get()
@@ -652,6 +678,9 @@ class ChatAgent:
                 if update.kind == "agent_message_chunk" and update.text:
                     text_buffer.append(update.text)
                     await flush_text()
+                elif update.kind == "agent_thought_chunk" and update.text and self.reasoning:
+                    state["reasoning"] += update.text
+                    await flush_reasoning()
                 elif update.kind in {"tool_call", "tool_call_update"} and self.verbose:
                     raw = update.raw
                     call_id = str(raw.get("toolCallId") or f"anon{len(trace)}")
@@ -661,7 +690,15 @@ class ChatAgent:
                         self.tools_used += 1
                         entry["kind"] = str(raw.get("kind") or "tool")
                         entry["title"] = str(raw.get("title") or "")
-                        entry["command"] = str((raw.get("rawInput") or {}).get("command") or "")
+                        raw_input = raw.get("rawInput") or {}
+                        entry["command"] = str(raw_input.get("command") or "")
+                        tasks = raw_input.get("tasks")
+                        if isinstance(tasks, list) and tasks:
+                            # omp runs subagents through the `task` tool; ACP has no event of
+                            # its own for them, so the task list is the only place they appear
+                            entry["subagent"] = ", ".join(
+                                f"{item.get('name', '?')} ({item.get('agent', 'task')})"
+                                for item in tasks if isinstance(item, dict))[:80]
                         log.info("tool call chat=%s kind=%s command=%r", self.chat_id,
                                  entry["kind"], entry["command"][:120] or entry["title"][:120])
                     entry["status"] = str(raw.get("status") or entry.get("status", ""))
@@ -687,6 +724,7 @@ class ChatAgent:
             raise
         self._updates.put_nowait(None)
         await drain_task
+        await flush_reasoning(force=True)
         await flush_text(force=True)
         await flush_tools()
         self.busy = False
@@ -1644,6 +1682,30 @@ class Transport:
         await self.announce(update.effective_chat.id,
                            f"tool trace: {'on' if agent.verbose else 'off'}")
 
+    async def cmd_reasoning(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show or hide the agent's thinking.
+
+        ACP sends it as agent_thought_chunk and the transport used to drop it. Off by default:
+        at thinking=xhigh the thought stream is longer than the answer, and reading it every turn
+        is noise. On demand, it is the most direct way to see what the agent is actually weighing.
+        """
+        if not self._authorized(update):
+            return await self._deny(update)
+        agent = self.agent_for(update.effective_chat.id)
+        wanted = (ctx.args[0].lower() if ctx.args else "").strip()
+        if wanted in {"on", "off", "1", "0", "true", "false", "yes", "no"}:
+            value = wanted in {"on", "1", "true", "yes"}
+            from .config import save_override
+
+            save_override("stream", "show_reasoning", value)
+            agent.reasoning = value
+            self.config.data.setdefault("stream", {})["show_reasoning"] = value
+            return await self.announce(update.effective_chat.id,
+                                       f"reasoning: {'on' if value else 'off'}")
+        await self.announce(
+            update.effective_chat.id,
+            f"reasoning: {'on' if agent.reasoning else 'off'} · `/reasoning on` atau `off`")
+
     async def cmd_commands(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Search the slash commands the agent advertises (about a thousand)."""
         if not self._authorized(update):
@@ -1914,6 +1976,7 @@ class Transport:
         app.add_handler(CommandHandler("approve", self.cmd_approve))
         app.add_handler(CommandHandler("verbose", self.cmd_verbose))
         app.add_handler(CommandHandler("schedule", self.cmd_schedule))
+        app.add_handler(CommandHandler("reasoning", self.cmd_reasoning))
         app.add_handler(CommandHandler("queue", self.cmd_queue))
         app.add_handler(CommandHandler("steer", self.cmd_steer))
         app.add_handler(CommandHandler("yolo", self.cmd_yolo))
@@ -1996,6 +2059,7 @@ class Transport:
         rows += [
             ("approval", f"{approval_policy(self.config)} · {float(self.config.get('approval', 'timeout', 120)):.0f}s"),
             ("yolo", "on" if agent.yolo else "off"),
+            ("reasoning", "on" if agent.reasoning else "off"),
             ("mcp", mcp_label(servers)),
             ("users", ", ".join(str(u) for u in sorted(self.allowed)) or "none"),
             ("store", self.config.get("session", "store", "")),

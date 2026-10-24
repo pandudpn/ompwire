@@ -127,6 +127,7 @@ conversations, because every live chat owns its own `omp` subprocess. Each unit 
 | `/approve`, `/verbose`, `/yolo` | approval policy, tool trace, bypass approvals |
 | `/queue <text>`, `/steer <text>` | queue the next turn, or steer the running one |
 | `/schedule [run\|rm <name>]` | list scheduled turns, run one now, remove one |
+| `/reasoning [on\|off]` | show the agent's thinking above the answer |
 | `/stop`, `/kill` | cancel the turn, kill the agent process for this chat |
 | `/help`, `/whoami` | what this thing is |
 
@@ -155,6 +156,22 @@ would need a human approval; `--yolo` per schedule opts out, deliberately.
 You can also just ask in the chat ("every morning at 7, summarise the repo"). The agent proposes
 it with a marker, the transport turns that into a confirmation card, and nothing is installed until
 you press **Buat schedule**.
+
+`--approval` decides what a run may do while nobody is looking, and the three names are measured
+against omp rather than guessed: `ask` reads only (a write is refused), `write` also writes files
+(an ordinary shell command is refused), `yolo` asks nothing. The default is `yolo`, because a
+scheduled job that cannot run git or kubectl is a job that does nothing; use `--approval ask` for a
+schedule that only reports.
+
+## Thinking
+
+ACP carries the agent's reasoning as `agent_thought_chunk`. `/reasoning on` renders it above the
+answer, in a collapsible block, keeping the last 1200 characters; `/reasoning off` (the default)
+drops it. `ompwire setup` asks once and writes `[stream] show_reasoning`.
+
+Subagents are visible without a switch: omp runs them through its `task` tool, so the tool trace
+shows the subagent name and its agent type. ACP has no event of its own for a subagent, which is
+why that is where they appear.
 
 ## Configuration
 
