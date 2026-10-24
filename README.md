@@ -171,6 +171,8 @@ The transport owns session routing, approvals, streaming and cost reporting. Any
 | `/status` | transport state: session id, cwd, model/mode/thinking, process age |
 | `/usage` | accumulated `usage_update` frames per session |
 | `/context` | forwarded to the agent, which owns the context accounting |
+| `/skills` | browse every loadable skill, tap one to read its `SKILL.md` |
+| `/login` | sign in to a model provider, with current status per provider |
 | `/approve` | show or set the approval policy (`ask` / `allow` / `deny`), persisted to `overrides.json` |
 | `/verbose` | toggle the tool-call trace |
 | `/queue <text>` | harness FIFO, dispatched after the running turn ends |
@@ -191,6 +193,13 @@ Agent prose and tool activity are kept apart, because they are different things.
 - Approval prompts name the tool, show the exact command in a monospace block, and offer labelled buttons (allow once / always / deny). The prompt is then rewritten in place with the decision, so no stale keyboard is left behind. Photos sent to the chat are forwarded to the agent as ACP image blocks.
 - Session changes (`/new`, `/fork`, `/resume`, `/cwd`) answer with a card showing session id, model, mode, thinking level, approval policy, yolo state and cwd.
 - Token usage is not posted per turn (`stream.show_usage = false`); `/usage` reports the session totals.
+
+### Catalogs
+
+Two lists come straight from omp, so they cannot drift from it:
+
+- **`/login`** reads omp's own login menu and marks the entries that already hold credentials (`omp auth export`, provider names only, never the secrets). Ten per page, two columns, like the model picker. Tapping a provider starts `omp login` on a pty; when the OAuth URL appears it is posted with a button, and once omp asks for the authorization code the next message typed into the chat is forwarded to it. Providers without a known CLI id are selected through omp's numbered menu instead.
+- **`/skills`** lists every `SKILL.md` omp can load, ten per page. Tapping one sends its body rendered as markdown, clipped with a pointer to the file when it is long.
 
 ### Formatting comes from the prompt, not from luck
 

@@ -31,8 +31,10 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
 
 from .acp import AcpClient, AcpError, Update as AcpUpdate, pick_permission_option
 from . import __version__
+from .catalog import list_providers, list_skills, skill_body
 from .config import Config, approval_policy, save_override
 from .format import card, change, esc, help_sections, now_wib, tool_block
+from .login import LoginSession
 from .mcp_hub import hub_servers, merge_entry as merge_mcp_entry, normalize
 from .mdrender import strip_agent_noise, strip_html, to_html, to_plain
 from .format import uptime as fmt_uptime
@@ -50,6 +52,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("status", "session, model, mode and process state"),
     ("usage", "token usage for this session"),
     ("context", "context window breakdown from the agent"),
+    ("skills", "browse skills and read their SKILL.md"),
+    ("login", "sign in to a model provider"),
     ("sessions", "list recorded sessions"),
     ("resume", "resume a session by id"),
     ("continue", "resume this chat's last session"),
@@ -68,6 +72,17 @@ COMMANDS: list[tuple[str, str]] = [
     ("whoami", "ids and transport info"),
     ("help", "this list"),
 ]
+
+def paginate(items: list, page: int, per_page: int) -> tuple[list, int, int]:
+    """Clamp a page index and slice it; page is zero-based here."""
+    pages = max(1, -(-len(items) // per_page))
+    page = max(0, min(page, pages - 1))
+    return items[page * per_page:(page + 1) * per_page], page, pages
+
+
+def two_columns(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
 
 def normalize_mcp_servers(servers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Backwards-compatible alias for `mcp_hub.normalize`."""
@@ -104,6 +119,10 @@ class ChatAgent:
         self.session_id = ""
         self.cwd = str(config.get("agent", "cwd") or "~")
         self.started_at = time.time()
+        self._login_cache: list[Any] = []
+        self._login_cache_at = 0.0
+        self._skills: dict[int, list[Any]] = {}
+        self.logins: dict[int, Any] = {}
         self.last_used = time.time()
         self.busy = False
         self.verbose = bool(config.get("stream", "show_tool_calls", True))
@@ -658,6 +677,13 @@ class Transport:
         if not self._authorized(update):
             return await self._deny(update)
         message = update.effective_message
+        session = self.logins.get(update.effective_chat.id)
+        if session is not None and session.alive and session.awaiting_code and message and message.text:
+            session.send(message.text)
+            log.info("login code relayed chat=%s chars=%s", update.effective_chat.id,
+                     len(message.text.strip()))
+            await message.reply_text("🔑 kode dikirim ke omp, menunggu hasil…")
+            return
         if message is None or not message.text:
             return
         agent = self.agent_for(update.effective_chat.id)
@@ -774,6 +800,229 @@ class Transport:
             await message.reply_text(f"queued (position {depth})")
         else:
             self.enqueue(chat_id, "prompt", payload)
+
+    SKILL_PAGE = 10   # two columns x five rows, same shape as the model picker
+    LOGIN_PAGE = 10
+
+    async def cmd_skills(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return await self._deny(update)
+        chat_id = update.effective_chat.id
+        agent = self.agent_for(chat_id)
+        skills = await asyncio.to_thread(list_skills, cwd=agent.cwd)
+        self._skills[chat_id] = skills
+        if not skills:
+            return await update.effective_message.reply_text("no skills found")
+        page = 1
+        if ctx.args and ctx.args[0].isdigit():
+            page = int(ctx.args[0])
+        window, index, pages = paginate(skills, page - 1, self.SKILL_PAGE)
+        buttons = [
+            InlineKeyboardButton(skill.name[:28], callback_data=f"skv:{skills.index(skill)}")
+            for skill in window
+        ]
+        rows = two_columns(buttons)
+        nav: list[InlineKeyboardButton] = []
+        if pages > 1:
+            if index > 0:
+                nav.append(InlineKeyboardButton("◀", callback_data=f"skl:{index}"))
+            nav.append(InlineKeyboardButton(f"{index + 1}/{pages}", callback_data="sk:noop"))
+            if index < pages - 1:
+                nav.append(InlineKeyboardButton("▶", callback_data=f"skl:{index + 2}"))
+        if nav:
+            rows.append(nav)
+        log.info("skills listed chat=%s count=%s page=%s/%s", chat_id, len(skills), index + 1, pages)
+        await update.effective_message.reply_text(
+            card("🧩 skills", f"{len(skills)} available · page {index + 1}/{pages}", [],
+                 "tap one to read its SKILL.md"),
+            reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
+        )
+
+    async def show_skill(self, chat_id: int, index: int) -> None:
+        skills = self._skills.get(chat_id) or []
+        if not (0 <= index < len(skills)):
+            return await self.app.bot.send_message(chat_id, "skill tidak dikenal, buka /skills lagi")
+        skill = skills[index]
+        body = await asyncio.to_thread(skill_body, skill)
+        log.info("skill opened chat=%s name=%s chars=%s", chat_id, skill.name, len(body))
+        await self.send_html(card("🧩 " + skill.name, skill.description[:160] or str(skill.path),
+                                  [("file", str(skill.path)), ("size", f"{len(body)} chars")]))
+        for chunk in _chunks(body, 3200)[:4]:
+            await self.send_md(chunk)
+        if len(body) > 3200:
+            await self.app.bot.send_message(
+                chat_id, f"<i>dipotong · buka file untuk teks lengkap: {esc(str(skill.path))}</i>",
+                parse_mode=ParseMode.HTML,
+            )
+
+    async def _render_skills(self, chat_id: int, page: int, message: Any) -> None:
+        skills = self._skills.get(chat_id) or []
+        if not skills:
+            return
+        window, index, pages = paginate(skills, max(0, page - 1), self.SKILL_PAGE)
+        buttons = [InlineKeyboardButton(skill.name[:28], callback_data=f"skv:{skills.index(skill)}")
+                   for skill in window]
+        rows = two_columns(buttons)
+        nav = []
+        if pages > 1:
+            if index > 0:
+                nav.append(InlineKeyboardButton("◀", callback_data=f"skl:{index}"))
+            nav.append(InlineKeyboardButton(f"{index + 1}/{pages}", callback_data="sk:noop"))
+            if index < pages - 1:
+                nav.append(InlineKeyboardButton("▶", callback_data=f"skl:{index + 2}"))
+        if nav:
+            rows.append(nav)
+        try:
+            await message.edit_text(
+                card("🧩 skills", f"{len(skills)} available · page {index + 1}/{pages}", [],
+                     "tap one to read its SKILL.md"),
+                reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
+            )
+        except BadRequest:
+            pass
+
+    async def _render_login(self, chat_id: int, page: int, message: Any) -> None:
+        providers = self._login_cache
+        if not providers:
+            return
+        window, index, pages = paginate(providers, max(0, page - 1), self.LOGIN_PAGE)
+        buttons = []
+        for provider in window:
+            mark = "✅ " if provider.logged_in else ("⚪ " if provider.provider_id else "❔ ")
+            buttons.append(InlineKeyboardButton(f"{mark}{provider.label[:24]}",
+                                                callback_data=f"lgv:{provider.index}"))
+        rows = two_columns(buttons)
+        nav = []
+        if pages > 1:
+            if index > 0:
+                nav.append(InlineKeyboardButton("◀", callback_data=f"lgl:{index}"))
+            nav.append(InlineKeyboardButton(f"{index + 1}/{pages}", callback_data="lg:noop"))
+            if index < pages - 1:
+                nav.append(InlineKeyboardButton("▶", callback_data=f"lgl:{index + 2}"))
+        if nav:
+            rows.append(nav)
+        signed = sum(1 for provider in providers if provider.logged_in)
+        try:
+            await message.edit_text(
+                card("🔐 login", f"{signed} signed in · {len(providers)} providers · page {index + 1}/{pages}",
+                     [], "✅ signed in · ⚪ not signed in · ❔ id unknown, opened via menu"),
+                reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
+            )
+        except BadRequest:
+            pass
+
+    async def _provider_list(self, force: bool = False) -> list[Any]:
+        fresh = time.time() - self._login_cache_at < 600
+        if self._login_cache and fresh and not force:
+            return self._login_cache
+        providers = await asyncio.to_thread(list_providers, str(self.config.get("acp", "command", "omp")))
+        self._login_cache = providers
+        self._login_cache_at = time.time()
+        log.info("providers loaded: %s entries, %s signed in", len(providers),
+                 sum(1 for p in providers if p.logged_in))
+        return providers
+
+    async def cmd_login(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return await self._deny(update)
+        chat_id = update.effective_chat.id
+        message = await update.effective_message.reply_text("membaca daftar provider dari omp…")
+        providers = await self._provider_list(force=True)
+        if not providers:
+            return await message.edit_text("daftar provider kosong")
+        page = 1
+        if ctx.args and ctx.args[0].isdigit():
+            page = int(ctx.args[0])
+        window, index, pages = paginate(providers, page - 1, self.LOGIN_PAGE)
+        buttons = []
+        for provider in window:
+            mark = "✅ " if provider.logged_in else ("⚪ " if provider.provider_id else "❔ ")
+            buttons.append(InlineKeyboardButton(
+                f"{mark}{provider.label[:24]}", callback_data=f"lgv:{provider.index}"))
+        rows = two_columns(buttons)
+        nav: list[InlineKeyboardButton] = []
+        if pages > 1:
+            if index > 0:
+                nav.append(InlineKeyboardButton("◀", callback_data=f"lgl:{index}"))
+            nav.append(InlineKeyboardButton(f"{index + 1}/{pages}", callback_data="lg:noop"))
+            if index < pages - 1:
+                nav.append(InlineKeyboardButton("▶", callback_data=f"lgl:{index + 2}"))
+        if nav:
+            rows.append(nav)
+        signed = sum(1 for provider in providers if provider.logged_in)
+        await message.edit_text(
+            card("🔐 login", f"{signed} signed in · {len(providers)} providers · page {index + 1}/{pages}",
+                 [], "✅ signed in · ⚪ not signed in · ❔ id unknown, opened via menu"),
+            reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
+        )
+
+    async def start_login(self, chat_id: int, index: int) -> None:
+        providers = self._login_cache or await self._provider_list()
+        provider = next((item for item in providers if item.index == index), None)
+        if provider is None:
+            return await self.app.bot.send_message(chat_id, "provider tidak dikenal")
+        target = provider.provider_id or ""   # empty -> choose from omp's menu
+        self.close_login(chat_id)
+        loop = asyncio.get_running_loop()
+
+        def emit(line: str) -> None:
+            asyncio.run_coroutine_threadsafe(self._login_line(chat_id, provider.label, line), loop)
+
+        def done(ok: bool, output: str) -> None:
+            asyncio.run_coroutine_threadsafe(self._login_done(chat_id, provider.label, ok, output), loop)
+
+        session = LoginSession(
+            target, emit, done,
+            command=str(self.config.get("acp", "command", "omp")),
+            menu_index=None if target else provider.index,
+        )
+        self.logins[chat_id] = session
+        log.info("login started chat=%s provider=%s target=%s", chat_id, provider.label, target)
+        await self.app.bot.send_message(
+            chat_id,
+            card("🔐 login started", provider.label,
+                 [("target", target or f"menu #{provider.index}")],
+                 "ikuti instruksi di bawah, lalu kirim kode otorisasinya ke chat ini"),
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def _login_line(self, chat_id: int, label: str, line: str) -> None:
+        text = line.strip()
+        if not text:
+            return
+        session = self.logins.get(chat_id)
+        if session is not None and session.url and session.url in text:
+            rows = [[InlineKeyboardButton("buka halaman login", url=session.url)]]
+            await self.app.bot.send_message(
+                chat_id,
+                card("🔗 buka URL ini", label, [], "setelah approve, kirim kode/redirect URL ke chat"),
+                reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
+            )
+            return
+        if session is not None and session.awaiting_code:
+            await self.app.bot.send_message(
+                chat_id, "🔑 omp menunggu kode otorisasi — kirim sekarang di chat ini.")
+            return
+        if len(text) <= 200:
+            safe = esc(text)
+            await self.app.bot.send_message(chat_id, f"<code>{safe}</code>", parse_mode=ParseMode.HTML)
+
+    async def _login_done(self, chat_id: int, label: str, ok: bool, output: str) -> None:
+        self.logins.pop(chat_id, None)
+        self._login_cache_at = 0.0  # force a status refresh on the next /login
+        tail = esc(output[-400:]) if output else ""
+        log.info("login finished chat=%s provider=%s ok=%s", chat_id, label, ok)
+        body = card("✅ login selesai" if ok else "⛔ login gagal", label, [],
+                    "status provider di /login sudah diperbarui" if ok else "lihat detail di bawah")
+        await self.app.bot.send_message(chat_id, body, parse_mode=ParseMode.HTML)
+        if tail:
+            await self.app.bot.send_message(chat_id, f"<pre>{tail}</pre>", parse_mode=ParseMode.HTML)
+
+    def close_login(self, chat_id: int) -> None:
+        session = self.logins.pop(chat_id, None)
+        if session is not None:
+            session.close()
+            log.info("login session closed chat=%s", chat_id)
 
     async def cmd_context(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """The agent renders a better context report than we could, so ask it."""
@@ -1158,7 +1407,8 @@ class Transport:
         names = dict(COMMANDS)
         groups = [
             ("session", ["new", "sessions", "resume", "continue", "fork", "cwd", "kill"]),
-            ("agent", ["model", "mode", "thinking", "approve", "trace", "verbose", "yolo", "skills"]),
+            ("agent", ["model", "mode", "thinking", "approve", "trace", "verbose", "yolo"]),
+            ("catalog", ["skills", "login"]),
             ("running", ["stop", "queue", "steer", "status", "usage", "context"]),
             ("info", ["whoami", "help"]),
         ]
@@ -1174,6 +1424,34 @@ class Transport:
         data = str(query.data or "")
         chat_id = update.effective_chat.id
         agent = self.agent_for(chat_id)
+
+        if data.startswith("skv:"):
+            await query.answer()
+            try:
+                await self.show_skill(chat_id, int(data.split(":", 1)[1]))
+            except ValueError:
+                pass
+            return
+
+        if data.startswith("skl:"):
+            await query.answer()
+            page = int(data.split(":", 1)[1])
+            await self._render_skills(chat_id, page, query.message)
+            return
+
+        if data.startswith("lgv:"):
+            await query.answer("memulai login…")
+            try:
+                await self.start_login(chat_id, int(data.split(":", 1)[1]))
+            except ValueError:
+                pass
+            return
+
+        if data.startswith("lgl:"):
+            await query.answer()
+            page = int(data.split(":", 1)[1])
+            await self._render_login(chat_id, page, query.message)
+            return
 
         if data.startswith("ap:"):
             value = data.split(":", 1)[1]
@@ -1253,6 +1531,8 @@ class Transport:
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("usage", self.cmd_usage))
         app.add_handler(CommandHandler("context", self.cmd_context))
+        app.add_handler(CommandHandler("skills", self.cmd_skills))
+        app.add_handler(CommandHandler("login", self.cmd_login))
         app.add_handler(CommandHandler("sessions", self.cmd_sessions))
         app.add_handler(CommandHandler("resume", self.cmd_resume))
         app.add_handler(CommandHandler("continue", self.cmd_continue))
@@ -1299,6 +1579,7 @@ class Transport:
             await self.shutdown_notice()
             await app.updater.stop()
             await app.stop()
+            self.close_logins()
             for agent in self.agents.values():
                 await agent.shutdown()
 
@@ -1348,6 +1629,10 @@ class Transport:
             await app_send(self.app, chat_id, body)
         except TelegramError as exc:
             log.warning("startup banner send failed: %s", exc)
+
+    def close_logins(self) -> None:
+        for chat_id in list(self.logins):
+            self.close_login(chat_id)
 
     async def shutdown_notice(self) -> None:
         chat_id = self._home_chat()
