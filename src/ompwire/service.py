@@ -53,6 +53,18 @@ def agent_command() -> str:
     return str(load_config().get("acp", "command", "omp"))
 
 
+def agent_binary(command: str = "") -> str | None:
+    """Where the agent actually is, on PATH or where the installer puts it.
+
+    A fresh install adds ~/.local/bin to the shell's rc files, which the current shell has not
+    read yet, so `which omp` answers nothing while omp sits right there. Probing the install
+    location is what makes `gateway start` work in the same shell that ran install.sh.
+    """
+    from .setup import agent_path
+
+    return agent_path(command or agent_command())
+
+
 def service_path(agent: str = "") -> str:
     """PATH for the unit.
 
@@ -64,7 +76,7 @@ def service_path(agent: str = "") -> str:
     dirs: list[str] = []
     # The agent's directory first: ExecStart is already an absolute path to ompwire, so the agent
     # is the binary this PATH exists for.
-    for binary in (shutil.which(agent or agent_command()) or "", command_path()):
+    for binary in (agent_binary(agent) or "", command_path()):
         if not binary:
             continue
         parent = str(Path(binary).parent)
@@ -168,6 +180,17 @@ def start(gateway: str = "telegram", *, force: bool = False, now: bool = True) -
         print(f"FAIL {env_file} is missing: add a credential first "
               f"(`ompwire gateway add {gateway}`)")
         return 1
+    agent = agent_binary()
+    if agent is None:
+        command = agent_command()
+        print(f"FAIL the agent ({command}) was not found, so the unit would start and then fail "
+              f"every turn.\n"
+              f"     install it:  curl -fsSL https://omp.sh/install | sh\n"
+              f"     then:        ompwire gateway start {gateway}")
+        if not force:
+            return 1
+        print("     --force given: writing the unit anyway")
+
     if not force and not _credential_works(gateway):
         print(f"FAIL the credential for {gateway!r} is not accepted by the platform. "
               f"Restart=always would hammer it every 5 seconds.\n"

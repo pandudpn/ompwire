@@ -457,16 +457,9 @@ def cmd_restart(_args: argparse.Namespace) -> int:
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
-    from .setup import normalise_token, run
+    from .setup import run
 
-    token = ""
-    if args.token_stdin:
-        # for terminals where the hidden prompt misbehaves: no echo, no history
-        token = normalise_token(sys.stdin.readline())
-        if not token:
-            print("FAIL --token-stdin was given but stdin was empty", file=sys.stderr)
-            return 1
-    return run(yes=args.yes, force=args.force, install_omp=args.install_omp, token=token)
+    return run(yes=args.yes, force=args.force, install_omp=args.install_omp)
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -592,9 +585,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="leave a running gateway alone instead of restarting it")
     upd.set_defaults(func=cmd_update)
 
-    setup = _sub(sub, "setup", "check for omp, then write config and .env",
-                 "In order: agent, provider and model, thinking, mode, yolo, cwd, MCP, then the "
-                 "gateway with its token and access list.",
+    setup = _sub(sub, "setup", "check for omp, then write the agent config",
+                 "In order: agent, provider and model, thinking, mode, yolo, cwd, MCP. The "
+                 "gateway and its token are not part of setup: use `ompwire gateway add`.",
                  "  ompwire setup\n  ompwire setup --yes\n  ompwire setup --force --install-omp")
     setup.add_argument("--yes", action="store_true", help="accept the defaults, no prompts")
     setup.add_argument("--force", action="store_true", help="rewrite an existing config")

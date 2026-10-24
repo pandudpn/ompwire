@@ -73,8 +73,12 @@ else
         esac
     fi
     sh -lc "${OMP_INSTALL}"
-    if have omp || [ -x "${HOME}/.local/bin/omp" ]; then
-        say "ok   agent installed"
+    if ! have omp && [ -x "${HOME}/.local/bin/omp" ]; then
+        # the installer appends ~/.local/bin to the rc files, which this shell has not read yet
+        PATH="${HOME}/.local/bin:${PATH}"; export PATH
+    fi
+    if have omp; then
+        say "ok   agent installed: $(command -v omp)"
     else
         say "--   the installer finished but omp is not on PATH yet; open a new shell and re-run"
         exit 1

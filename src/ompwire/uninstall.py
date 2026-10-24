@@ -61,6 +61,20 @@ def human(size: int) -> str:
     return f"{size}B"
 
 
+def under_systemd(pid: int) -> bool:
+    """True when this pid is a supervised gateway rather than a stray one.
+
+    `start` refuses to launch a second poller because two pollers make Telegram answer 409
+    Conflict. The process the unit runs matches the same command line, so without this check a
+    machine whose gateway is healthy refuses to re-run `start` and tells the user to kill it.
+    """
+    try:
+        cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "/ompwire" in cgroup and ".service" in cgroup
+
+
 def running_serves() -> list[tuple[int, str]]:
     """Find running gateways without always trusting pgrep to be installed.
 
@@ -96,6 +110,8 @@ def running_serves() -> list[tuple[int, str]]:
         if "ompwire" not in command:
             continue
         if not any(mark in command for mark in ("gateway _run", "gateway run", "serve")):
+            continue
+        if under_systemd(pid):
             continue
         found.append((pid, command.strip()))
     return found

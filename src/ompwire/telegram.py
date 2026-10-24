@@ -95,6 +95,20 @@ def two_columns(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboard
     return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
 
+MCP_LABEL_MAX = 6
+
+
+def mcp_label(names: Iterable[str]) -> str:
+    """How the banner names the MCP servers: the first few, then a count of the rest."""
+    names = [str(name) for name in names]
+    if not names:
+        return "none"
+    shown = ", ".join(names[:MCP_LABEL_MAX])
+    if len(names) > MCP_LABEL_MAX:
+        shown += f" +{len(names) - MCP_LABEL_MAX}"
+    return shown
+
+
 def normalize_mcp_servers(servers: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Backwards-compatible alias for `mcp_hub.normalize`."""
     return normalize(list(servers or []))
@@ -145,6 +159,29 @@ def _chunks(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
         out.append(text[:limit])
         text = text[limit:]
     return out or [""]
+
+
+def resolve_mcp_servers(config: Any) -> list[dict[str, Any]]:
+    """The servers a session is opened with.
+
+    One resolver, because the banner lives on a different class than the session: a copy of this
+    logic in the banner reported "none" while the hub was supplying twenty-four servers.
+    """
+    source = str(config.get("mcp", "source", "inline") or "inline").lower()
+    if source == "none":
+        return []
+    if source == "mcp-hub":
+        entries = hub_servers(
+            config.get("mcp", "hub_path", "~/mcp-hub/servers.yaml"),
+            include=config.get("mcp", "include", []) or [],
+            exclude=config.get("mcp", "exclude", []) or [],
+        )
+        overrides = config.get("mcp", "overrides", {}) or {}
+        for entry in entries:
+            patch = overrides.get(entry.get("name")) or {}
+            merge_mcp_entry(entry, patch)
+        return normalize(entries)
+    return normalize(config.get("mcp", "servers", []) or [])
 
 
 class ChatAgent:
@@ -244,21 +281,7 @@ class ChatAgent:
         await self._apply_preferences()
 
     def _mcp_servers(self) -> list[dict[str, Any]]:
-        source = str(self.config.get("mcp", "source", "inline") or "inline").lower()
-        if source == "none":
-            return []
-        if source == "mcp-hub":
-            entries = hub_servers(
-                self.config.get("mcp", "hub_path", "~/mcp-hub/servers.yaml"),
-                include=self.config.get("mcp", "include", []) or [],
-                exclude=self.config.get("mcp", "exclude", []) or [],
-            )
-            overrides = self.config.get("mcp", "overrides", {}) or {}
-            for entry in entries:
-                patch = overrides.get(entry.get("name")) or {}
-                merge_mcp_entry(entry, patch)
-            return normalize(entries)
-        return normalize(self.config.get("mcp", "servers", []) or [])
+        return resolve_mcp_servers(self.config)
 
     def prefs(self) -> dict[str, str]:
         """Per-chat choices that must outlive a session (/new used to reset them)."""
@@ -1744,11 +1767,17 @@ class Transport:
         except Exception as exc:
             rows.append(("agent", f"failed: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
-        servers = [str(server.get("name")) for server in (self.config.get("mcp", "servers") or [])]
+        # The resolved list, not config["mcp"]["servers"]: with source = "mcp-hub" that inline
+        # list is empty while the hub supplies every server, and the banner said "none".
+        try:
+            servers = [str(server.get("name")) for server in resolve_mcp_servers(self.config)]
+        except Exception as exc:
+            servers = []
+            log.warning("mcp resolution failed: %s", exc)
         rows += [
             ("approval", f"{approval_policy(self.config)} · {float(self.config.get('approval', 'timeout', 120)):.0f}s"),
             ("yolo", "on" if agent.yolo else "off"),
-            ("mcp", ", ".join(servers) if servers else "none"),
+            ("mcp", mcp_label(servers)),
             ("users", ", ".join(str(u) for u in sorted(self.allowed)) or "none"),
             ("store", self.config.get("session", "store", "")),
             ("clock", now_wib()),

@@ -394,3 +394,25 @@ def test_provider_and_model_are_one_step(monkeypatch, tmp_path):
     assert seen[model_index][1] == ["zai/glm-5.1", "zai/glm-5.3-flash"]
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert data["agent"]["model"] == "zai/glm-5.1"
+
+
+def test_the_setup_command_does_not_read_the_gateway_token_flag(monkeypatch):
+    """It crashed with AttributeError: 'Namespace' object has no attribute 'token_stdin'.
+
+    load_config touches the real filesystem and run() prompts, so both are replaced; what is under
+    test is that the parsed Namespace and cmd_setup still agree about which flags exist.
+    """
+    from ompwire import __main__ as entry
+    from ompwire import setup as setup_module
+
+    seen = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(setup_module, "run", fake_run)
+    monkeypatch.setattr(entry, "load_config", lambda _path=None: {})
+
+    assert entry.main(["setup", "--yes"]) == 0
+    assert seen == {"yes": True, "force": False, "install_omp": False}
