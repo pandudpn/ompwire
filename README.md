@@ -168,6 +168,7 @@ The transport owns session routing, approvals, streaming and cost reporting. Any
 | `/stop` | `session/cancel` |
 | `/status` | transport state: session id, cwd, model/mode/thinking, process age |
 | `/usage` | accumulated `usage_update` frames per session |
+| `/context` | forwarded to the agent, which owns the context accounting |
 | `/approve` | show or set the approval policy (`ask` / `allow` / `deny`), persisted to `overrides.json` |
 | `/verbose` | toggle the tool-call trace |
 | `/queue <text>` | harness FIFO, dispatched after the running turn ends |
@@ -183,7 +184,7 @@ The transport owns session routing, approvals, streaming and cost reporting. Any
 
 Agent prose and tool activity are kept apart, because they are different things.
 
-- Answers render as markdown: headings, bold, italic, links, bullets and fenced code blocks become Telegram HTML (`mdrender.py`). A half-streamed message still produces valid HTML, and a rejected parse falls back to plain text instead of dropping the reply.
+- Answers render as markdown: headings, bold, italic, links, bullets and fenced code blocks become Telegram HTML (`mdrender.py`), and bar-chart lines (as printed by the agent's own `/context`) are kept in a monospace block so the bars stay aligned. A half-streamed message still produces valid HTML, and a rejected parse falls back to plain text instead of dropping the reply.
 - Tool calls stream into a separate trace message, shell-styled: the command in `<code>`, its output in a `<pre>` block, status while it runs. `/verbose` toggles it.
 - Session changes (`/new`, `/fork`, `/resume`, `/cwd`) answer with a card showing session id, model, mode, thinking level, approval policy, yolo state and cwd.
 - Token usage is not posted per turn (`stream.show_usage = false`); `/usage` reports the session totals.

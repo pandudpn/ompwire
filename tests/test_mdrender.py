@@ -44,3 +44,15 @@ def test_plain_fallback_drops_markers():
 
 def test_empty_input():
     assert to_html("") == ""
+
+
+def test_bar_chart_lines_become_a_pre_block():
+    sample = ("Context window: 1048576 tokens (4% used)\n"
+              "  System prompt    [░░░░░░░░] 1%  6292 tokens\n"
+              "  Free             [████████] 66%  689874 tokens\n"
+              "\nTail text")
+    html = to_html(sample)
+    assert "Context window" in html
+    pre = html.split("<pre>")[1].split("</pre>")[0]
+    assert "[░░░░░░░░] 1%" in pre and "[████████] 66%" in pre
+    assert "Tail text" not in pre

@@ -25,6 +25,8 @@ STRIKE_RE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~", re.DOTALL)
 LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
 BULLET_RE = re.compile(r"^[ \t]*[-+*][ \t]+", re.MULTILINE)
 QUOTE_RE = re.compile(r"^[ \t]*(?:&gt;|>)[ \t]?(.+)$", re.MULTILINE)
+BAR_CHARS = "█▓▒░▏▎▍▌▋▊▉"
+BAR_LINE_RE = re.compile(r"^\s*\S.*[" + BAR_CHARS + r"]")
 
 
 def _escape(text: str) -> str:
@@ -46,6 +48,24 @@ def _fence(block: str) -> str:
     return f"{tag}{_escape(body)}{closing}"
 
 
+def _monospace_runs(text: str) -> str:
+    """Keep bar charts and aligned blocks in a pre block, since they need a monospace font."""
+    lines = text.split("\n")
+    out: list[str] = []
+    block: list[str] = []
+    for line in lines:
+        if BAR_LINE_RE.match(line):
+            block.append(line)
+            continue
+        if block:
+            out.append("<pre>" + "\n".join(block) + "</pre>")
+            block = []
+        out.append(line)
+    if block:
+        out.append("<pre>" + "\n".join(block) + "</pre>")
+    return "\n".join(out)
+
+
 def _inline(text: str) -> str:
     out: list[str] = []
     for piece in INLINE_CODE_RE.split(text):
@@ -60,6 +80,7 @@ def _inline(text: str) -> str:
             escaped = STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", escaped)
             escaped = BULLET_RE.sub("• ", escaped)
             escaped = QUOTE_RE.sub(lambda m: f"<blockquote>{m.group(1)}</blockquote>", escaped)
+            escaped = _monospace_runs(escaped)
             out.append(escaped)
     return "".join(out)
 

@@ -47,6 +47,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("stop", "cancel the running turn"),
     ("status", "session, model, mode and process state"),
     ("usage", "token usage for this session"),
+    ("context", "context window breakdown from the agent"),
     ("sessions", "list recorded sessions"),
     ("resume", "resume a session by id"),
     ("continue", "resume this chat's last session"),
@@ -639,6 +640,18 @@ class Transport:
             parse_mode=ParseMode.HTML,
         )
 
+    async def cmd_context(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """The agent renders a better context report than we could, so ask it."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        chat_id = update.effective_chat.id
+        agent = self.agent_for(chat_id)
+        payload = _TextOnly("/context", update.effective_message)
+        depth = self.enqueue(chat_id, "prompt", payload)
+        log.info("context report requested chat=%s busy=%s queue=%s", chat_id, agent.busy, depth)
+        if agent.busy:
+            await update.effective_message.reply_text(f"queued (position {depth})")
+
     async def cmd_sessions(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
@@ -995,7 +1008,7 @@ class Transport:
         groups = [
             ("session", ["new", "sessions", "resume", "continue", "fork", "cwd", "kill"]),
             ("agent", ["model", "mode", "thinking", "approve", "trace", "verbose", "yolo", "skills"]),
-            ("running", ["stop", "queue", "steer", "status", "usage"]),
+            ("running", ["stop", "queue", "steer", "status", "usage", "context"]),
             ("info", ["whoami", "help"]),
         ]
         sections = [(heading, [(name, names[name]) for name in wanted if name in names])
@@ -1090,6 +1103,7 @@ class Transport:
         app.add_handler(CommandHandler("stop", self.cmd_stop))
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("usage", self.cmd_usage))
+        app.add_handler(CommandHandler("context", self.cmd_context))
         app.add_handler(CommandHandler("sessions", self.cmd_sessions))
         app.add_handler(CommandHandler("resume", self.cmd_resume))
         app.add_handler(CommandHandler("continue", self.cmd_continue))
