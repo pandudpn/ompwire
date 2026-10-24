@@ -7,7 +7,7 @@ doctor:
 	.venv/bin/ompwire doctor
 
 lint:
-	.venv/bin/ruff check src tests
+	.venv/bin/ruff check src tests scripts
 
 run:
 	.venv/bin/ompwire gateway start telegram
