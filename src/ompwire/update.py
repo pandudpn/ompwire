@@ -13,9 +13,6 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as installed_version
-
 REPO = "pandudpn/ompwire"
 GIT_URL = f"git+https://github.com/{REPO}.git"
 PACKAGE = "ompwire"
@@ -34,12 +31,14 @@ def _get(url: str, timeout: float = 10.0) -> dict | list | None:
 
 
 def current_version() -> str:
-    try:
-        return installed_version("ompwire")
-    except PackageNotFoundError:
-        from . import __version__
+    """The version of the code that is running.
 
-        return __version__
+    Distribution metadata goes stale on an editable checkout (bump pyproject, ask
+    for the version, get the old one), so the module itself wins.
+    """
+    from . import __version__
+
+    return __version__
 
 
 def current_commit() -> str:

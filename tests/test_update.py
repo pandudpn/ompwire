@@ -82,3 +82,10 @@ def test_run_check_changes_nothing(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "channel   : stable -> ompwire 0.2.0" in out
     assert "no changes made" in out
+
+
+def test_current_version_comes_from_the_code_not_stale_metadata(monkeypatch):
+    """An editable checkout keeps old dist metadata; the running module wins."""
+    from ompwire import __version__
+
+    assert update.current_version() == __version__
