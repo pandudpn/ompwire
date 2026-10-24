@@ -88,7 +88,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("steer", "steer the running turn (experimental)"),
     ("schedule", "scheduled turns: list, run now, remove"),
     ("reasoning", "show or hide the agent's thinking"),
-    ("yolo", "respawn the agent with approvals off"),
+    ("yolo", "respawn the agent with approvals off, for this chat only"),
     ("kill", "stop the agent process for this chat"),
     ("whoami", "ids and transport info"),
     ("help", "this list"),
@@ -245,7 +245,7 @@ class ChatAgent:
         # With no stored choice the config decides, so setup can ship yolo on.
         stored_yolo = self.store.prefs(key).get("yolo")
         if stored_yolo is None:
-            self.yolo = bool(config.get("agent", "yolo", True))
+            self.yolo = bool(config.get("agent", "yolo", False))
         else:
             self.yolo = stored_yolo == "on"
         self.usage = {"input": 0, "output": 0, "cached": 0, "turns": 0}

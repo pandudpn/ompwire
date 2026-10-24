@@ -446,6 +446,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"FAIL agent command not found on PATH: {command}")
         return 1
     print(f"ok   agent command: {path}")
+    if bool(config.get("agent", "yolo", False)):
+        # not a failure: yolo is a legitimate choice, but it must be a decision, not a surprise
+        print("WARN yolo is on: no tool asks, and the agent can write anywhere its cwd allows")
+    else:
+        print(f"ok   approvals: {config.get('agent', 'approval_mode', 'write')} "
+              f"· a shell command asks in the chat")
     _doctor_units(command)
 
     store_path = str(config.get("session", "store"))

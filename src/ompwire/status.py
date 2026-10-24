@@ -126,7 +126,7 @@ def collect(config_path: str | None = None) -> list[tuple[str, str]]:
     rows.append(("mode", str(config.get("agent", "mode", "") or "") or "agent default"))
     rows.append(("thinking", str(config.get("agent", "thinking", "") or "") or "agent default"))
 
-    yolo = bool(config.get("agent", "yolo", True))
+    yolo = bool(config.get("agent", "yolo", False))
     if yolo:
         rows.append(("approvals", "yolo (bypassed)"))
     else:

@@ -99,7 +99,7 @@ def test_config_is_written_and_parses(monkeypatch, tmp_path):
     assert "gateway" not in data and "telegram" not in data
     assert data["agent"]["mode"] == "default"
     assert data["agent"]["thinking"] == "xhigh"
-    assert data["agent"]["yolo"] is True
+    assert data["agent"]["yolo"] is False  # approvals stay on unless someone asks for yolo
     assert "telegram" not in data
     assert data["mcp"]["source"] == "none"      # omp owns its servers; no hub merge by default
     assert "fenced code" in data["agent"]["append_system_prompt"]
@@ -184,8 +184,20 @@ def test_force_starts_from_the_agent_defaults_instead_of_the_file(monkeypatch, t
     assert setup.run(yes=True, force=True) == 0
     data = tomllib.loads(config.read_text())
     assert data["agent"]["model"] == "zai/glm-5.1"       # the agent's current model
-    assert data["agent"]["yolo"] is True
+    assert data["agent"]["yolo"] is False  # approvals stay on unless someone asks for yolo
     assert "telegram" not in data
+
+
+def test_a_fresh_install_does_not_turn_approvals_off(monkeypatch, tmp_path):
+    """A coding agent with blanket approval and a home-directory workspace rewrites things."""
+    _sandbox(monkeypatch, tmp_path)
+    _agent(monkeypatch)
+    _token(monkeypatch)
+
+    assert setup.run(yes=True) == 0
+    data = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert data["agent"]["yolo"] is False
+    assert data["agent"]["approval_mode"] == "write"
 
 
 def test_setup_never_asks_for_a_bot_token(monkeypatch, tmp_path, capsys):
@@ -287,7 +299,7 @@ def test_yolo_on_skips_the_approval_question(monkeypatch, tmp_path):
     assert setup.run(yes=False) == 0
     assert not any("agent approval mode" in prompt for prompt in asked)
     data = tomllib.loads((tmp_path / "config.toml").read_text())
-    assert data["agent"]["approval_mode"] == "always-ask"   # fallback, never "yolo"
+    assert data["agent"]["approval_mode"] == "write"   # the fallback that reaches a human
 
 
 def test_missing_provider_warns_but_does_not_block(monkeypatch, tmp_path, capsys):
@@ -416,3 +428,12 @@ def test_the_setup_command_does_not_read_the_gateway_token_flag(monkeypatch):
 
     assert entry.main(["setup", "--yes"]) == 0
     assert seen == {"yes": True, "force": False, "install_omp": False}
+
+
+def test_the_default_approval_mode_reaches_a_human():
+    """Measured against omp 18.12: `always-ask` denies a write without asking anyone."""
+    from ompwire.config import DEFAULTS
+
+    agent = DEFAULTS["agent"]
+    assert agent["yolo"] is False
+    assert agent["approval_mode"] == "write"

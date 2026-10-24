@@ -420,8 +420,8 @@ def existing_settings(config_file: Path) -> dict[str, Any]:
         "model": str(agent.get("model") or ""),
         "mode": str(agent.get("mode") or "default"),
         "thinking": str(agent.get("thinking") or "xhigh"),
-        "yolo": bool(agent.get("yolo", True)),
-        "approval_mode": str(agent.get("approval_mode") or "always-ask"),
+        "yolo": bool(agent.get("yolo", False)),
+        "approval_mode": str(agent.get("approval_mode") or "write"),
         "approval_policy": str((data.get("approval") or {}).get("policy") or "ask"),
         "show_reasoning": bool((data.get("stream") or {}).get("show_reasoning", False)),
         "allowed": allowed,
@@ -513,13 +513,13 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False,
                   str(current_settings.get("mode") or current.get("mode") or "default"), yes=yes)
 
     # 5. yolo decides whether an approval policy is needed at all
-    yolo_default = "yes" if current_settings.get("yolo", True) else "no"
+    yolo_default = "yes" if current_settings.get("yolo", False) else "no"
     yolo_answer = _ask("yolo mode (approvals bypassed)", yolo_default, yes=yes)
     yolo = yolo_answer.strip().lower() in ("yes", "y", "true", "on", "1")
     # omp's own vocabulary: always-ask | always-ask-cached | write. Writing "yolo" here
     # would keep bypassing approvals even after the chat turns yolo off, so it is never
     # written: the boolean above is the only switch.
-    approval = str(current_settings.get("approval_mode") or "always-ask")
+    approval = str(current_settings.get("approval_mode") or "write")
     if approval == "yolo":
         approval = "always-ask"
     if not yolo:

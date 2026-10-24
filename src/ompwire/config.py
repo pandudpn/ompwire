@@ -57,8 +57,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "model": "",  # empty => whatever the ACP session defaults to
         "mode": "default",  # default | plan
         "thinking": "xhigh",  # reasoning effort, agent-dependent
-        "yolo": True,  # approvals bypassed unless the chat turns it off
-        "approval_mode": "always-ask",
+        # Approvals are ON by default. A coding agent with blanket approval and the home directory
+        # as its workspace will eventually rewrite something nobody asked it to touch: that is not
+        # a prompt problem, it is this default. `/yolo` turns it off per chat, deliberately.
+        "yolo": False,
+        # Measured against omp 18.12 in ACP mode: `always-ask` and `always-ask-cached` deny a
+        # write without ever sending session/request_permission, so the button never appears and
+        # the agent just refuses. `write` allows reads and file writes, and sends a permission
+        # request for every shell command, which is the part that can clone, delete, or deploy.
+        "approval_mode": "write",
         # omp has no idea it is talking through a chat window, and its default voice
         # leaves commands inline. This hint is what makes replies render as code.
         "append_system_prompt": (
