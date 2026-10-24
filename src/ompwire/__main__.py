@@ -73,6 +73,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if agent_path(command) is None:
         print(f"FAIL agent not found: {command}. Run `ompwire setup` first.", file=sys.stderr)
         return 1
+
     try:
         gateway = gateways.selected(config, args.gateway)
     except gateways.GatewayError as exc:
