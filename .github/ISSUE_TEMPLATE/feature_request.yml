@@ -1,0 +1,42 @@
+name: Feature request
+description: Something ompwire should do, or do differently
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ompwire is a transport. The agent, the tools, the memory and the prompt all live in
+        OMP, so a request that needs agent state belongs upstream at
+        [omp.sh](https://omp.sh), not here. The transport owns routing, rendering, approvals,
+        sessions and the gateway lifecycle.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do and where it stops. Concrete beats hypothetical.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you want instead
+      description: The behaviour, the command, or the shape of the output.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried or considered
+      description: Including whether OMP itself already does this.
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer does this belong to
+      options:
+        - The transport (ompwire)
+        - The agent (OMP) - will be closed here with a pointer upstream
+        - Not sure
+    validations:
+      required: true

@@ -199,8 +199,12 @@ Contract tests skip themselves when `omp` is absent, so CI stays meaningful with
 `tests/conftest.py` redirects every writable path into a temporary directory, because a test
 run once disabled a real systemd unit.
 
-Architecture, boundaries and the reasoning behind them:
+Architecture, boundaries and the reasoning behind them: [ARCHITECTURE.md](ARCHITECTURE.md), and
+the same picture drawn with its failure modes at
 [docs/ompwire-architecture.html](docs/ompwire-architecture.html).
+
+Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md),
+never a public issue.
 
 ## License
 

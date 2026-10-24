@@ -1,0 +1,83 @@
+name: Bug report
+description: Something broke, or the bot went quiet
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before anything else, run `ompwire doctor`. It checks the agent, the session store and
+        each credential, and its output answers most of the questions below.
+
+        Do not paste a bot token. If one leaked into a log or a screenshot, revoke it in
+        @BotFather first, then `ompwire gateway add <name> --force`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The behaviour you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact command or message, in order. "It broke" cannot be reproduced.
+      placeholder: |
+        1. ompwire gateway add telegram
+        2. ompwire gateway start telegram
+        3. send /status in the chat
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: ompwire doctor output
+      description: Paste the whole block. It contains no secrets, only paths and usernames.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `journalctl --user -u ompwire-<name> -n 100 --no-pager`, or the tail of
+        `~/.local/state/ompwire/ompwire.log`. Tokens are redacted before they are written, but
+        read the block once before you post it.
+      render: text
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `ompwire version` and `omp --version`.
+      placeholder: "ompwire 0.13.0 (uv) · omp 18.12.6"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where it happens
+      multiple: true
+      options:
+        - Telegram gateway
+        - CLI (ompwire chat, setup, doctor, status)
+        - systemd unit
+        - install.sh or update
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Distribution, kernel, and whether `systemctl --user` works on this machine.
+      placeholder: "Ubuntu 24.04, kernel 6.8, systemd --user OK"
+    validations:
+      required: true

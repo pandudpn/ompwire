@@ -1,0 +1,102 @@
+name: release
+
+# A tag is the release. This workflow exists to make that tag trustworthy: the version has to
+# agree everywhere, the suite has to pass, and the tag has to install as a real user would.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build and publish
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag and version must agree
+        # Two version strings and a tag that drift apart is the failure this guards: the tag
+        # is what install.sh resolves, so a mismatch installs something nobody meant to ship.
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          [ -n "${{ inputs.tag }}" ] && tag="${{ inputs.tag }}"
+          pyproject=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          module=$(python -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/ompwire/__init__.py').read_text()).group(1))")
+          echo "tag=${tag#v}  pyproject=${pyproject}  module=${module}"
+          if [ "${tag#v}" != "$pyproject" ] || [ "$pyproject" != "$module" ]; then
+            echo "::error::tag ${tag} does not match pyproject ${pyproject} / module ${module}"
+            exit 1
+          fi
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev]'
+      - name: ruff
+        run: ruff check src tests
+      - name: pytest
+        run: python -m pytest -q
+
+  install-smoke:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: The tag installs and reports its own version
+        # install.sh is the path every user takes, so it is tested against the tag, not HEAD.
+        # The repository may be private, so git gets the workflow token instead.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          python -m pip install --quiet uv
+          export UV_TOOL_DIR="$RUNNER_TEMP/tools" UV_TOOL_BIN_DIR="$RUNNER_TEMP/bin"
+          export OMPWIRE_NO_PATH_EDIT=1 OMPWIRE_NO_SETUP=1 OMPWIRE_NO_OMP=1
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          ./install.sh --ref "${GITHUB_REF_NAME}"
+          got=$(ompwire --version | awk '{print $2}')
+          want="${GITHUB_REF_NAME#v}"
+          echo "installed ${got}, tag ${want}"
+          [ "$got" = "$want" ] || { echo "::error::installed $got, expected $want"; exit 1; }
+          ompwire help | grep -q 'ompwire gateway start'
+
+  publish:
+    needs: [verify, install-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Publish
+        # Generated notes come from the commits; no hand-written summary to drift or mangle.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          [ -n "${{ inputs.tag }}" ] && tag="${{ inputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --title "ompwire ${tag#v}" --generate-notes
+          fi
+          gh release view "$tag" --json url --jq .url

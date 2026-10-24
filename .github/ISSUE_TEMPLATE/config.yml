@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/pandudpn/ompwire#readme
+    about: Install, quick start, gateways, chat commands, configuration, troubleshooting.
+  - name: Architecture
+    url: https://github.com/pandudpn/ompwire/blob/main/ARCHITECTURE.md
+    about: Why the transport is this small, and which layer owns what.
+  - name: Security
+    url: https://github.com/pandudpn/ompwire/blob/main/SECURITY.md
+    about: A leaked bot token or anything else that should not be a public issue.
