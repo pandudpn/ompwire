@@ -620,13 +620,16 @@ class ChatAgent:
                 log.error("answer still not delivered after waiting: %s", retry)
                 return None
 
-    async def _edit_answer(self, message, text: str) -> None:
+    async def _edit_answer(self, message, text: str) -> bool:
+        """Edit the answer; False when Telegram did not take it, so the caller can retry."""
         try:
             await self.edit_md(message, text)
+            return True
         except RetryAfter as exc:
             self._note_rate_limit(exc)
         except TelegramError as exc:
-            log.debug("answer edit rejected: %s", exc)
+            log.warning("answer edit not delivered: %s", exc)
+        return False
 
     def _rate_limited(self) -> bool:
         return time.monotonic() < self._quiet_until
@@ -683,19 +686,38 @@ class ChatAgent:
             # one Telegram message per chunk, edited in place; sending parts[1:] on every flush
             # posted the tail of a long answer again each second
             chunk_msgs: list[Any] = state.setdefault("chunk_msgs", [])
-            if joined != state["text"]:
+            # Remember only what Telegram actually shows. Recording the text after a refused
+            # edit made the final flush think nothing had changed: the chat kept "The" while the
+            # agent had written the whole answer.
+            if joined != state["text"] or force:
+                delivered = True
                 for index, part in enumerate(parts):
                     if index < len(chunk_msgs):
                         if index == len(chunk_msgs) - 1 or index == len(parts) - 1 or force:
-                            await self._edit_answer(chunk_msgs[index], part)
+                            ok = await self._edit_answer(chunk_msgs[index], part)
+                            delivered = delivered and ok
                         continue
                     sent_msg = await self._send_answer(part)
                     if sent_msg is None:
+                        delivered = False
                         break
                     chunk_msgs.append(sent_msg)
                     sent.append(sent_msg)
                 state["text_msg"] = chunk_msgs[0] if chunk_msgs else None
-            state["text"] = joined
+                if delivered:
+                    state["text"] = joined
+                elif force and chunk_msgs:
+                    # the final edit is the answer itself: wait out a short flood window, retry once
+                    window = max(0.0, self._quiet_until - time.monotonic())
+                    if window <= 20:
+                        await asyncio.sleep(window + 0.5)
+                        self._quiet_until = 0.0
+                        last = len(chunk_msgs) - 1
+                        if await self._edit_answer(chunk_msgs[last], parts[last]):
+                            state["text"] = joined
+                    if state["text"] != joined:
+                        log.error("final answer not delivered chat=%s chars=%s",
+                                  self.chat_id, len(joined))
             if force:
                 raw = "".join(text_buffer)
                 _, options = extract_options(raw)

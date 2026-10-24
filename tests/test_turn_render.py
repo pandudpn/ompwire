@@ -420,3 +420,38 @@ def test_a_long_answer_is_sent_once_per_chunk(monkeypatch):
     asyncio.run(go())
     answer_sends = [body for body in sends if "aaaa" in body or "step" in body]
     assert len(answer_sends) == 2
+
+
+def test_a_refused_final_edit_does_not_leave_the_answer_cut(tmp_path):
+    """The chat showed only "The": the edit carrying the full answer was refused once and the
+    final flush skipped it, because the text had been recorded as shown anyway."""
+    config = load_config(env={})
+    config.data["session"]["store"] = str(tmp_path / "s.db")
+    config.data["stream"].update({"show_tool_calls": False, "edit_interval": 0.0})
+    shown: list[str] = []
+
+    class FlakyBot(FakeBot):
+        async def send_message(self, chat_id, text, **kw):
+            shown.append(text)
+            sent = await super().send_message(chat_id, text, **kw)
+            refused = {"done": False}
+
+            async def edit_text(body, **_kw):
+                if "selesai" in body and not refused["done"]:
+                    refused["done"] = True
+                    raise telegram.TelegramError("Timed out")
+                shown.append(body)
+
+            sent.edit_text = edit_text
+            return sent
+
+    async def go():
+        agent = telegram.ChatAgent(config, chat_id=1, key="cut",
+                                   app=types.SimpleNamespace(bot=FlakyBot()))
+        agent.client = FakeClient([message("satu "), message("dua "), message("selesai.")])
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        await agent.ask("halo")
+
+    asyncio.run(go())
+    assert "selesai" in shown[-1]
