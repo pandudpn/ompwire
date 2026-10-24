@@ -69,6 +69,12 @@ def message(text):
                        "content": {"type": "text", "text": text}})
 
 
+def tool_progress(call_id, text, status="in_progress"):
+    return Update(kind="tool_call_update", session_id="s",
+                  raw={"sessionUpdate": "tool_call_update", "toolCallId": call_id,
+                       "status": status, "content": [{"type": "text", "text": text}]})
+
+
 def tool_call(call_id, title, tasks=None):
     raw = {"sessionUpdate": "tool_call", "toolCallId": call_id, "kind": "other",
            "title": title, "status": "in_progress", "rawInput": {}}
@@ -159,3 +165,39 @@ def test_a_failed_run_says_so_in_the_card():
                     [("took", "0.4s")], "<pre>ACP command not found: omp</pre>", "")
     assert "⛔" in card and "agent failed" in card
     assert "ACP command not found" in card
+
+
+def test_a_subagent_is_labelled_subagent_not_other(rendered):
+    """The ACP kind for omp's task tool is "other", which tells the reader nothing."""
+    messages = rendered([
+        tool_call("t1", "Reading note.txt via subagent",
+                  tasks=[{"name": "ReadNote", "agent": "sonic"}]),
+        message("done"),
+    ])
+    trace = [body for body in messages if "🔧" in body][-1]
+    assert "<code>subagent</code>" in trace
+    assert "<code>other</code>" not in trace
+
+
+def test_what_the_subagent_is_doing_is_shown(rendered):
+    messages = rendered([
+        tool_call("t1", "Reading note.txt via subagent",
+                  tasks=[{"name": "ReadNote", "agent": "sonic"}]),
+        tool_progress("t1", "Spawned agent ReadNote"),
+        tool_progress("t1", "Running agent ReadNote"),
+        message("done"),
+    ])
+    trace = [body for body in messages if "🔧" in body][-1]
+    assert "· Spawned agent ReadNote" in trace
+    assert "· Running agent ReadNote" in trace
+
+
+def test_a_waiting_call_is_not_shown_as_a_step(rendered):
+    messages = rendered([
+        tool_call("t1", "Reading note.txt via subagent",
+                  tasks=[{"name": "ReadNote", "agent": "sonic"}]),
+        tool_call("t2", "Waiting for ReadNote result"),
+        message("done"),
+    ])
+    trace = [body for body in messages if "🔧" in body][-1]
+    assert "Waiting for" not in trace

@@ -153,8 +153,13 @@ decision behind it:
 | `config_option_update`, `current_mode_update` | kept so the pickers show current values |
 
 A subagent has no event type of its own. omp runs one through its `task` tool, so a subagent shows
-up as a `tool_call` whose `rawInput.tasks[]` names it, which is why the trace can print
-`subagent: ReadNote (sonic)` and nothing more. Reasoning is not guaranteed either: omp only emits
+up as a `tool_call` whose `rawInput.tasks[]` names it. The ACP `kind` for that call is `other`,
+which tells a reader nothing, so the transport relabels it `subagent` and prints the name plus the
+agent type. What the subagent is doing arrives on the same call as `tool_call_update` events whose
+`content` text reads `Spawned agent X`, `Running agent X`, `Background task X complete`; those are
+kept as a short trail, deduplicated and capped at four. The final `rawOutput` carries the
+subagent's own result snapshot, which is where its findings become readable. A call whose only
+content is "waiting for the result" is dropped: it is the absence of a step, not a step. Reasoning is not guaranteed either: omp only emits
 `agent_thought_chunk` on turns where the model actually reasons, so an empty thinking block means
 the turn had none, not that the transport dropped it. That is also why the display is tested
 against a fake stream rather than the live model.

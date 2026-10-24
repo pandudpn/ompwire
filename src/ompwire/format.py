@@ -83,7 +83,7 @@ def _clip(text: str, lines: int = TOOL_OUTPUT_LINES, width: int = TOOL_LINE_WIDT
 
 
 def tool_block(kind: str, title: str, command: str = "", output: str = "", status: str = "",
-               subagent: str = "") -> str:
+               subagent: str = "", steps: Iterable[str] = ()) -> str:
     """One tool call as a fenced block: the command and its output in one <pre>."""
     head = f"🔧 <code>{esc(kind or 'tool')}</code>"
     if status == "in_progress":
@@ -104,6 +104,8 @@ def tool_block(kind: str, title: str, command: str = "", output: str = "", statu
         lines.append(_clip(title, lines=1, width=TOOL_LINE_WIDTH + 40))
     if subagent:
         lines.append(_clip(f"subagent: {subagent}", lines=1, width=TOOL_LINE_WIDTH + 40))
+    for step in list(steps)[-4:]:
+        lines.append(_clip(f"  · {step}", lines=1, width=TOOL_LINE_WIDTH + 40))
     if output.strip():
         lines.append(_clip(output))
     if not lines:

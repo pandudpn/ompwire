@@ -151,6 +151,14 @@ async def send_md(bot, chat_id: int, text: str):
         return await bot.send_message(chat_id, to_plain(text))
 
 
+WAITING_RE = re.compile(r"^(waiting for|menunggu)\b", re.IGNORECASE)
+
+
+def _is_waiting(title: str) -> bool:
+    """A call that only says it is waiting adds a line and no information."""
+    return bool(WAITING_RE.match(title.strip()))
+
+
 def _unique_commands() -> list[tuple[str, str]]:
     """Telegram rejects a duplicate command name, so the menu is deduped."""
     seen: set[str] = set()
@@ -620,7 +628,8 @@ class ChatAgent:
             blocks = [
                 tool_block(entry.get("kind", "tool"), entry.get("title", ""),
                            entry.get("command", ""), entry.get("output", ""),
-                           entry.get("status", ""), entry.get("subagent", ""))
+                           entry.get("status", ""), entry.get("subagent", ""),
+                           entry.get("steps") or [])
                 for entry in trace.values()
             ]
             body = ""
@@ -685,6 +694,8 @@ class ChatAgent:
                     raw = update.raw
                     call_id = str(raw.get("toolCallId") or f"anon{len(trace)}")
                     entry = trace.setdefault(call_id, {"kind": "tool"})
+                    if update.kind == "tool_call" and _is_waiting(str(raw.get("title") or "")):
+                        continue
                     if update.kind == "tool_call":
                         state["tools"] += 1
                         self.tools_used += 1
@@ -694,6 +705,7 @@ class ChatAgent:
                         entry["command"] = str(raw_input.get("command") or "")
                         tasks = raw_input.get("tasks")
                         if isinstance(tasks, list) and tasks:
+                            entry["kind"] = "subagent"
                             # omp runs subagents through the `task` tool; ACP has no event of
                             # its own for them, so the task list is the only place they appear
                             entry["subagent"] = ", ".join(
@@ -702,6 +714,15 @@ class ChatAgent:
                         log.info("tool call chat=%s kind=%s command=%r", self.chat_id,
                                  entry["kind"], entry["command"][:120] or entry["title"][:120])
                     entry["status"] = str(raw.get("status") or entry.get("status", ""))
+                    steps = [item.get("text", "") for item in (raw.get("content") or [])
+                             if isinstance(item, dict) and item.get("text")]
+                    if steps:
+                        kept = entry.setdefault("steps", [])
+                        for step in steps:
+                            clean = " ".join(str(step).split())[:110]
+                            if clean and clean not in kept:
+                                kept.append(clean)
+                        del kept[:-4]
                     output = raw.get("rawOutput") or {}
                     chunks = [item.get("text", "") for item in (output.get("content") or [])
                               if isinstance(item, dict)]

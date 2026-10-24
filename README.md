@@ -172,9 +172,11 @@ ACP carries the agent's reasoning as `agent_thought_chunk`. `/reasoning on` rend
 answer, in a collapsible block, keeping the last 1200 characters; `/reasoning off` (the default)
 drops it. `ompwire setup` asks once and writes `[stream] show_reasoning`.
 
-Subagents are visible without a switch: omp runs them through its `task` tool, so the tool trace
-shows the subagent name and its agent type. ACP has no event of its own for a subagent, which is
-why that is where they appear.
+Subagents are visible without a switch: omp runs them through its `task` tool, so the trace labels
+the call `subagent`, names it (`subagent: ReadNote (sonic)`), and shows what it is doing as the
+progress text arrives. ACP has no event of its own for a subagent, which is why that is where they
+appear. The call that only says it is waiting for the result is dropped: it adds a line and no
+information.
 
 ## Configuration
 
