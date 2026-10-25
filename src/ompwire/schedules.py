@@ -457,7 +457,7 @@ def next_elapse(name: str) -> str:
 # minute would be discovered when the machine fills up, not when it happens. One button fixes that.
 
 # own line only: explaining the marker in prose must not propose a timer
-MARKER_RE = re.compile(r"^[ \t]*<<\s*schedule\s*:\s*(?P<body>[^>\n]+?)\s*>>[ \t]*$",
+MARKER_RE = re.compile(r"^[ \t]*<<\s*schedule\s*:\s*(?P<body>[^>\n]+?)\s*>>",
                        re.IGNORECASE | re.MULTILINE)
 PARTIAL_RE = re.compile(r"^[ \t]*<<\s*schedule\s*:(?:(?!>>).)*\Z",
                         re.IGNORECASE | re.DOTALL | re.MULTILINE)

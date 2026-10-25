@@ -380,10 +380,21 @@ class Transport:
         ]
         return card(title, now_wib(), rows, note)
 
+    async def _busy(self, update: Update, agent: engine.ChatAgent, command: str) -> bool:
+        """These commands replace the agent process; doing that mid-turn cut the turn off with
+        an "agent error". They wait for the turn instead of killing it behind the person's back."""
+        if not agent.busy:
+            return False
+        await update.effective_message.reply_text(
+            f"a turn is still running; {command} waits until it ends, or /stop it first")
+        return True
+
     async def cmd_new(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
+        if await self._busy(update, agent, "/new"):
+            return
         await agent.new_session()
         log.info("new session chat=%s session=%s", update.effective_chat.id, agent.session_id[:8])
         await update.effective_message.reply_text(
@@ -828,6 +839,8 @@ class Transport:
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
+        if await self._busy(update, agent, "/fork"):
+            return
         try:
             await agent.fork()
             log.info("fork chat=%s session=%s", update.effective_chat.id, agent.session_id[:8])
@@ -849,6 +862,8 @@ class Transport:
         if not os.path.isdir(target):
             return await update.effective_message.reply_text(f"not a directory: {target}")
         agent = self.agent_for(update.effective_chat.id)
+        if await self._busy(update, agent, "/cwd"):
+            return
         agent.cwd = target
         await agent.new_session()
         log.info("cwd change chat=%s cwd=%s session=%s", update.effective_chat.id, target,
@@ -1145,6 +1160,8 @@ class Transport:
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
+        if await self._busy(update, agent, "/yolo"):
+            return
         target = not agent.yolo
         log.warning("yolo toggle chat=%s -> %s", update.effective_chat.id, target)
         await agent.respawn(yolo=target)

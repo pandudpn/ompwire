@@ -251,7 +251,13 @@ class ChatAgent:
         self.store = SessionStore(config.get("session", "store"))
         self.client: AcpClient | None = None
         self.session_id = ""
-        self.cwd = str(config.get("agent", "cwd") or "~")
+        # /cwd is stored with the session; without reading it back a restart silently moved the
+        # chat to the configured directory while still loading the session from the other one
+        stored = self.store.get(key)
+        configured = str(config.get("agent", "cwd") or "~")
+        kept = stored.cwd if stored is not None and stored.cwd else ""
+        # a directory removed since then would make every turn fail to start; fall back
+        self.cwd = kept if kept and os.path.isdir(os.path.expanduser(kept)) else configured
         self.reasoning = bool(config.get("stream", "show_reasoning", False))
         # the bot that receives a scheduled result defaults to the bot being talked to
         self.gateway_name = str(config.get("_gateway", "name", "telegram") or "telegram")
@@ -619,6 +625,10 @@ class ChatAgent:
         # streaming: how much of the current segment has already been shown, measured on the
         # cleaned text, so a marker is held back until it closes and then never shown
         shown_len = [0]
+        # omp tags every chunk with the assistant message it belongs to. A steered turn holds
+        # several messages; without a cut at the boundary the first ended in `…>>` and the next
+        # began on the same line, and both landed in one Telegram message.
+        message_id = [""]
 
         def enqueue(kind: str, body: str, *, essential: bool) -> None:
             outbox.append({"kind": kind, "body": body, "essential": essential})
@@ -768,6 +778,12 @@ class ChatAgent:
                     thinking.append(update.text)
                 elif update.kind == "agent_message_chunk" and update.text:
                     flush_thinking()
+                    current = str(update.raw.get("messageId") or "")
+                    if current and message_id[0] and current != message_id[0]:
+                        flush_segment()
+                        answer.append("\n\n")  # the markers read the whole answer at the end
+                    if current:
+                        message_id[0] = current
                     segment.append(update.text)
                     answer.append(update.text)
                     if streams:

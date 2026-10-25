@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import re
 
-# A marker counts only when it opens its own line, as the protocol hint asks. Text that merely
-# mentions one (`<<options: …>>` inside an explanation) used to become a single "…" button and
-# swallowed the real marker further down.
-OPTIONS_RE = re.compile(r"^[ \t]*<<\s*options?\s*:(?P<body>.+?)>>[ \t]*$",
+# A marker counts only when it starts a line, as the protocol hint asks: text that mentions one
+# (`<<options: …>>` inside a sentence) used to become a "…" button. Its body cannot contain `>>`,
+# so two markers in one turn (a steered turn holds two answers) never merge into one, and text
+# glued after the closing `>>` stays text.
+OPTIONS_RE = re.compile(r"^[ \t]*<<\s*options?\s*:(?P<body>(?:(?!>>).)+?)>>",
                         re.IGNORECASE | re.DOTALL | re.MULTILINE)
 PARTIAL_RE = re.compile(r"^[ \t]*<<\s*options?\s*:(?:(?!>>).)*\Z",
                         re.IGNORECASE | re.DOTALL | re.MULTILINE)
@@ -33,7 +34,8 @@ def extract(text: str) -> tuple[str, list[str]]:
     # an option with no letter or digit ("…", "-") is a placeholder, not a choice to offer
     options = [part.strip() for part in re.split(r"\||\n", match.group("body"))
                if re.search(r"\w", part)]
-    cleaned = (text[: match.start()] + text[match.end():]).strip()
+    # every marker leaves the text, not only the one that became buttons
+    cleaned = OPTIONS_RE.sub("", text).strip()
     deduped: list[str] = []
     for option in options:
         if option not in deduped:

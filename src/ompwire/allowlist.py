@@ -37,13 +37,22 @@ READ_ONLY: tuple[tuple[str, ...], ...] = (
 )
 
 # Flags that turn a read into a write, or start another command.
-WRITE_FLAGS = ("-exec", "-execdir", "-delete", "-ok", "-okdir", "-i", "--in-place", "--output")
+WRITE_FLAGS = ("-exec", "-execdir", "-delete", "-ok", "-okdir", "-i", "--in-place")
 
 # find's own file-writing outputs, and sort's in-place flag (-o is also find's positional
 # print target, so it only counts as a write for sort).
 WRITE_FLAGS += ("-fprint", "-fprint0", "-fprintf", "-fls")
 
-SORT_WRITE_FLAGS = ("-o",)
+# Per command, because the same flag means different things: `journalctl --output` picks a
+# display format, `git log --output` and `sort --output` write a file.
+COMMAND_WRITE_FLAGS: dict[str, tuple[str, ...]] = {
+    "sort": ("-o", "--output"),
+    "git": ("--output", "--ext-diff", "--textconv"),
+    # --pre runs the given program on every file searched
+    "rg": ("--pre", "--pre-glob", "--search-zip", "-z"),
+    "journalctl": ("--vacuum-size", "--vacuum-files", "--vacuum-time", "--rotate", "--flush",
+                   "--sync", "--relinquish-var", "--smart-relinquish-var", "--setup-keys"),
+}
 
 # `git branch` / `git remote` are read-only for status, but these words mutate.
 GIT_MUTATING = frozenset({
@@ -68,17 +77,25 @@ def _tokens(text: str) -> list[str]:
     return list(lexer)
 
 
+def _flag(word: str) -> str:
+    """`--output=/tmp/x` is the flag `--output`; matching the whole word missed that form."""
+    return word.split("=", 1)[0] if word.startswith("-") else word
+
+
+def _has(words: list[str], flags: tuple[str, ...] | frozenset[str]) -> bool:
+    return any(_flag(word) in flags for word in words)
+
+
 def _reads(words: list[str]) -> bool:
     if not words:
         return True
-    if any(word in WRITE_FLAGS for word in words[1:]):
+    if _has(words[1:], WRITE_FLAGS):
         return False
-    if tuple(words[:2]) == ("gh", "api") and any(word in GH_WRITE_FLAGS for word in words[2:]):
+    if _has(words[1:], COMMAND_WRITE_FLAGS.get(words[0], ())):
         return False
-    if tuple(words[:2]) in (("git", "branch"), ("git", "remote")) \
-            and any(word in GIT_MUTATING for word in words[2:]):
+    if tuple(words[:2]) == ("gh", "api") and _has(words[2:], GH_WRITE_FLAGS):
         return False
-    if words[0] == "sort" and any(word in SORT_WRITE_FLAGS for word in words[1:]):
+    if tuple(words[:2]) in (("git", "branch"), ("git", "remote")) and _has(words[2:], GIT_MUTATING):
         return False
     return any(tuple(words[:len(prefix)]) == prefix for prefix in READ_ONLY)
 

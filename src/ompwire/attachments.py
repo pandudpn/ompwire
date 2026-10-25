@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # own line only, like every marker: a path mentioned inside a sentence is not a request to send it
-FILE_RE = re.compile(r"^[ \t]*<<\s*files?\s*:\s*(?P<body>[^>\n]+?)\s*>>[ \t]*$",
+FILE_RE = re.compile(r"^[ \t]*<<\s*files?\s*:\s*(?P<body>[^>\n]+?)\s*>>",
                      re.IGNORECASE | re.MULTILINE)
 PARTIAL_RE = re.compile(r"^[ \t]*<<\s*files?\s*:(?:(?!>>).)*\Z",
                         re.IGNORECASE | re.DOTALL | re.MULTILINE)
