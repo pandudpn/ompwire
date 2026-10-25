@@ -121,29 +121,74 @@ def test_other_answer_removes_the_buttons(tmp_path):
     assert sent == []
 
 
-def test_typing_while_a_question_is_open_retires_its_buttons(tmp_path):
+def _open_question(transport, options):
+    agent = transport.agent_for(7)
+    agent.pending_options = list(options)
+    sent: list[str] = []
+    transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or len(sent)
+    return agent, sent
+
+
+class _Typed:
+    def __init__(self, text):
+        self.text = text
+        self.replies: list[str] = []
+
+    async def reply_text(self, body, **_kw):
+        self.replies.append(body)
+
+
+def test_a_message_about_something_else_waits_for_the_open_question(tmp_path):
     config = _config(tmp_path)
 
     async def go():
         transport = _transport(config)
-        agent = transport.agent_for(7)
-        await agent.surface.offer_options(["yes", "no"])
-        agent.pending_options = ["yes", "no"]
-        edits: list[str] = []
+        agent, sent = _open_question(transport, ["fix it", "change the format"])
+        other = _Typed("one more issue: CI is red")
+        await transport.submit(7, other, other)
+        before = list(sent)
+        await transport.on_callback(_update(Query("qo:0"))[0], None)
+        return before, sent, other.replies, agent.pending_options
 
-        async def edit_text(body, **_kw):
-            edits.append(body)
+    before, sent, replies, left = asyncio.run(go())
+    assert before == []  # it did not run ahead of the answer
+    assert sent == ["fix it", "one more issue: CI is red"]  # answer first, then the rest
+    assert replies and replies[0].startswith("⏸️ held #1")
+    assert left == []
 
-        agent.surface.options_message.edit_text = edit_text
-        sent: list[str] = []
-        transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or 1
-        message = types.SimpleNamespace(text="actually, maybe", reply_text=None)
-        await transport.submit(7, message, message)
-        return edits, sent, agent.pending_options
 
-    edits, sent, left = asyncio.run(go())
-    assert sent == ["actually, maybe"]
-    assert left == [] and len(edits) == 1
+def test_other_answer_takes_the_next_message_as_the_answer(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        _agent, sent = _open_question(transport, ["a", "b"])
+        early = _Typed("unrelated thing")
+        await transport.submit(7, early, early)
+        await transport.on_callback(_update(Query("qo:other"))[0], None)
+        answer = _Typed("neither, use c")
+        await transport.submit(7, answer, answer)
+        later = _Typed("after the answer")
+        await transport.submit(7, later, later)
+        return sent
+
+    assert asyncio.run(go()) == ["neither, use c", "unrelated thing", "after the answer"]
+
+
+def test_skip_releases_what_was_held(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent, sent = _open_question(transport, ["a"])
+        held = _Typed("do this instead")
+        await transport.submit(7, held, held)
+        await transport.on_callback(_update(Query("qo:skip"))[0], None)
+        return sent, agent.pending_options
+
+    sent, left = asyncio.run(go())
+    assert sent == ["do this instead"]
+    assert left == []
 
 
 def test_a_stale_option_button_says_so_instead_of_sending(tmp_path):

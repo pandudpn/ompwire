@@ -186,6 +186,10 @@ class Transport:
         self.agents: dict[int, engine.ChatAgent] = {}
         self.queues: dict[int, asyncio.Queue[tuple[str, Any]]] = {}
         self.workers: dict[int, asyncio.Task] = {}
+        # messages typed while a question is open, released once it is answered or skipped
+        self.held: dict[int, list[tuple[Any, Any]]] = {}
+        # chats where "Other answer" was tapped: the next typed message is the answer
+        self.answer_armed: set[int] = set()
         # set on SIGTERM: the worker stops taking turns, so the interrupted one stays on record
         self.stopping = False
 
@@ -346,10 +350,35 @@ class Transport:
         `/queue` always queues. Anything omp declines to inject still lands in the queue.
         """
         agent = self.agent_for(chat_id)
+        if chat_id in self.answer_armed:
+            # "Other answer" was tapped: this message is the answer, whatever else is waiting
+            self.answer_armed.discard(chat_id)
+            await self._route(chat_id, agent, payload, message)
+            await self._release_held(chat_id)
+            return
         if agent.pending_options:
-            # a typed message answers the open question; its buttons must not send a second one
-            agent.pending_options = []
-            await agent.surface.retire_options("answered by typing")
+            # the agent is waiting on its question; a message about something else must not
+            # jump ahead of the answer, so it waits until the question is answered or skipped
+            held = self.held.setdefault(chat_id, [])
+            held.append((payload, message))
+            log.info("held while a question is open chat=%s position=%s", chat_id, len(held))
+            await self._ack(message, held_text(len(held)))
+            return
+        await self._route(chat_id, agent, payload, message)
+
+    async def _release_held(self, chat_id: int) -> None:
+        """The question is settled: what was typed meanwhile runs next, in order."""
+        held = self.held.pop(chat_id, [])
+        for payload, _message in held:
+            self.enqueue(chat_id, "prompt", payload)
+        if held:
+            log.info("released %s held message(s) chat=%s", len(held), chat_id)
+
+    def _settle_question(self, chat_id: int, agent: engine.ChatAgent) -> None:
+        agent.pending_options = []
+        self.answer_armed.discard(chat_id)
+
+    async def _route(self, chat_id: int, agent: engine.ChatAgent, payload: Any, message: Any) -> None:
         if not agent.busy:
             self.enqueue(chat_id, "prompt", payload)
             return
@@ -416,6 +445,11 @@ class Transport:
             return
         await agent.new_session()
         log.info("new session chat=%s session=%s", update.effective_chat.id, agent.session_id[:8])
+        if agent.pending_options or update.effective_chat.id in self.answer_armed:
+            # the question belonged to the old session; what waited on it goes to the new one
+            self._settle_question(update.effective_chat.id, agent)
+            await agent.surface.retire_options("closed by /new")
+        await self._release_held(update.effective_chat.id)
         await update.effective_message.reply_text(
             self.session_card(agent, "🆕 new session", "old sessions stay resumable with /sessions"),
             parse_mode=ParseMode.HTML,
@@ -1331,10 +1365,20 @@ class Transport:
             agent = self.agent_for(chat_id)
             choice = data.split(":", 1)[1]
             if choice == "other":
+                if not agent.pending_options:
+                    await query.answer("that question is closed")
+                    return
                 await query.answer("type your answer")
                 agent.pending_options = []
+                self.answer_armed.add(chat_id)
                 # the buttons go with the choice: a later tap would send an answer nobody chose
-                await agent.surface.retire_options("type your answer; it goes to the agent")
+                await agent.surface.retire_options("type your answer; your next message is it")
+                return
+            if choice == "skip":
+                self._settle_question(chat_id, agent)
+                await query.answer("skipped")
+                await agent.surface.retire_options("skipped")
+                await self._release_held(chat_id)
                 return
             try:
                 answer = agent.pending_options[int(choice)]
@@ -1350,8 +1394,9 @@ class Transport:
             except BadRequest:
                 pass
             agent.surface.options_message = None
-            payload = _TextOnly(answer, query.message)
-            await self.submit(chat_id, payload, query.message)
+            self._settle_question(chat_id, agent)
+            await self._route(chat_id, agent, _TextOnly(answer, query.message), query.message)
+            await self._release_held(chat_id)
             return
 
         if data.startswith("skv:"):
@@ -1652,6 +1697,10 @@ def _retry_window(exc: Exception) -> float:
 STEERED = "↪️ steered · the agent reads this at its next step in the running turn"
 
 
+def held_text(position: int) -> str:
+    return f"⏸️ held #{position} · answer the question above first, or tap Skip"
+
+
 def queued_text(position: int) -> str:
     return f"📥 queued #{position} · runs after the current turn"
 
@@ -1723,14 +1772,15 @@ class TelegramSurface(engine.Surface):
         """
         rows = [[InlineKeyboardButton(f"{index + 1}. {option}"[:64], callback_data=f"qo:{index}")]
                 for index, option in enumerate(options)]
-        rows.append([InlineKeyboardButton("✏️ Other answer", callback_data="qo:other")])
+        rows.append([InlineKeyboardButton("✏️ Other answer", callback_data="qo:other"),
+                     InlineKeyboardButton("⏭️ Skip", callback_data="qo:skip")])
         listed = "\n".join(f"<b>{index + 1}.</b> {esc(option)}"
                            for index, option in enumerate(options))
         self.options_listed = listed
         self.options_message = await self.app.bot.send_message(
             self.chat_id,
-            card("❓ pick an answer", "tap one, or choose Other and just type it", [],
-                 "the chosen text is sent as your next message") + f"\n\n{listed}",
+            card("❓ pick an answer", "tap one, Other to type it, or Skip", [],
+                 "messages sent before you answer wait for it") + f"\n\n{listed}",
             reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
         )
 

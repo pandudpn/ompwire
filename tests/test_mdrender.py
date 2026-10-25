@@ -177,8 +177,9 @@ def test_options_card_has_a_free_text_button():
 
     agent = asyncio.run(main())
     labels = [button.text for row in sent["kb"].inline_keyboard for button in row]
-    assert labels == ["1. postgres", "2. mysql", "✏️ Other answer"]
+    assert labels == ["1. postgres", "2. mysql", "✏️ Other answer", "⏭️ Skip"]
     assert sent["kb"].inline_keyboard[-1][0].callback_data == "qo:other"
+    assert sent["kb"].inline_keyboard[-1][1].callback_data == "qo:skip"
     assert agent.pending_options == ["postgres", "mysql"]
 
 
