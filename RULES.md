@@ -53,7 +53,7 @@ sessions, overrides, log and lock), OMP's transcript directory and OMP's `config
 - Clean cutover: migrate every caller and delete the old path. No shims, aliases or
   compatibility re-exports.
 - The engine (`engine.py`) speaks `Surface` and never a platform. Telegram details stay in
-  `telegram.py` and `tg_html.py`.
+  `telegram.py` and the `tg_*.py` modules.
 - Markers (`<<options:>>`, `<<file:>>`, `<<schedule:>>`) count only at the start of a line.
 - Comments explain what is not obvious from the code: a measured agent behaviour, a failure
   that happened. Plain voice, no narration of the change.

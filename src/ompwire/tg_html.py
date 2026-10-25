@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 from collections.abc import Iterable
+from typing import Any
 
 from .format import TOOL_LINE_WIDTH, _clip
 
@@ -110,3 +111,15 @@ def run_card(title: str, when: str, status: str, rows: Iterable[tuple[str, objec
 def run_status(ok: bool, word: str) -> str:
     """A status badge that survives being read at a glance."""
     return f"{'✅' if ok else '⛔'} <b>{esc(word)}</b>"
+
+
+def paginate(items: list, page: int, per_page: int) -> tuple[list, int, int]:
+    """Clamp a page index and slice it; page is zero-based here."""
+    pages = max(1, -(-len(items) // per_page))
+    page = max(0, min(page, pages - 1))
+    return items[page * per_page:(page + 1) * per_page], page, pages
+
+
+def two_columns(buttons: list[Any]) -> list[list[Any]]:
+    """Inline keyboard rows, two buttons each."""
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]

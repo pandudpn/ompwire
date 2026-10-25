@@ -49,13 +49,15 @@ seams are already there:
 1. `gateways.KINDS` and `gateways.IMPLEMENTED` in `gateways.py`.
 2. A `Surface` implementation in `engine.py`'s terms: `post`, `trace`/`reasoning`/`dropped`/`join`
    renderers, a `typing` context, and the button surfaces (`offer_options`, `ask_permission`,
-   `offer_schedule`, `send_file`, `notice`). `telegram.TelegramSurface` is the reference and
+   `offer_schedule`, `send_file`, `notice`). `tg_surface.TelegramSurface` is the reference and
    `cli.TerminalSurface` is the smallest one; a rate limit raises `engine.FloodWait`, any other
    send failure returns None.
 3. The transport module itself, following `telegram.py`: polling or webhook in, one
    `engine.ChatAgent` per conversation via a `chat_agent(config, chat_id, key, app)` factory,
    approvals and option answers routed back through the agent's `answer_permission` and
-   `pending_options`.
+   `pending_options`. It reads its bot from the config's `[gateway]` section (`credential`,
+   `allowed_users`, `home_channel`, set by `gateways.apply()`), never from its platform section,
+   which holds only platform behaviour.
 4. A key prefix the transport owns (`telegram.KEY_PREFIX = "tg:"`). Session, preference and
    inflight rows live under it, and resume takes only its own: `store.interrupted(prefix)` and
    `engine.resume_plan(store_path, prefix)` never look at another transport's turns.

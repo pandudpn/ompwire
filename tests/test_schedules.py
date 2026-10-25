@@ -229,7 +229,7 @@ def test_a_scheduled_result_is_delivered_as_a_card(monkeypatch):
     """The delivery path only runs at the scheduled hour; a broken card should fail here first."""
     import asyncio
 
-    from ompwire import gateways, schedule_run, telegram
+    from ompwire import gateways, schedule_run, tg_surface
 
     sent: list[tuple[int, str]] = []
 
@@ -240,7 +240,7 @@ def test_a_scheduled_result_is_delivered_as_a_card(monkeypatch):
         async def send_message(self, chat_id, text, **_kw):
             sent.append((chat_id, text))
 
-    monkeypatch.setattr(telegram, "Bot", FakeBot)
+    monkeypatch.setattr(tg_surface, "Bot", FakeBot)
     gateway = gateways.Gateway(name="telegram", kind="telegram", allowed=[42])
     monkeypatch.setattr(schedule_run.gateways, "get", lambda _name: gateway)
     monkeypatch.setattr(schedule_run.gateways, "token", lambda _gw: "t")

@@ -20,7 +20,7 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | Layer | Owns | When it fails |
 | --- | --- | --- |
 | Engine (`engine.py`) | the turn itself: ACP session lifecycle, update drain, pacing, permissions, schedules, files. Speaks `Surface`, never a platform | a turn fails: recorded, the next gateway start resumes it |
-| Transport (`telegram.py`) | Telegram routing and buttons: handlers, `TelegramSurface` (posting, cards, approvals), `TelegramDelivery`, pickers, per-chat prefs, the `tg:` key prefix | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
+| Transport (`telegram.py`, `tg_*.py`) | Telegram routing and buttons: handlers, `TelegramSurface` (posting, cards, approvals), `TelegramDelivery`, pickers, per-chat prefs, the `tg:` key prefix | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
 | `sessions.db` (`store.py`) | chat key to session id, prefs, approval override, turns a restart left unfinished (read per key prefix) | unreadable: a new agent session, the chat key is kept |
 | ACP client (`acp.py`) | stdio framing, request ids, timeouts | the subprocess dies mid-turn: respawn, then `session/load` on the same id |
 | Agent (`omp`) | loop, tools, MCP, compaction, skills, memory, prompt | provider or tool error: reported to the chat as the agent's own text |
@@ -34,8 +34,11 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | File | What it is |
 | --- | --- |
 | `engine.py` | the platform-neutral agent engine: ChatAgent, the turn renderer, the `Surface` contract, `ToolTrace`, `FloodWait`, resume planning |
-| `telegram.py` | the Telegram transport: handlers, pickers, `TelegramSurface`, `TelegramDelivery`, buttons, banners |
+| `telegram.py` | the Telegram transport: polling, routing (steer, queue, held questions), commands, callbacks, banners |
+| `tg_surface.py` | how one Telegram chat shows a turn: `TelegramSurface`, `TelegramDelivery`, the steered/queued/held acks |
+| `tg_pickers.py`, `tg_login.py`, `tg_skills.py` | mixins of the transport: the model/mode/thinking pickers, provider login, `/skills` |
 | `__main__.py` | the CLI: one function per command, `argparse` wiring |
+| `gateway_cli.py` | `ompwire gateway ...`: start, remove, list, status, logs, and `_run`, the unit's entry point |
 | `setup.py` | the wizard, `.env` writing token normalisation, `bot_identity` verification |
 | `update.py` | install mode detection, update, restart of running gateways |
 | `acp.py` | the ACP client over stdio |
@@ -53,7 +56,7 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `format.py` | neutral helpers: `uptime`, WIB clock, token counts (`58.6k`), the tool-trace clip |
 | `omp_sessions.py` | session totals and compactions, read incrementally from omp's transcript JSONL |
 | `omp_config.py` | omp's `compaction:` block in `config.yml`, edited in place |
-| `tg_html.py` | Telegram HTML: cards, grids, tool blocks, help and run cards |
+| `tg_html.py` | Telegram HTML: cards, grids, tool blocks, help and run cards, keyboard paging |
 | `lock.py` | one flock per gateway |
 | `logs.py` | redaction filter |
 | `allowlist.py` | which shell commands are read-only and skip the approval button |
@@ -316,7 +319,11 @@ deprecation cycle.
   file is what separates them.
 - **A shared .env handed every bot's token to every agent.** Each unit loaded the one `.env`, so
   an agent with a shell could print another bot's token from its environment. Each gateway now
-  has its own `.env`, and `child_env()` strips every `OMPWIRE_GATEWAY_*_TOKEN` as well.
+  has its own `.env`, `child_env()` strips every `OMPWIRE_GATEWAY_*_TOKEN` as well, and the shared
+  `.env` is retired: nothing reads it, and a schedule unit loads no credential at all.
+- **A transport reads its bot from `[gateway]`.** `apply()` used to copy every gateway's token and
+  allow list into `[telegram]`, whatever the platform, so a second platform would have read its
+  credential from the Telegram section. Identity is `[gateway]`; `[telegram]` is behaviour only.
 - **Moving a live store is a restart, not a copy.** `gateways.migrate(state_for=name)` runs in
   `gateway _run` before the lock is taken, so the files move while no process has them open, and
   never while the old lock is held. The unfinished-turn row moves with `sessions.db`, which is how

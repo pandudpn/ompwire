@@ -14,14 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import logging
 import logging.handlers
 import os
 import pathlib
 import signal
 import time
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +27,9 @@ from typing import Any
 # returns from v23. _retry_window already takes either, so opt in rather than log noise.
 os.environ.setdefault("PTB_TIMEDELTA", "true")
 
-from telegram import Bot, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest, RetryAfter, TelegramError
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -44,29 +42,33 @@ from telegram.ext import (
 from . import __version__, engine, omp_config, omp_sessions
 from . import schedules as schedule_lib
 from .acp import AcpError
-from .attachments import Outgoing, incoming_summary, safe_name
+from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
-from .catalog import credential_snapshot, list_providers, list_skills, skill_body
 from .config import Config, approval_policy, save_override
-from .delivery import Delivery
 from .engine import (
     PERMISSION_TIMEOUT,
-    PREF_KEYS,
     RESUME_PROMPT,
-    FloodWait,
-    ToolTrace,
     mcp_label,
     resolve_mcp_servers,
 )
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
-from .login import LoginSession
-from .mdrender import split_blocks, strip_html, to_html, to_plain
-from .tg_html import card, change, esc, help_sections, run_card, run_status, tool_block
+from .tg_html import card, change, esc, help_sections
+from .tg_login import LoginMixin
+from .tg_pickers import PickerMixin
+from .tg_skills import SkillsMixin
+from .tg_surface import (
+    STEERED,
+    TelegramSurface,
+    app_send,
+    held_text,
+    queued_text,
+    send_html,
+    send_md,
+)
 
 log = logging.getLogger("ompwire.telegram")
 
-TELEGRAM_LIMIT = 4000  # leave headroom under the 4096 hard cap
 IDLE_CHECK_INTERVAL = 60.0
 # This transport owns the store keys under this prefix: sessions, prefs and inflight rows.
 KEY_PREFIX = "tg:"
@@ -103,58 +105,11 @@ COMMANDS: list[tuple[str, str]] = [
     ("help", "this list"),
 ]
 
-def paginate(items: list, page: int, per_page: int) -> tuple[list, int, int]:
-    """Clamp a page index and slice it; page is zero-based here."""
-    pages = max(1, -(-len(items) // per_page))
-    page = max(0, min(page, pages - 1))
-    return items[page * per_page:(page + 1) * per_page], page, pages
-
-
-def two_columns(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
-    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-
-
-def chunk_lines(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
-    """Cut a rendered message on line boundaries; one overlong line is cut as a last resort."""
-    parts: list[str] = []
-    current = ""
-    for line in text.splitlines(keepends=True):
-        if len(current) + len(line) > limit:
-            if current:
-                parts.append(current)
-            while len(line) > limit:
-                parts.append(line[:limit])
-                line = line[limit:]
-            current = line
-        else:
-            current += line
-    if current:
-        parts.append(current)
-    return parts or [""]
-
 
 FORWARD_HINT = (
     "Everything else is sent to the agent as a prompt. Its own commands work here, "
     "including /skill:<name> and /compact."
 )
-
-
-async def send_html(bot, chat_id: int, body: str):
-    """Send pre-rendered Telegram HTML, falling back to plain text."""
-    try:
-        return await bot.send_message(chat_id, body, parse_mode=ParseMode.HTML)
-    except BadRequest as exc:
-        log.warning("html send rejected (%s); falling back to plain text", exc)
-        return await bot.send_message(chat_id, strip_html(body))
-
-
-async def send_md(bot, chat_id: int, text: str):
-    """Send agent markdown as Telegram HTML, degrading to plain text on refusal."""
-    try:
-        return await bot.send_message(chat_id, to_html(text), parse_mode=ParseMode.HTML)
-    except BadRequest as exc:
-        log.warning("html send rejected (%s); falling back to plain text", exc)
-        return await bot.send_message(chat_id, to_plain(text))
 
 
 def _unique_commands() -> list[tuple[str, str]]:
@@ -169,7 +124,7 @@ def _unique_commands() -> list[tuple[str, str]]:
     return out
 
 
-class Transport:
+class Transport(SkillsMixin, LoginMixin, PickerMixin):
     def __init__(self, config: Config) -> None:
         self.config = config
         self.started_at = time.time()
@@ -665,269 +620,6 @@ class Transport:
             incoming_summary(target, document.mime_type or "", message.caption or ""), message)
         await self.submit(chat_id, payload, message)
 
-    SKILL_PAGE = 10   # two columns x five rows, same shape as the model picker
-    LOGIN_PAGE = 10
-
-    async def cmd_skills(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return await self._deny(update)
-        chat_id = update.effective_chat.id
-        agent = self.agent_for(chat_id)
-        skills = await asyncio.to_thread(list_skills, cwd=agent.cwd)
-        self._skills[chat_id] = skills
-        if not skills:
-            return await update.effective_message.reply_text("no skills found")
-        page = 1
-        if ctx.args and ctx.args[0].isdigit():
-            page = int(ctx.args[0])
-        window, index, pages = paginate(skills, page - 1, self.SKILL_PAGE)
-        buttons = [
-            InlineKeyboardButton(skill.name[:28], callback_data=f"skv:{index * self.SKILL_PAGE + offset}")
-            for offset, skill in enumerate(window)
-        ]
-        rows = two_columns(buttons)
-        nav: list[InlineKeyboardButton] = []
-        if pages > 1:
-            if index > 0:
-                nav.append(InlineKeyboardButton("◀", callback_data=f"skl:{index}"))
-            nav.append(InlineKeyboardButton(f"{index + 1}/{pages}", callback_data="sk:noop"))
-            if index < pages - 1:
-                nav.append(InlineKeyboardButton("▶", callback_data=f"skl:{index + 2}"))
-        if nav:
-            rows.append(nav)
-        log.info("skills listed chat=%s count=%s page=%s/%s", chat_id, len(skills), index + 1, pages)
-        await update.effective_message.reply_text(
-            card("🧩 skills", f"{len(skills)} available · page {index + 1}/{pages}", [],
-                 "tap one to read its SKILL.md"),
-            reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
-        )
-
-    async def show_skill(self, chat_id: int, index: int) -> None:
-        skills = self._skills.get(chat_id) or []
-        if not (0 <= index < len(skills)):
-            return await self.app.bot.send_message(chat_id, "unknown skill, open /skills again")
-        skill = skills[index]
-        body = await asyncio.to_thread(skill_body, skill)
-        log.info("skill opened chat=%s name=%s chars=%s", chat_id, skill.name, len(body))
-        await self.send_html(chat_id, card("🧩 " + skill.name, skill.description[:160] or str(skill.path),
-                                  [("file", str(skill.path)), ("size", f"{len(body)} chars")]))
-        chunks = split_blocks(body, 3200)
-        for chunk in chunks[:4]:
-            await self.send_md(chat_id, chunk)
-        if len(chunks) > 4:
-            await self.app.bot.send_message(
-                chat_id, f"<i>truncated · full text in {esc(str(skill.path))}</i>",
-                parse_mode=ParseMode.HTML,
-            )
-
-    async def _render_skills(self, chat_id: int, page: int, message: Any) -> None:
-        skills = self._skills.get(chat_id) or []
-        if not skills:
-            return
-        window, index, pages = paginate(skills, max(0, page - 1), self.SKILL_PAGE)
-        offset = index * self.SKILL_PAGE
-        buttons = [InlineKeyboardButton(skill.name[:28], callback_data=f"skv:{offset + position}")
-                   for position, skill in enumerate(window)]
-        rows = two_columns(buttons)
-        nav = []
-        if pages > 1:
-            if index > 0:
-                nav.append(InlineKeyboardButton("◀", callback_data=f"skl:{index}"))
-            nav.append(InlineKeyboardButton(f"{index + 1}/{pages}", callback_data="sk:noop"))
-            if index < pages - 1:
-                nav.append(InlineKeyboardButton("▶", callback_data=f"skl:{index + 2}"))
-        if nav:
-            rows.append(nav)
-        try:
-            await message.edit_text(
-                card("🧩 skills", f"{len(skills)} available · page {index + 1}/{pages}", [],
-                     "tap one to read its SKILL.md"),
-                reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
-            )
-        except BadRequest:
-            pass
-
-    async def _render_login(self, chat_id: int, page: int, message: Any) -> None:
-        providers = self._login_cache
-        if not providers:
-            return
-        window, index, pages = paginate(providers, max(0, page - 1), self.LOGIN_PAGE)
-        buttons = []
-        for provider in window:
-            mark = "✅ " if provider.logged_in else ("⚪ " if provider.provider_id else "❔ ")
-            buttons.append(InlineKeyboardButton(f"{mark}{provider.label[:24]}",
-                                                callback_data=f"lgv:{provider.index}"))
-        rows = two_columns(buttons)
-        nav = []
-        if pages > 1:
-            if index > 0:
-                nav.append(InlineKeyboardButton("◀", callback_data=f"lgl:{index}"))
-            nav.append(InlineKeyboardButton(f"{index + 1}/{pages}", callback_data="lg:noop"))
-            if index < pages - 1:
-                nav.append(InlineKeyboardButton("▶", callback_data=f"lgl:{index + 2}"))
-        if nav:
-            rows.append(nav)
-        signed = sum(1 for provider in providers if provider.logged_in)
-        try:
-            await message.edit_text(
-                card("🔐 login", f"{signed} signed in · {len(providers)} providers · page {index + 1}/{pages}",
-                     [], "✅ signed in · ⚪ not signed in · ❔ id unknown, opened via menu"),
-                reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
-            )
-        except BadRequest:
-            pass
-
-    async def _provider_list(self, force: bool = False) -> list[Any]:
-        fresh = time.time() - self._login_cache_at < 600
-        if self._login_cache and fresh and not force:
-            return self._login_cache
-        providers = await asyncio.to_thread(list_providers, str(self.config.get("acp", "command", "omp")))
-        self._login_cache = providers
-        self._login_cache_at = time.time()
-        log.info("providers loaded: %s entries, %s signed in", len(providers),
-                 sum(1 for p in providers if p.logged_in))
-        return providers
-
-    async def cmd_login(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return await self._deny(update)
-        message = await update.effective_message.reply_text("reading the provider list from omp…")
-        providers = await self._provider_list(force=True)
-        if not providers:
-            return await message.edit_text("omp returned an empty provider list")
-        page = 1
-        if ctx.args and ctx.args[0].isdigit():
-            page = int(ctx.args[0])
-        window, index, pages = paginate(providers, page - 1, self.LOGIN_PAGE)
-        buttons = []
-        for provider in window:
-            mark = "✅ " if provider.logged_in else ("⚪ " if provider.provider_id else "❔ ")
-            buttons.append(InlineKeyboardButton(
-                f"{mark}{provider.label[:24]}", callback_data=f"lgv:{provider.index}"))
-        rows = two_columns(buttons)
-        nav: list[InlineKeyboardButton] = []
-        if pages > 1:
-            if index > 0:
-                nav.append(InlineKeyboardButton("◀", callback_data=f"lgl:{index}"))
-            nav.append(InlineKeyboardButton(f"{index + 1}/{pages}", callback_data="lg:noop"))
-            if index < pages - 1:
-                nav.append(InlineKeyboardButton("▶", callback_data=f"lgl:{index + 2}"))
-        if nav:
-            rows.append(nav)
-        signed = sum(1 for provider in providers if provider.logged_in)
-        await message.edit_text(
-            card("🔐 login", f"{signed} signed in · {len(providers)} providers · page {index + 1}/{pages}",
-                 [], "✅ signed in · ⚪ not signed in · ❔ id unknown, opened via menu"),
-            reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
-        )
-
-    async def start_login(self, chat_id: int, index: int) -> None:
-        providers = self._login_cache or await self._provider_list()
-        provider = next((item for item in providers if item.index == index), None)
-        if provider is None:
-            return await self.app.bot.send_message(chat_id, "unknown provider")
-        target = provider.provider_id or ""   # empty -> choose from omp's menu
-        self.close_login(chat_id)
-        loop = asyncio.get_running_loop()
-
-        def emit(line: str) -> None:
-            asyncio.run_coroutine_threadsafe(self._login_line(chat_id, provider.label, line), loop)
-
-        def done(ok: bool, output: str) -> None:
-            asyncio.run_coroutine_threadsafe(self._login_done(chat_id, provider.label, ok, output), loop)
-
-        session = LoginSession(
-            target, emit, done,
-            command=str(self.config.get("acp", "command", "omp")),
-            menu_index=None if target else provider.index,
-        )
-        self.logins[chat_id] = session
-        self._login_seen[chat_id] = []
-        self._login_before[chat_id] = await asyncio.to_thread(credential_snapshot, self.credential_db)
-        log.info("login started chat=%s provider=%s target=%s (credentials before: %s)",
-                 chat_id, provider.label, target, len(self._login_before[chat_id]))
-        await self.app.bot.send_message(
-            chat_id,
-            card("🔐 login started", provider.label,
-                 [("target", target or f"menu #{provider.index}")],
-                 "follow the steps below, then paste the authorization code into this chat"),
-            parse_mode=ParseMode.HTML,
-        )
-
-    # omp's own console chatter; the chat only needs the actionable lines
-    LOGIN_NOISE = ("Local shortcut", "Preferred port", "Waiting for browser authentication",
-                   "Complete login in your browser")
-
-    async def _login_line(self, chat_id: int, label: str, line: str) -> None:
-        text = line.strip()
-        if not text or any(noise in text for noise in self.LOGIN_NOISE):
-            return
-        seen = self._login_seen.setdefault(chat_id, [])
-        if text in seen:
-            return  # omp redraws the same prompt on every step; the chat does not need it twice
-        seen.append(text)
-        del seen[:-40]
-        session = self.logins.get(chat_id)
-        if session is not None and session.url and session.url in text:
-            rows = [[InlineKeyboardButton("open login page", url=session.url)]]
-            await self.app.bot.send_message(
-                chat_id,
-                card("🔗 open this URL", label, [], "after approving, paste the code or redirect URL here"),
-                reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
-            )
-            return
-        if session is not None and session.awaiting_code:
-            await self.app.bot.send_message(
-                chat_id, "🔑 omp is waiting for the authorization code — paste it here.")
-            return
-        if len(text) <= 200:
-            safe = esc(text)
-            await self.app.bot.send_message(chat_id, f"<code>{safe}</code>", parse_mode=ParseMode.HTML)
-
-    async def _login_done(self, chat_id: int, label: str, ok: bool, output: str) -> None:
-        self.logins.pop(chat_id, None)
-        self._login_cache_at = 0.0  # force a status refresh on the next /login
-        before = self._login_before.pop(chat_id, {})
-        after = await asyncio.to_thread(credential_snapshot, self.credential_db)
-        added = sorted(set(after) - set(before))
-        refreshed = sorted(p for p in set(after) & set(before) if after[p] != before[p])
-        if added:
-            stored = f"new credential: {', '.join(added)}"
-        elif refreshed:
-            stored = f"credential refreshed: {', '.join(refreshed)}"
-        else:
-            stored = f"no change detected ({len(after)} in store)"
-        log.info("login finished chat=%s provider=%s ok=%s added=%s refreshed=%s total=%s",
-                 chat_id, label, ok, added or "-", refreshed or "-", len(after))
-        rows = [
-            ("provider", label),
-            ("result", "ok" if ok else "failed"),
-            ("store", stored),
-            ("db", self.credential_db),
-        ]
-        note = ("credential is in omp's store; the agent restarts so the new provider "
-                "appears in /model" if ok else "see the output below")
-        await self.app.bot.send_message(
-            chat_id, card("✅ login complete" if ok else "⛔ login failed", now_wib(), rows, note),
-            parse_mode=ParseMode.HTML,
-        )
-        if output and not ok:
-            await self.app.bot.send_message(
-                chat_id, f"<pre>{esc(output[-400:])}</pre>", parse_mode=ParseMode.HTML)
-        if ok:
-            agent = self.agent_for(chat_id)
-            try:
-                await agent.respawn(yolo=agent.yolo)
-                log.info("agent respawned after login chat=%s", chat_id)
-            except Exception as exc:
-                log.warning("respawn after login failed chat=%s: %s", chat_id, exc)
-
-    def close_login(self, chat_id: int) -> None:
-        session = self.logins.pop(chat_id, None)
-        if session is not None:
-            session.close()
-            log.info("login session closed chat=%s", chat_id)
-
     async def cmd_context(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """The agent renders a better context report than we could, so ask it."""
         if not self._authorized(update):
@@ -1020,150 +712,6 @@ class Transport:
             self.session_card(agent, "📁 cwd changed", "a new session starts in that directory"),
             parse_mode=ParseMode.HTML,
         )
-
-    # -------------------------------------------------- config pickers (UI)
-    PAGE_SIZE = 8          # single-column configs (mode, thinking)
-    PAGE_SIZE_TWO_COL = 10  # two columns x five rows
-
-    def _values(self, agent: engine.ChatAgent, config_id: str) -> list[str]:
-        option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
-        return [str(o.get("value")) for o in (option.get("options") or [])]
-
-    def _current(self, agent: engine.ChatAgent, config_id: str) -> str:
-        option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
-        return str(option.get("currentValue") or "?")
-
-    def _providers(self, agent: engine.ChatAgent, config_id: str) -> list[tuple[str, list[int]]]:
-        """Group option values by the provider prefix of their id."""
-        values = self._values(agent, config_id)
-        grouped: dict[str, list[int]] = {}
-        for index, value in enumerate(values):
-            provider = value.split("/", 1)[0] if "/" in value else "other"
-            grouped.setdefault(provider, []).append(index)
-        return sorted(grouped.items())
-
-    @staticmethod
-    def _page_slice(values: list[str], page: int, size: int) -> tuple[list[str], int, int]:
-        """Return (window, clamped_page, total_pages) for a fixed-size page."""
-        pages = max(1, (len(values) + size - 1) // size)
-        page = min(max(0, page), pages - 1)
-        return values[page * size:(page + 1) * size], page, pages
-
-    async def _show_config(
-        self,
-        agent: engine.ChatAgent,
-        chat_id: int,
-        config_id: str,
-        screen: str = "l",
-        provider: int = 0,
-        page: int = 0,
-        edit: Any = None,
-    ) -> None:
-        current = self._current(agent, config_id)
-        providers = self._providers(agent, config_id)
-        multi_provider = len(providers) > 1
-        all_values = self._values(agent, config_id)
-
-        if screen == "p" and multi_provider:
-            rows: list[list[InlineKeyboardButton]] = []
-            row: list[InlineKeyboardButton] = []
-            for index, (name, indices) in enumerate(providers):
-                label = f"{name} ({len(indices)})"
-                if name == (current.split("/", 1)[0] if "/" in current else "other"):
-                    label = f"• {label}"
-                row.append(InlineKeyboardButton(label[:60], callback_data=f"o:{config_id}:l:{index}:0"))
-                if len(row) == 2:
-                    rows.append(row)
-                    row = []
-            if row:
-                rows.append(row)
-            text = f"{config_id}: {current}\n{len(providers)} providers · pick one"
-        else:
-            if multi_provider:
-                provider = provider if 0 <= provider < len(providers) else 0
-                provider_name, indices = providers[provider]
-                subset = [all_values[i] for i in indices]
-            else:
-                provider, provider_name, indices = 0, config_id, list(range(len(all_values)))
-                subset = all_values
-            columns = 2 if config_id == "model" else 1
-            per_page = self.PAGE_SIZE_TWO_COL if columns == 2 else self.PAGE_SIZE
-            window, page, pages = self._page_slice(subset, page, per_page)
-            start = page * per_page
-            rows = []
-            pending: list[InlineKeyboardButton] = []
-            for offset, value in enumerate(window):
-                global_index = indices[start + offset]
-                label = value.split("/", 1)[1] if (columns == 2 and "/" in value) else value
-                mark = "• " if value == current else ""
-                button = InlineKeyboardButton(f"{mark}{label}"[:64],
-                                              callback_data=f"o:{config_id}:s:{global_index}:0")
-                if columns == 2:
-                    pending.append(button)
-                    if len(pending) == 2:
-                        rows.append(pending)
-                        pending = []
-                else:
-                    rows.append([button])
-            if pending:
-                rows.append(pending)
-            nav: list[InlineKeyboardButton] = []
-            if multi_provider:
-                nav.append(InlineKeyboardButton("◀ providers", callback_data=f"o:{config_id}:p:0:0"))
-            if pages > 1:
-                if page > 0:
-                    nav.append(InlineKeyboardButton("◀", callback_data=f"o:{config_id}:l:{provider}:{page - 1}"))
-                nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="o:noop"))
-                if page < pages - 1:
-                    nav.append(InlineKeyboardButton("▶", callback_data=f"o:{config_id}:l:{provider}:{page + 1}"))
-            if nav:
-                rows.append(nav)
-            text = (
-                f"{config_id}: {current}\n{provider_name} · {len(subset)} option(s)"
-                + (f" · page {page + 1}/{pages}" if pages > 1 else "")
-            )
-
-        markup = InlineKeyboardMarkup(rows)
-        if edit is not None:
-            try:
-                await edit.edit_text(text, reply_markup=markup)
-                return
-            except BadRequest:
-                pass
-        await self.app.bot.send_message(chat_id, text, reply_markup=markup)
-
-    async def _apply_pick(self, agent: engine.ChatAgent, config_id: str, value: str) -> tuple[str, str]:
-        """Set a config option; returns (previous, current) so the caller can render once."""
-        previous = self._current(agent, config_id)
-        result = await asyncio.to_thread(agent.client.set_config_option, agent.session_id, config_id, value)
-        agent.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
-        current = self._current(agent, config_id)
-        if config_id in PREF_KEYS and current:
-            agent.store.set_pref(agent.key, config_id, current)
-        log.info("config change %s: %s -> %s (session=%s, persisted=%s)", config_id, previous,
-                 current, agent.session_id[:8], config_id in PREF_KEYS)
-        return previous, current
-
-    async def cmd_model(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return await self._deny(update)
-        agent = self.agent_for(update.effective_chat.id)
-        await agent.ensure()
-        await self._show_config(agent, update.effective_chat.id, "model", screen="p")
-
-    async def cmd_mode(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return await self._deny(update)
-        agent = self.agent_for(update.effective_chat.id)
-        await agent.ensure()
-        await self._show_config(agent, update.effective_chat.id, "mode")
-
-    async def cmd_thinking(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return await self._deny(update)
-        agent = self.agent_for(update.effective_chat.id)
-        await agent.ensure()
-        await self._show_config(agent, update.effective_chat.id, "thinking")
 
     async def announce(self, chat_id: int, line: str) -> None:
         """Post a one-line status/config notice and mirror it into the log."""
@@ -1679,10 +1227,6 @@ class Transport:
         except TelegramError as exc:
             log.warning("startup banner send failed: %s", exc)
 
-    def close_logins(self) -> None:
-        for chat_id in list(self.logins):
-            self.close_login(chat_id)
-
     async def shutdown_notice(self) -> None:
         chat_id = self._home_chat()
         if chat_id is None:
@@ -1704,212 +1248,8 @@ class Transport:
             log.warning("shutdown notice send failed: %s", exc)
 
 
-TELEGRAM_LIMIT = 4000  # leave headroom under the 4096 hard cap
-
-
-def _retry_window(exc: Exception) -> float:
-    """PTB gives seconds today and a timedelta from v23; both mean the same wait."""
-    value = getattr(exc, "retry_after", 5)
-    if hasattr(value, "total_seconds"):
-        return float(value.total_seconds())
-    return float(value or 5)
-
-
-STEERED = "↪️ steered · the agent reads this at its next step in the running turn"
-
-
-def held_text(position: int) -> str:
-    return f"⏸️ held #{position} · answer the question above first, or tap Skip"
-
-
-def queued_text(position: int) -> str:
-    return f"📥 queued #{position} · runs after the current turn"
-
-
-class TelegramSurface(engine.Surface):
-    """The engine's output side for one Telegram chat: posting, cards, buttons, files."""
-
-    def __init__(self, app: Application, chat_id: int) -> None:
-        self.app = app
-        self.chat_id = chat_id
-        self.label = str(chat_id)
-        self.limit = TELEGRAM_LIMIT
-        # the card of the question still open, so its buttons can be taken away
-        self.options_message: Any = None
-        self.options_listed = ""
-
-    async def post(self, body: str, *, kind: str):
-        try:
-            if kind == "text":
-                return await send_md(self.app.bot, self.chat_id, body)
-            return await send_html(self.app.bot, self.chat_id, body)
-        except RetryAfter as exc:
-            raise FloodWait(_retry_window(exc)) from exc
-
-    def trace(self, t: ToolTrace) -> str:
-        return tool_block(t.kind, t.title, t.command, t.output, t.status, t.subagent,
-                          t.steps, t.brief)
-
-    def reasoning(self, text: str) -> str:
-        # prose, so not a code block: monospace reads badly on a phone and a <pre> cannot
-        # collapse. An expandable quote stays one line until tapped.
-        return f"🧠 <i>reasoning</i>\n<blockquote expandable>{esc(text)}</blockquote>"
-
-    def dropped(self, count: int) -> str:
-        return f"<i>… {count} tool call(s) not shown (Telegram flood control)</i>"
-
-    def join(self, blocks: list[str]) -> str:
-        return "\n\n".join(blocks)
-
-    @contextlib.asynccontextmanager
-    async def typing(self):
-        """Keep the Telegram 'typing…' indicator alive for the duration of a turn."""
-        stop = asyncio.Event()
-
-        async def loop() -> None:
-            while not stop.is_set():
-                try:
-                    await self.app.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
-                except TelegramError:
-                    pass
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=4.0)
-                except TimeoutError:
-                    continue
-
-        task = asyncio.create_task(loop())
-        try:
-            yield
-        finally:
-            stop.set()
-            task.cancel()
-
-    async def offer_options(self, options: list[str]) -> None:
-        """Numbered buttons plus a free-text escape hatch.
-
-        Telegram cuts an inline button's label to one line on the phone, so a sentence-long
-        option arrived as "Teks per segmen + 1 pesan…". The full text goes in the message body,
-        numbered, and each button carries its number so the choice is never ambiguous.
-        """
-        rows = [[InlineKeyboardButton(f"{index + 1}. {option}"[:64], callback_data=f"qo:{index}")]
-                for index, option in enumerate(options)]
-        rows.append([InlineKeyboardButton("✏️ Other answer", callback_data="qo:other"),
-                     InlineKeyboardButton("⏭️ Skip", callback_data="qo:skip")])
-        listed = "\n".join(f"<b>{index + 1}.</b> {esc(option)}"
-                           for index, option in enumerate(options))
-        self.options_listed = listed
-        self.options_message = await self.app.bot.send_message(
-            self.chat_id,
-            card("❓ pick an answer", "tap one, Other to type it, or Skip", [],
-                 "messages sent before you answer wait for it") + f"\n\n{listed}",
-            reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
-        )
-
-    async def retire_options(self, note: str) -> None:
-        """Drop the buttons of the open question, keeping the listed options readable."""
-        message, self.options_message = self.options_message, None
-        if message is None:
-            return
-        try:
-            await message.edit_text(card("❓ question", note, []) + f"\n\n{self.options_listed}",
-                                    parse_mode=ParseMode.HTML)
-        except (TelegramError, AttributeError) as exc:
-            log.debug("could not retire the options card: %s", exc)
-
-    async def ask_permission(self, token: str, kind: str, detail: str,
-                             labels: list[str]):
-        rows = [[InlineKeyboardButton(label, callback_data=f"{token}:{index}")]
-                for index, label in enumerate(labels)]
-        head = card("🛡️ approval needed", kind, [],
-                    "pick one · the run is paused until you answer")
-        body = head + (f"\n<pre>{esc(detail[:1200])}</pre>" if detail else "")
-        return await self.app.bot.send_message(self.chat_id, body,
-                                               reply_markup=InlineKeyboardMarkup(rows),
-                                               parse_mode=ParseMode.HTML)
-
-    async def settle_permission(self, handle, kind: str, detail: str, outcome: str,
-                                expired: bool) -> None:
-        if expired:
-            body = card("🛡️ approval", f"expired · {now_wib()}", [("tool", kind)],
-                        "no answer in time, the tool call was denied")
-        else:
-            body = card("🛡️ approval", f"{outcome} · {now_wib()}", [("tool", kind)],
-                        "decision recorded")
-        if detail:
-            body += f"\n<pre>{esc(detail[:800])}</pre>"
-        try:
-            await handle.edit_text(body, parse_mode=ParseMode.HTML)
-        except BadRequest as exc:
-            if expired:
-                pass
-            else:
-                log.debug("approval edit failed: %s", exc)
-
-    async def send_file(self, path, as_photo: bool) -> None:
-        with path.open("rb") as handle:
-            if as_photo:
-                await self.app.bot.send_photo(self.chat_id, photo=handle)
-            else:
-                await self.app.bot.send_document(self.chat_id, document=handle)
-
-    async def offer_schedule(self, name: str, expression: str, gateway: str,
-                             prompt: str) -> None:
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Create schedule", callback_data=f"sched:new:{name}"),
-            InlineKeyboardButton("Cancel", callback_data=f"sched:cancel:{name}"),
-        ]])
-        body = card("schedule", expression, [
-            ("delivers to", gateway),
-            ("prompt", prompt[:200]),
-        ], "nothing runs until you press Create")
-        await self.app.bot.send_message(self.chat_id, body, parse_mode=ParseMode.HTML,
-                                        reply_markup=keyboard)
-
-    async def notice(self, text: str):
-        return await send_md(self.app.bot, self.chat_id, text)
-
-
-class TelegramDelivery(Delivery):
-    """A scheduled run's report, sent straight to the Bot API with this gateway's token.
-
-    It does not go through `TelegramSurface`: a timer runs with no poller and no chat object
-    around, so all a finished run needs is the one call that reaches the person.
-    """
-
-    def __init__(self, token: str) -> None:
-        self.token = token
-
-    async def deliver(self, target: str, *, title: str, when: str, ok: bool, word: str,
-                      rows: Iterable[tuple[str, str]], body_markdown: str, error: str,
-                      footer: str, files: list[Outgoing], rejected: list[str]) -> int:
-        bot = Bot(self.token)
-        chat_id = int(target)
-        # a failure carries the reason, not a half answer: the card is read hours later
-        body_html = f"<pre>{esc(error[:400])}</pre>" if error else to_html(body_markdown)
-        run = run_card(title, when, run_status(ok, word), rows, body_html, footer)
-        sent = 0
-        for chunk in chunk_lines(run):
-            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML,
-                                   disable_web_page_preview=True)
-            sent += 1
-        for outgoing in files:
-            with outgoing.path.open("rb") as handle:
-                if outgoing.as_photo:
-                    await bot.send_photo(chat_id=chat_id, photo=handle)
-                else:
-                    await bot.send_document(chat_id=chat_id, document=handle)
-            sent += 1
-        if rejected:
-            await bot.send_message(chat_id=chat_id, text="skipped: " + " · ".join(rejected[:4]))
-        return sent
-
-
 def chat_agent(config: Config, chat_id: int, key: str, app: Application) -> engine.ChatAgent:
     return engine.ChatAgent(config, key, TelegramSurface(app, chat_id))
-
-
-async def app_send(app: Application, chat_id: int, text: str) -> None:
-    await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
 
 
 class _TextOnly:

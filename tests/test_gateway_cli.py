@@ -7,7 +7,7 @@ import io
 import pytest
 
 from ompwire import __main__ as cli
-from ompwire import gateways
+from ompwire import gateway_cli, gateways
 
 
 @pytest.fixture
@@ -141,7 +141,7 @@ def test_the_unit_entry_point_is_the_only_foreground_path(sandbox, monkeypatch):
     """`_run` exists for systemd. It is not advertised: there is no foreground mode."""
     gateways.add("telegram")
     called: list[tuple[str, str, bool]] = []
-    monkeypatch.setattr(cli, "_run_gateway",
+    monkeypatch.setattr(gateway_cli, "_run_gateway",
                         lambda config, name, force: called.append((str(config), name, force)) or 0)
     assert cli.main(["gateway", "_run", "telegram"]) == 0
     assert called == [("None", "telegram", False)]
@@ -198,7 +198,7 @@ def _answers(monkeypatch, *replies, secrets=()):
         return queue.pop(0) if queue else ""
 
     monkeypatch.setattr("builtins.input", answer)
-    monkeypatch.setattr(cli, "_ask_secret_line", lambda prompt: asked.append(prompt) or (
+    monkeypatch.setattr(gateway_cli, "_ask_secret_line", lambda prompt: asked.append(prompt) or (
         hidden.pop(0) if hidden else ""))
     return asked
 

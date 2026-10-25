@@ -26,7 +26,7 @@ class Delivery(abc.ABC):
 
 
 def _telegram(gateway: gateways.Gateway) -> Delivery:
-    from .telegram import TelegramDelivery
+    from .tg_surface import TelegramDelivery
 
     return TelegramDelivery(gateways.token(gateway))
 
