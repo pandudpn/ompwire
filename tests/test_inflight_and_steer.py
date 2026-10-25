@@ -157,14 +157,15 @@ def test_a_message_sent_mid_turn_steers_it(tmp_path):
     queued = _submit(_config(tmp_path), client, True, msg)
     assert client.steered == ["use staging, not prod"]
     assert queued == []
-    assert msg.reactions == ["👀"]
+    assert msg.reactions == []
+    assert msg.replies and msg.replies[0].startswith("↪️ steered")
 
 
 def test_a_steer_the_agent_declines_falls_back_to_the_queue(tmp_path):
     msg = Msg("later")
     queued = _submit(_config(tmp_path), Client(steer_outcome="failed"), True, msg)
     assert queued == ["later"]
-    assert msg.replies and "queued" in msg.replies[0]
+    assert msg.replies == ["📥 queued #1 · runs after the current turn"]
 
 
 def test_a_turn_that_ended_before_the_steer_becomes_a_prompt(tmp_path):

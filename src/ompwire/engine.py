@@ -21,7 +21,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
 
-from . import allowlist, gateways
+from . import allowlist, gateways, omp_sessions
 from . import schedules as schedule_lib
 from .acp import AcpClient, AcpError, AcpTimeout, pick_permission_option
 from .acp import Update as AcpUpdate
@@ -32,6 +32,7 @@ from .format import humanize_token_report, tokens
 from .mcp_hub import hub_servers, normalize
 from .mcp_hub import merge_entry as merge_mcp_entry
 from .mdrender import strip_agent_noise
+from .omp_sessions import plausible_context
 from .questions import extract as extract_options
 from .questions import hide_partial
 from .store import SessionStore
@@ -229,6 +230,10 @@ class Surface(abc.ABC):
     @abc.abstractmethod
     async def offer_options(self, options: list[str]) -> None: ...
 
+    async def retire_options(self, note: str) -> None:
+        """The open question was answered; surfaces with buttons take them away."""
+        return None
+
     @abc.abstractmethod
     async def ask_permission(self, token: str, kind: str, detail: str,
                              labels: list[str]) -> Any: ...
@@ -284,7 +289,6 @@ class ChatAgent:
             self.yolo = bool(config.get("agent", "yolo", False))
         else:
             self.yolo = stored_yolo == "on"
-        self.usage = {"input": 0, "output": 0, "cached": 0, "turns": 0}
         self.turns = 0
         self.tools_used = 0
         self.options: dict[str, dict[str, Any]] = {}
@@ -299,6 +303,8 @@ class ChatAgent:
         self._context_prev_used: int | None = None
         # a /compact prompt reports its own before/after; the drop notice would double it
         self._suppress_drop_notice = False
+        # last context report that looked real; outlives a process restart, not a session change
+        self._context_good: int | None = None
         self._updates: asyncio.Queue[AcpUpdate | None] = asyncio.Queue()
         self._pending_perm: dict[str, dict[str, Any]] = {}
         self._loop = asyncio.get_running_loop()
@@ -368,7 +374,21 @@ class ChatAgent:
             self.client.on_update = previous
         self.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
         self.store.put(self.key, self.session_id, self.cwd)
+        self._seed_context()
         await self._apply_preferences()
+
+    def _seed_context(self) -> None:
+        """The first usage_update after a restart can be an unanchored sliver; the transcript
+        knows what the last real call carried, so that is the reference to hold it against."""
+        if self._context_good:
+            return
+        try:
+            seen = omp_sessions.usage(self.session_id)
+        except OSError:
+            seen = None
+        if seen is not None and seen.context:
+            self._context_good = seen.context
+            self.context["used"] = seen.context
 
     def _mcp_servers(self) -> list[dict[str, Any]]:
         return resolve_mcp_servers(self.config)
@@ -421,6 +441,13 @@ class ChatAgent:
     def _on_usage(self, used: int, size: int) -> None:
         """Runs on the loop thread. Tracks the context window, the warning crossing and
         compaction drops; usage_update never enters the turn queue."""
+        good = self._context_good
+        if good and not self._suppress_drop_notice and not plausible_context(used, good):
+            # omp anchors the number on the last assistant message; a turn resumed after a
+            # restart can anchor on ~400 tokens against a 700k context. Keep the last good value.
+            log.info("context report %s ignored (last good %s) chat=%s", used, good, self.label)
+            return
+        self._context_good = used
         self.context["used"], self.context["size"] = used, size
         if size > 0:
             warn_at = float(self.config.get("stream", "compaction_warn", 0.6))
@@ -953,10 +980,6 @@ class ChatAgent:
             self.store.end_turn(self.key)
 
         usage = result.usage or {}
-        self.usage["input"] += int(usage.get("inputTokens") or 0)
-        self.usage["output"] += int(usage.get("outputTokens") or 0)
-        self.usage["cached"] += int(usage.get("cachedReadTokens") or 0)
-        self.usage["turns"] += 1
         log.info("turn end chat=%s stop=%s tools=%s in=%s out=%s cached=%s duration=%.1fs",
                  self.label, result.stop_reason, state["tools"],
                  usage.get("inputTokens"), usage.get("outputTokens"),
@@ -1022,6 +1045,7 @@ class ChatAgent:
         self.forget_turn()
         # the old context numbers belong to the old session; the next usage_update re-reads them
         self._context_prev_used = None
+        self._context_good = None
         self._context_warned = False
         if self.client is not None and self.client.alive and self.session_id:
             await asyncio.to_thread(self.client.close, self.session_id)
@@ -1035,6 +1059,7 @@ class ChatAgent:
             await asyncio.to_thread(self.client.close, self.session_id)
         self.client = None
         self._context_prev_used = None
+        self._context_good = None
         self._context_warned = False
         self.store.put(self.key, session_id, self.cwd)
         await self.ensure()

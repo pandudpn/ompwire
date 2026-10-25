@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from ompwire import config as config_module
-from ompwire import gateways, lock, service
+from ompwire import gateways, lock, omp_config, omp_sessions, service
 
 
 @pytest.fixture(autouse=True)
@@ -35,4 +35,8 @@ def isolate_real_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(service, "agent_command", lambda: "omp")
     # pacing is real time; the tests about pacing set their own gap
     monkeypatch.setitem(config_module.DEFAULTS["stream"], "min_gap", 0.0)
+    # omp's own files: the transcripts the usage card reads and the config /compaction edits
+    monkeypatch.setattr(omp_sessions, "SESSIONS_DIR", tmp_path / "omp-sessions")
+    monkeypatch.setattr(omp_sessions, "_cache", {})
+    monkeypatch.setattr(omp_config, "CONFIG_PATH", tmp_path / "omp-config.yml")
     return tmp_path

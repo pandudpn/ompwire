@@ -41,7 +41,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, engine, omp_config
+from . import __version__, engine, omp_config, omp_sessions
 from . import schedules as schedule_lib
 from .acp import AcpError
 from .attachments import Outgoing, incoming_summary, safe_name
@@ -346,13 +346,17 @@ class Transport:
         `/queue` always queues. Anything omp declines to inject still lands in the queue.
         """
         agent = self.agent_for(chat_id)
+        if agent.pending_options:
+            # a typed message answers the open question; its buttons must not send a second one
+            agent.pending_options = []
+            await agent.surface.retire_options("answered by typing")
         if not agent.busy:
             self.enqueue(chat_id, "prompt", payload)
             return
         if str(self.config.get("telegram", "busy_message", "steer")) == "steer":
             outcome, reason = await agent.steer(payload.text, getattr(payload, "images", None) or None)
             if outcome == "injected":
-                await self._react(message, "👀", "steering the running turn")
+                await self._ack(message, STEERED)
                 return
             if outcome == "promptRequired":
                 # the turn ended between the busy check and the steer: this is a fresh prompt
@@ -361,19 +365,14 @@ class Transport:
             log.warning("steer not accepted chat=%s outcome=%s reason=%s; queueing", chat_id,
                         outcome, reason or "-")
         depth = self.enqueue(chat_id, "prompt", payload)
-        await message.reply_text(f"queued (position {depth}). the running turn finishes first.")
+        await self._ack(message, queued_text(depth))
 
-    async def _react(self, message: Any, emoji: str, fallback: str) -> None:
-        """Acknowledge without adding a message to the chat; a reply if reactions are refused."""
+    async def _ack(self, message: Any, text: str) -> None:
+        """A reply to the message itself, so it is clear which message went where."""
         try:
-            await message.set_reaction(emoji)
-            log.info("react %s ok", emoji)
-        except (TelegramError, AttributeError) as exc:
-            log.warning("react %s failed (%s); replying instead", emoji, exc)
-            try:
-                await message.reply_text(fallback)
-            except TelegramError as reply_exc:
-                log.warning("react fallback reply failed: %s", reply_exc)
+            await message.reply_text(text)
+        except TelegramError as exc:
+            log.warning("ack failed: %s", exc)
 
     def _agent_gate(self, agent: engine.ChatAgent) -> str:
         """What the agent itself was started with, which is what decides whether anything asks."""
@@ -449,8 +448,7 @@ class Transport:
             ("yolo", "on" if agent.yolo else "off"),
             ("trace", "verbose" if agent.verbose else "quiet"),
             ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
-            ("context", engine.context_line(agent.context["used"], agent.context["size"]))
-            if agent.context["size"] > 0 else ("context", "unknown"),
+            ("context", self._context_row(agent)),
             ("clock", now_wib()),
         ]
         await update.effective_message.reply_text(
@@ -458,25 +456,39 @@ class Transport:
         )
 
     async def cmd_usage(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Session totals from omp's transcript, so a gateway restart or /resume keeps them."""
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
-        usage = agent.usage
-        rows = [
-            ("turns", usage["turns"]),
-            ("input", tokens(usage["input"])),
-            ("output", tokens(usage["output"])),
-            ("cached", tokens(usage["cached"])),
-            ("tools", agent.tools_used),
-            ("context", engine.context_line(agent.context["used"], agent.context["size"]))
-            if agent.context["size"] > 0 else ("context", "unknown"),
-        ]
+        seen = omp_sessions.usage(agent.session_id) if agent.session_id else None
+        if seen is None:
+            rows = [("tokens", "unknown (no transcript for this session yet)")]
+        else:
+            rows = [
+                ("input", tokens(seen.input)),
+                ("output", tokens(seen.output)),
+                ("cache", f"{tokens(seen.cache_read)} read · {tokens(seen.cache_write)} written"),
+                ("calls", f"{seen.calls:,}"),
+            ]
+        rows.append(("context", self._context_row(agent, seen)))
         await update.effective_message.reply_text(
-            card("🧮 usage", f"session {agent.session_id[:8]}", rows,
-                 "counters reset when the agent process restarts"),
+            card("🧮 usage", f"session {agent.session_id[:8] or '-'}", rows),
             parse_mode=ParseMode.HTML,
         )
 
+    @staticmethod
+    def _context_row(agent: engine.ChatAgent, seen: omp_sessions.SessionUsage | None = None) -> str:
+        used, size = agent.context["used"], agent.context["size"]
+        if not used and seen is not None:
+            used = seen.context
+        if size <= 0:
+            return tokens(used) if used else "unknown"
+        line = engine.context_line(used, size)
+        compaction = omp_config.read_compaction()
+        threshold = compaction.get("thresholdPercent")
+        if compaction.get("enabled") is False:
+            return f"{line} · compaction off"
+        return f"{line} · omp compacts at {threshold}%" if isinstance(threshold, int) else line
 
     async def cmd_compact(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Run omp's own /compact. While busy it queues: steering a compaction makes no sense."""
@@ -1213,9 +1225,8 @@ class Transport:
         text = " ".join(ctx.args)
         agent = self.agent_for(update.effective_chat.id)
         depth = self.enqueue(update.effective_chat.id, "prompt", _TextOnly(text, update.effective_message))
-        await update.effective_message.reply_text(
-            f"queued (position {depth})" + ("" if agent.busy else "; it will start now")
-        )
+        await self._ack(update.effective_message,
+                        queued_text(depth) if agent.busy else "▶️ starting now")
 
     async def cmd_steer(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -1227,7 +1238,7 @@ class Transport:
         agent = self.agent_for(chat_id)
         outcome, reason = await agent.steer(text)
         if outcome == "injected":
-            return await self._react(update.effective_message, "👀", "steering the running turn")
+            return await self._ack(update.effective_message, STEERED)
         if outcome == "promptRequired":
             # nothing to steer: the text is still what the person wants the agent to read
             self.enqueue(chat_id, "prompt", _TextOnly(text, update.effective_message))
@@ -1321,8 +1332,9 @@ class Transport:
             choice = data.split(":", 1)[1]
             if choice == "other":
                 await query.answer("type your answer")
-                await self.app.bot.send_message(
-                    chat_id, "✏️ go ahead, type your answer — it goes straight to the agent.")
+                agent.pending_options = []
+                # the buttons go with the choice: a later tap would send an answer nobody chose
+                await agent.surface.retire_options("type your answer; it goes to the agent")
                 return
             try:
                 answer = agent.pending_options[int(choice)]
@@ -1337,6 +1349,7 @@ class Transport:
                     card("❓ answer sent", answer, [], "waiting for the agent"), parse_mode=ParseMode.HTML)
             except BadRequest:
                 pass
+            agent.surface.options_message = None
             payload = _TextOnly(answer, query.message)
             await self.submit(chat_id, payload, query.message)
             return
@@ -1636,6 +1649,13 @@ def _retry_window(exc: Exception) -> float:
     return float(value or 5)
 
 
+STEERED = "↪️ steered · the agent reads this at its next step in the running turn"
+
+
+def queued_text(position: int) -> str:
+    return f"📥 queued #{position} · runs after the current turn"
+
+
 class TelegramSurface(engine.Surface):
     """The engine's output side for one Telegram chat: posting, cards, buttons, files."""
 
@@ -1644,6 +1664,9 @@ class TelegramSurface(engine.Surface):
         self.chat_id = chat_id
         self.label = str(chat_id)
         self.limit = TELEGRAM_LIMIT
+        # the card of the question still open, so its buttons can be taken away
+        self.options_message: Any = None
+        self.options_listed = ""
 
     async def post(self, body: str, *, kind: str):
         try:
@@ -1703,12 +1726,24 @@ class TelegramSurface(engine.Surface):
         rows.append([InlineKeyboardButton("✏️ Other answer", callback_data="qo:other")])
         listed = "\n".join(f"<b>{index + 1}.</b> {esc(option)}"
                            for index, option in enumerate(options))
-        await self.app.bot.send_message(
+        self.options_listed = listed
+        self.options_message = await self.app.bot.send_message(
             self.chat_id,
             card("❓ pick an answer", "tap one, or choose Other and just type it", [],
                  "the chosen text is sent as your next message") + f"\n\n{listed}",
             reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
         )
+
+    async def retire_options(self, note: str) -> None:
+        """Drop the buttons of the open question, keeping the listed options readable."""
+        message, self.options_message = self.options_message, None
+        if message is None:
+            return
+        try:
+            await message.edit_text(card("❓ question", note, []) + f"\n\n{self.options_listed}",
+                                    parse_mode=ParseMode.HTML)
+        except (TelegramError, AttributeError) as exc:
+            log.debug("could not retire the options card: %s", exc)
 
     async def ask_permission(self, token: str, kind: str, detail: str,
                              labels: list[str]):

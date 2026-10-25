@@ -71,6 +71,16 @@ def _make_agent(config, updates):
         agent.client = Client(updates)
         agent.client.on_update = agent._on_update
         agent.session_id = "s"
+
+        async def ensure(yolo=False):
+            # /new drops the client; the real ensure() would spawn omp, which CI does not have
+            if agent.client is None:
+                agent.client = Client(updates)
+                agent.client.on_update = agent._on_update
+                agent.session_id = "s2"
+                agent._seed_context()
+
+        agent.ensure = ensure
         return agent
     return make
 
@@ -422,3 +432,88 @@ def test_a_new_agent_process_does_not_report_a_compaction(tmp_path):
 
     asyncio.run(go())
     assert not any("compacted" in text for text in notices)
+
+
+def _transcript(root, session_id, entries):
+    import json
+
+    folder = root / "omp-sessions" / "-"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"2026-10-24T15-09-06-491Z_{session_id}.jsonl"
+    with path.open("a") as handle:
+        for entry in entries:
+            handle.write(json.dumps(entry) + "\n")
+    return path
+
+
+def _call(inp, out, read=0, write=0):
+    return {"type": "message", "message": {"role": "assistant", "usage": {
+        "input": inp, "output": out, "cacheRead": read, "cacheWrite": write}}}
+
+
+def test_session_totals_come_from_the_transcript_and_survive_a_restart(tmp_path):
+    from ompwire import omp_sessions
+
+    path = _transcript(tmp_path, "abc", [_call(100, 50, 700_000), _call(395, 216)])
+    first = omp_sessions.usage("abc")
+    assert (first.calls, first.input, first.output, first.cache_read) == (2, 495, 266, 700_000)
+    # the 611-token call is an unanchored report, not the context
+    assert first.context == 700_150
+    _transcript(tmp_path, "abc", [_call(1_744, 245, 724_501)])
+    assert omp_sessions.usage("abc").calls == 3
+    # a new process has an empty cache and still reads the whole history
+    omp_sessions._cache.clear()
+    again = omp_sessions.usage("abc")
+    assert (again.calls, again.input, again.context) == (3, 2_239, 726_490)
+    assert path.exists()
+
+
+def test_a_compaction_entry_lets_the_context_fall(tmp_path):
+    from ompwire import omp_sessions
+
+    _transcript(tmp_path, "c", [_call(10, 10, 700_000), {"type": "compaction"}, _call(30_000, 100)])
+    assert omp_sessions.usage("c").context == 30_100
+
+
+def test_a_collapsed_report_after_a_restart_keeps_the_context_and_says_nothing(tmp_path):
+    _transcript(tmp_path, "s", [_call(103, 544, 718_041)])
+
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent._seed_context()  # what ensure() does after session/load
+        agent._on_usage(395, 1_048_576)
+        await asyncio.sleep(0.05)
+        agent._on_usage(726_490, 1_048_576)
+        await asyncio.sleep(0.05)
+        return agent
+
+    agent = asyncio.run(go())
+    assert agent.context["used"] == 726_490
+    assert not [m for m in agent.surface.app.bot.messages if "compacted" in m]
+
+
+def test_usage_card_shows_session_totals_without_the_reset_footer(tmp_path):
+    _transcript(tmp_path, "s", [_call(419_018, 418_615, 239_017_895)])
+    _transcript(tmp_path, "s", [_call(1_000, 1_000, 732_000)])
+
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent.context.update(used=734_000, size=1_048_576)
+        transport = _transport(tmp_path, agent)
+        msg = types.SimpleNamespace(replies=[])
+
+        async def reply_text(body, **_kw):
+            msg.replies.append(body)
+
+        msg.reply_text = reply_text
+        update = types.SimpleNamespace(effective_chat=types.SimpleNamespace(id=7),
+                                       effective_user=types.SimpleNamespace(id=1),
+                                       effective_message=msg)
+        transport._authorized = lambda _u: True
+        await transport.cmd_usage(update, None)
+        return msg.replies[0]
+
+    body = asyncio.run(go())
+    assert "input    420k" in body and "239.7M read" in body and "calls    2" in body
+    assert "734k / 1.05M (69%)" in body
+    assert "reset" not in body

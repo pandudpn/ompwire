@@ -94,6 +94,58 @@ def test_an_option_button_sends_the_option_text_as_the_next_prompt(tmp_path):
     assert "mysql" in query.edits[0]
 
 
+def test_other_answer_removes_the_buttons(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent = transport.agent_for(7)
+        await agent.surface.offer_options(["postgres", "mysql"])
+        agent.pending_options = ["postgres", "mysql"]
+        card = agent.surface.options_message
+        edits: list[dict] = []
+
+        async def edit_text(body, **kw):
+            edits.append({"body": body, **kw})
+
+        card.edit_text = edit_text
+        await transport.on_callback(_update(Query("qo:other"))[0], None)
+        sent: list[str] = []
+        transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or 1
+        await transport.on_callback(_update(Query("qo:0"))[0], None)  # a late tap
+        return edits, sent
+
+    edits, sent = asyncio.run(go())
+    assert len(edits) == 1 and "reply_markup" not in edits[0]  # no keyboard left
+    assert "postgres" in edits[0]["body"]  # the options stay readable
+    assert sent == []
+
+
+def test_typing_while_a_question_is_open_retires_its_buttons(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent = transport.agent_for(7)
+        await agent.surface.offer_options(["yes", "no"])
+        agent.pending_options = ["yes", "no"]
+        edits: list[str] = []
+
+        async def edit_text(body, **_kw):
+            edits.append(body)
+
+        agent.surface.options_message.edit_text = edit_text
+        sent: list[str] = []
+        transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or 1
+        message = types.SimpleNamespace(text="actually, maybe", reply_text=None)
+        await transport.submit(7, message, message)
+        return edits, sent, agent.pending_options
+
+    edits, sent, left = asyncio.run(go())
+    assert sent == ["actually, maybe"]
+    assert left == [] and len(edits) == 1
+
+
 def test_a_stale_option_button_says_so_instead_of_sending(tmp_path):
     config = _config(tmp_path)
 
