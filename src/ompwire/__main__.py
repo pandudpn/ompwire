@@ -25,23 +25,32 @@ def _chat_key() -> str:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
+    from . import gateways
+
     config = load_config(args.config)
     for warning in config.warnings:
         print(f"warn: {warning}", file=sys.stderr)
+    # `ompwire chat` used the shared store; its rows are copied to its own the first time
+    gateways.migrate()
     return run_chat(config, key=args.key or _chat_key(), query=args.query, cwd=args.cwd)
 
 
 def cmd_sessions(args: argparse.Namespace) -> int:
+    from . import gateways
+
     config = load_config(args.config)
-    store = SessionStore(config.get("session", "store"))
-    rows = store.all()
-    if not rows:
+    printed = 0
+    for owner, path in gateways.stores(config):
+        if not path.is_file():
+            continue
+        store = SessionStore(str(path))
+        for row in store.all():
+            age = int(time.time() - row.updated_at)
+            print(f"{row.session_id[:8]}  {age:>7}s ago  {row.cwd}  [{owner} {row.key}]")
+            printed += 1
+        store.close()
+    if not printed:
         print("no sessions recorded")
-        return 0
-    for row in rows:
-        age = int(time.time() - row.updated_at)
-        print(f"{row.session_id[:8]}  {age:>7}s ago  {row.cwd}  [{row.key}]")
-    store.close()
     return 0
 
 
@@ -77,6 +86,9 @@ def _run_gateway(config_path: str | None, name: str, force: bool) -> int:
         print(f"FAIL the {gateway.kind!r} transport is not implemented yet; "
               f"`ompwire gateway list` shows what can run today", file=sys.stderr)
         return 1
+    # before the lock: the old state is only moved while no process holds it
+    for line in gateways.migrate(state_for=gateway.name):
+        print(f"migrated {line}", file=sys.stderr)
 
     # the agent comes after the gateway: a mistyped gateway name is the question the
     # user just asked, so answer that before complaining about something else
@@ -752,17 +764,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"ok   agent command: {path}")
     # The config file is not the whole truth: /yolo and /approval are per chat and live in the
     # store, so a doctor that only reads the file reports a gate that is not there.
+    from . import gateways
+
     open_chats: list[str] = []
-    try:
-        probe = SessionStore(str(config.get("session", "store")))
-        for chat, prefs in probe.all_prefs().items():
-            if str(prefs.get("yolo", "")).lower() in {"1", "true", "on"}:
-                open_chats.append(f"chat {chat} (yolo on)")
-            if str(prefs.get("approval", "")) == "allow":
-                open_chats.append(f"chat {chat} (approval allow)")
-        probe.close()
-    except Exception as exc:
-        print(f"WARN could not read per-chat preferences: {exc}")
+    for owner, store_file in gateways.stores(config):
+        if not store_file.is_file():
+            continue
+        try:
+            probe = SessionStore(str(store_file))
+            for chat, prefs in probe.all_prefs().items():
+                if str(prefs.get("yolo", "")).lower() in {"1", "true", "on"}:
+                    open_chats.append(f"{owner} chat {chat} (yolo on)")
+                if str(prefs.get("approval", "")) == "allow":
+                    open_chats.append(f"{owner} chat {chat} (approval allow)")
+            probe.close()
+        except Exception as exc:
+            print(f"WARN could not read per-chat preferences in {store_file}: {exc}")
     file_yolo = bool(config.get("agent", "yolo", False))
     if file_yolo or open_chats:
         print("WARN no gate: " + (", ".join(open_chats) if open_chats
@@ -773,14 +790,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
               f"· a shell command asks in the chat")
     _doctor_units(command)
 
-    store_path = str(config.get("session", "store"))
-    try:
-        probe = SessionStore(store_path)
-        probe.close()
-        print(f"ok   session store writable: {store_path}")
-    except Exception as exc:
-        print(f"FAIL session store: {exc}")
-        failures += 1
+    for owner, store_file in gateways.stores(config):
+        if not store_file.is_file():
+            print(f"--   session store {owner}: none yet ({store_file})")
+            continue
+        try:
+            probe = SessionStore(str(store_file))
+            probe.close()
+            print(f"ok   session store writable: {owner} {store_file}")
+        except Exception as exc:
+            print(f"FAIL session store {owner}: {exc}")
+            failures += 1
 
     client = AcpClient(
         command=command,

@@ -27,6 +27,11 @@ def sandbox(monkeypatch, tmp_path):
     return config_dir
 
 
+def _envs(sandbox) -> str:
+    """Every credential file under the sandbox, joined: each gateway has its own .env."""
+    return "".join(path.read_text() for path in sorted(sandbox.rglob(".env")))
+
+
 def _identifies(monkeypatch, username: str = "test_bot"):
     monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: username)
 
@@ -165,11 +170,11 @@ class Units:
     def __init__(self, monkeypatch, sandbox, active=()):
         self.calls: list[tuple[str, str, str]] = []
         self.active = set(active)
-        self.env = sandbox / ".env"
+        self.sandbox = sandbox
 
         def record(action):
             def call(name, **_kw):
-                text = self.env.read_text() if self.env.exists() else ""
+                text = _envs(self.sandbox)
                 self.calls.append((action, name, text))
                 if action == "stop":
                     self.active.discard(name)
@@ -210,7 +215,7 @@ def test_first_start_asks_platform_credential_and_users_then_starts(sandbox, mon
     assert any("bot token" in prompt for prompt in asked)
     item = gateways.load()[0]
     assert (item.name, item.kind, item.allowed) == ("telegram", "telegram", [42])
-    assert "123:abcdef" in (sandbox / ".env").read_text()
+    assert "123:abcdef" in _envs(sandbox)
     assert units.calls[-1][:2] == ("start", "telegram")
     assert "credential valid: @first_bot" in capsys.readouterr().out
 
@@ -224,8 +229,8 @@ def test_a_rejected_credential_writes_nothing(sandbox, monkeypatch, capsys):
                      "--yes"]) == 1
 
     assert "no valid credential" in capsys.readouterr().err
-    assert not (sandbox / "gateways.toml").exists()
-    assert not (sandbox / ".env").exists()
+    assert gateways.load() == []
+    assert _envs(sandbox) == ""
     assert units.calls == []
 
 
@@ -237,7 +242,7 @@ def test_a_rejected_credential_is_asked_again(sandbox, monkeypatch):
     _answers(monkeypatch, "1", "7", secrets=["bad:token", "good:token"])
 
     assert cli.main(["gateway", "start"]) == 0
-    assert "good:token" in (sandbox / ".env").read_text()
+    assert "good:token" in _envs(sandbox)
 
 
 def test_scripted_start_needs_no_prompt(sandbox, monkeypatch):
@@ -275,13 +280,13 @@ def test_rerunning_start_is_safe_and_changes_nothing(sandbox, monkeypatch):
     Units(monkeypatch, sandbox)
     gateways.add("telegram", allowed=[42])
     gateways.set_token(gateways.Gateway(name="telegram"), "123:abc")
-    before = ((sandbox / ".env").read_text(), (sandbox / "gateways.toml").read_text())
+    before = (_envs(sandbox), gateways.gateway_file("telegram").read_text())
     _answers(monkeypatch)
 
     assert cli.main(["gateway", "start", "telegram", "--yes"]) == 0
     assert cli.main(["gateway", "start", "telegram", "--yes"]) == 0
 
-    assert ((sandbox / ".env").read_text(), (sandbox / "gateways.toml").read_text()) == before
+    assert (_envs(sandbox), gateways.gateway_file("telegram").read_text()) == before
 
 
 def test_replacing_a_credential_stops_the_old_poller_first(sandbox, monkeypatch):
@@ -311,7 +316,7 @@ def test_add_a_new_profile_on_a_platform_that_has_one(sandbox, monkeypatch):
     names = {item.name: item for item in gateways.load()}
     assert set(names) == {"telegram", "work"}
     assert names["work"].allowed == [77]
-    env = (sandbox / ".env").read_text()
+    env = _envs(sandbox)
     assert "111:first" in env and "222:second" in env  # one credential each
     assert units.calls[-1][:2] == ("start", "work")
 
@@ -351,7 +356,7 @@ def test_start_rejects_an_invalid_name(sandbox, monkeypatch, capsys):
 def test_whatsapp_is_refused_before_anything_is_written(sandbox, capsys):
     assert cli.main(["gateway", "start", "--platform", "whatsapp", "--yes"]) == 1
     assert "not implemented yet" in capsys.readouterr().err
-    assert not (sandbox / "gateways.toml").exists()
+    assert gateways.load() == []
 
 
 def test_an_out_of_range_menu_answer_is_an_error_not_a_traceback(sandbox, monkeypatch, capsys):
@@ -378,7 +383,7 @@ def test_input_that_ends_mid_question_is_a_message_not_a_traceback(sandbox, monk
     monkeypatch.setattr("builtins.input", closed)
     assert cli.main(["gateway", "start"]) == 1
     assert "input ended" in capsys.readouterr().err
-    assert not (sandbox / "gateways.toml").exists()
+    assert gateways.load() == []
 
 
 def test_every_implemented_platform_explains_its_credential_and_user_ids():
@@ -517,7 +522,7 @@ def test_remove_asks_which_then_keeps_state_by_default(sandbox, monkeypatch, tmp
 
     assert [item.name for item in gateways.load()] == ["telegram"]
     assert removed == ["work"]
-    env = (sandbox / ".env").read_text()
+    env = _envs(sandbox)
     assert "2:work" not in env and "1:main" in env  # only its own credential goes
     assert work_state.is_dir()  # kept
     assert "kept its sessions and log" in capsys.readouterr().out
@@ -537,7 +542,7 @@ def test_remove_needs_the_name_typed_back(sandbox, monkeypatch, tmp_path, capsys
 
     assert cli.main(["gateway", "remove"]) == 1
     assert len(gateways.load()) == 2 and removed == [] and work_state.is_dir()
-    assert "2:work" in (sandbox / ".env").read_text()
+    assert "2:work" in _envs(sandbox)
 
 
 def test_scripted_remove_and_purge(sandbox, monkeypatch, tmp_path):

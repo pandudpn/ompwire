@@ -27,14 +27,16 @@ def sandbox(monkeypatch, tmp_path):
 
 
 class TestDefinitions:
-    def test_add_writes_one_section_per_gateway(self, sandbox):
+    def test_add_writes_one_directory_per_gateway(self, sandbox):
         gateways.add("telegram", "telegram", allowed=[42], home=42)
         gateways.add("telegram-2", "telegram", allowed=[7])
 
-        parsed = tomllib.loads((sandbox / "gateways.toml").read_text())
-        assert parsed["gateway"]["telegram"]["allowed_users"] == [42]
-        assert parsed["gateway"]["telegram"]["home_channel"] == 42
-        assert parsed["gateway"]["telegram-2"]["enabled"] is True
+        first = tomllib.loads((sandbox / "gateways" / "telegram" / "gateway.toml").read_text())
+        second = tomllib.loads((sandbox / "gateways" / "telegram-2" / "gateway.toml").read_text())
+        assert first["gateway"]["telegram"]["allowed_users"] == [42]
+        assert first["gateway"]["telegram"]["home_channel"] == 42
+        assert "telegram-2" not in first["gateway"]
+        assert second["gateway"]["telegram-2"]["enabled"] is True
 
     def test_load_round_trips(self, sandbox):
         gateways.add("telegram", "telegram", allowed=[42, 43], home=42)
@@ -126,8 +128,11 @@ class TestCredentials:
             "OMPWIRE_GATEWAY_TELEGRAM_2_TOKEN"
 
     def test_set_token_only_touches_its_own_line(self, sandbox):
-        (sandbox / ".env").write_text("OTHER=keep\nTELEGRAM_BOT_TOKEN=old\n", encoding="utf-8")
+        own = gateways.env_file("telegram")
+        own.parent.mkdir(parents=True)
+        own.write_text("OTHER=keep\nTELEGRAM_BOT_TOKEN=old\n", encoding="utf-8")
         path = gateways.set_token(gateways.Gateway(name="telegram"), "new")
+        assert path == own
         text = path.read_text()
         assert "OTHER=keep" in text
         assert "TELEGRAM_BOT_TOKEN=new" in text
@@ -161,3 +166,117 @@ class TestApply:
         assert config.get("telegram", "home_channel") == 42
         assert config.get("telegram", "verbose") is True      # other keys survive
         assert config.data["_gateway"]["name"] == "telegram"
+
+
+class TestLayout:
+    """One directory per gateway, and the move from the old shared files."""
+
+    @pytest.fixture
+    def install(self, sandbox, monkeypatch, tmp_path):
+        from ompwire import config as config_module
+        from ompwire.store import SessionStore
+
+        state = tmp_path / "install-state"
+        state.mkdir()
+        monkeypatch.setattr(config_module, "default_state_dir", lambda: state)
+        (sandbox / "gateways.toml").write_text(
+            '[gateway.telegram]\ntype = "telegram"\nallowed_users = [1]\n\n'
+            '[gateway.work]\ntype = "telegram"\nallowed_users = [2]\n\n'
+            '[gateway.work.agent]\nmodel = "w/m"\n', encoding="utf-8")
+        (sandbox / ".env").write_text(
+            "# a comment\nTELEGRAM_BOT_TOKEN=1:main\nOMPWIRE_GATEWAY_WORK_TOKEN=2:work\n"
+            "OTHER=keep\n", encoding="utf-8")
+        store = SessionStore(str(state / "sessions.db"))
+        store.put("tg:7", "main-session", "/home")
+        store.put("cli:/repo", "cli-session", "/repo")
+        store.begin_turn("tg:7", "unfinished prompt")
+        store.close()
+        (state / "overrides.json").write_text('{"stream": {"show_reasoning": true}}')
+        (state / "ompwire.log").write_text("old log\n")
+        return state
+
+    def test_migration_gives_every_gateway_its_own_files(self, sandbox, install):
+        from ompwire.store import SessionStore
+
+        moved = gateways.migrate(state_for="telegram")
+
+        assert moved
+        assert [item.name for item in gateways.load()] == ["telegram", "work"]
+        assert gateways.get("work").settings == {"agent": {"model": "w/m"}}
+        assert (sandbox / "gateways.toml.migrated").is_file()
+        assert gateways.token(gateways.get("telegram")) == "1:main"
+        assert gateways.token(gateways.get("work")) == "2:work"
+        assert "1:main" not in (sandbox / ".env").read_text()  # out of the shared file
+        assert "OTHER=keep" in (sandbox / ".env").read_text()  # anything else stays
+
+        home = install / "gateways" / "telegram"
+        assert not (install / "sessions.db").exists()
+        store = SessionStore(str(home / "sessions.db"))
+        assert store.get("tg:7").session_id == "main-session"
+        assert store.interrupted("tg:") == [("tg:7", "unfinished prompt", 0)]  # resumes
+        store.close()
+        assert (home / "overrides.json").is_file() and (home / "ompwire.log").is_file()
+
+        cli = SessionStore(str(install / "cli" / "sessions.db"))
+        assert cli.get("cli:/repo").session_id == "cli-session"
+        cli.close()
+
+    def test_migration_can_run_again(self, sandbox, install):
+        gateways.migrate(state_for="telegram")
+        assert gateways.migrate(state_for="telegram") == []
+
+    def test_state_held_by_a_running_gateway_is_not_moved(self, sandbox, install):
+        from ompwire import lock
+
+        handle = lock.acquire(install / "serve-telegram.lock")
+        try:
+            gateways.migrate(state_for="telegram")
+        finally:
+            lock.release(handle, install / "serve-telegram.lock")
+
+        assert (install / "sessions.db").is_file()
+        assert not (install / "gateways" / "telegram" / "sessions.db").exists()
+        # definitions and credentials still move: they are read, not held
+        assert gateways.token(gateways.get("telegram")) == "1:main"
+
+    def test_a_gateway_config_points_inside_its_own_directory(self, sandbox, install):
+        gateways.migrate(state_for="telegram")
+        work = gateways.config_for(gateways.get("work"))
+        home = install / "gateways" / "work"
+        assert work.get("session", "store") == str(home / "sessions.db")
+        assert work.overrides_path == home / "overrides.json"
+        assert work.get("agent", "model") == "w/m"
+
+    def test_the_agent_never_sees_a_bot_token(self, monkeypatch):
+        from ompwire.engine import child_env
+
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:main")
+        monkeypatch.setenv("OMPWIRE_GATEWAY_WORK_TOKEN", "2:work")
+        monkeypatch.setenv("KEEP_ME", "yes")
+        env = child_env()
+        assert "TELEGRAM_BOT_TOKEN" not in env and "OMPWIRE_GATEWAY_WORK_TOKEN" not in env
+        assert env["KEEP_ME"] == "yes"
+
+    def test_removing_a_credential_removes_its_file(self, sandbox, install):
+        gateways.migrate(state_for="telegram")
+        gateways.unset_token(gateways.get("work"))
+        assert not gateways.env_file("work").exists()
+        assert gateways.gateway_file("work").is_file()  # the definition is remove()'s job
+
+
+    def test_an_empty_store_at_the_target_does_not_block_the_move(self, sandbox, install):
+        from ompwire.store import SessionStore
+
+        SessionStore(str(install / "gateways" / "telegram" / "sessions.db")).close()
+        gateways.migrate(state_for="telegram")
+        store = SessionStore(str(install / "gateways" / "telegram" / "sessions.db"))
+        assert store.get("tg:7").session_id == "main-session"
+        store.close()
+
+
+def test_status_does_not_create_a_store_it_only_reads(tmp_path):
+    from ompwire import status
+
+    target = tmp_path / "none" / "sessions.db"
+    assert "none yet" in status._sessions(str(target))
+    assert not target.exists()

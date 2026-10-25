@@ -53,10 +53,14 @@ HARNESS_SECRETS = ("TELEGRAM_BOT_TOKEN", "HONCHO_API_KEY", "OMPWIRE_HONCHO_API_K
 
 
 def child_env() -> dict[str, str]:
-    """The agent inherits the environment without the credentials this harness runs on."""
+    """The agent inherits the environment without the credentials this harness runs on, every
+    gateway's included: a unit loads its own bot token, and an agent that can run a shell must
+    not be able to print it."""
     env = dict(os.environ)
     for name in HARNESS_SECRETS:
         env.pop(name, None)
+    for name in [key for key in env if key.startswith("OMPWIRE_GATEWAY_") and key.endswith("_TOKEN")]:
+        env.pop(name)
     return env
 
 

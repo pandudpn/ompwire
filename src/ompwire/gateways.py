@@ -4,9 +4,15 @@ A gateway is a chat platform connection with its own credential and its own allo
 Keeping them separate is the whole point: a WhatsApp gateway that breaks should not take
 the Telegram one down with it, and each gets its own systemd unit.
 
-Definitions live in `gateways.toml` — a file ompwire owns, so a rewrite cannot chew
-through the comments in `config.toml`. A legacy `[telegram]` section in `config.toml`
-still works: it is read as a gateway named `telegram`.
+Each gateway owns two directories and nothing outside them:
+
+    ~/.config/ompwire/gateways/<name>/gateway.toml   platform, allow list, its own settings
+    ~/.config/ompwire/gateways/<name>/.env           its credential (0600)
+    ~/.local/state/ompwire/gateways/<name>/          sessions.db, overrides.json, log, lock
+
+so removing one is removing two directories. `config.toml` stays the shared default, and the
+agent itself (omp, ~/.omp) is shared by all. `migrate()` moves an install from the old layout:
+one gateways.toml, one .env, and the first gateway's state at the root of the state directory.
 """
 
 from __future__ import annotations
@@ -121,9 +127,24 @@ class Gateway:
 
 
 def gateways_file() -> Path:
+    """The old single definitions file, read only to migrate from it."""
     from .setup import _paths
 
     return _paths()[0] / "gateways.toml"
+
+
+def gateways_dir() -> Path:
+    from .setup import _paths
+
+    return _paths()[0] / "gateways"
+
+
+def gateway_file(name: str) -> Path:
+    return gateways_dir() / name / "gateway.toml"
+
+
+def env_file(name: str) -> Path:
+    return gateways_dir() / name / ".env"
 
 
 def _parse(data: dict[str, Any]) -> list[Gateway]:
@@ -151,14 +172,26 @@ def _parse(data: dict[str, Any]) -> list[Gateway]:
     return sorted(found, key=lambda gw: gw.name)
 
 
+def _read(path: Path) -> list[Gateway]:
+    try:
+        return _parse(tomllib.loads(path.read_text(encoding="utf-8")))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise GatewayError(f"{path} is not readable TOML: {exc}") from exc
+
+
 def load(config: Any = None) -> list[Gateway]:
-    """Every configured gateway, newest file first, legacy section second."""
-    path = gateways_file()
-    if path.is_file():
-        try:
-            found = _parse(tomllib.loads(path.read_text(encoding="utf-8")))
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            raise GatewayError(f"{path} is not readable TOML: {exc}") from exc
+    """Every configured gateway: one directory each, then the old gateways.toml an install has
+    not migrated yet, then a `[telegram]` block in config.toml."""
+    root = gateways_dir()
+    found: list[Gateway] = []
+    if root.is_dir():
+        for path in sorted(root.glob("*/gateway.toml")):
+            found.extend(item for item in _read(path) if item.name == path.parent.name)
+    if found:
+        return sorted(found, key=lambda gw: gw.name)
+    legacy = gateways_file()
+    if legacy.is_file():
+        found = _read(legacy)
         if found:
             return found
     return _from_config(config)
@@ -190,8 +223,8 @@ def _from_config(config: Any) -> list[Gateway]:
 
 
 def render(items: list[Gateway]) -> str:
-    lines: list[str] = ["# Written by `ompwire gateway`. One section per bot.",
-                        "# Credentials stay in .env, never in this file.", ""]
+    lines: list[str] = ["# Written by `ompwire gateway`.",
+                        "# The credential stays in the .env next to this file.", ""]
     for item in items:
         lines.append(f"[gateway.{item.name}]")
         lines.append(f'type = "{item.kind}"')
@@ -225,16 +258,26 @@ def _toml_value(value: Any) -> str:
 
 
 def state_dir(name: str) -> Path:
-    """Where one gateway keeps its own runtime state: sessions, chat overrides, log.
-
-    Each gateway owns a directory so two bots never share a session, a /reasoning toggle or a
-    log line. The first gateway, `telegram`, keeps the paths it has always used: moving a live
-    install's sessions.db would cost the conversations in it.
-    """
+    """Where one gateway keeps its runtime state: sessions, chat overrides, log, lock. Two bots
+    never share a session, a /reasoning toggle or a log line."""
     from .config import default_state_dir
 
-    base = default_state_dir()
-    return base if name == "telegram" else base / "gateways" / name
+    return default_state_dir() / "gateways" / name
+
+
+LOG_NAME = "ompwire.log"
+
+
+def stores(config: Any = None) -> list[tuple[str, Path]]:
+    """Every session store on this machine as (owner, path): the CLI's, then each gateway's."""
+    from .config import load_config
+
+    shared = config if config is not None else load_config()
+    found = [("cli", Path(str(shared.get("session", "store"))).expanduser())]
+    for item in load(shared):
+        store = item.settings.get("session", {}).get("store") or state_dir(item.name) / "sessions.db"
+        found.append((item.name, Path(str(store)).expanduser()))
+    return found
 
 
 def config_for(gateway: Gateway, explicit: Any = None) -> Any:
@@ -244,21 +287,35 @@ def config_for(gateway: Gateway, explicit: Any = None) -> Any:
 
     home = state_dir(gateway.name)
     layer = {section: dict(values) for section, values in gateway.settings.items()}
-    if gateway.name != "telegram":
-        layer.setdefault("session", {}).setdefault("store", str(home / "sessions.db"))
+    layer.setdefault("session", {}).setdefault("store", str(home / "sessions.db"))
     config = load_config(explicit, layer=layer, overrides_path=home / "overrides.json")
-    if gateway.name != "telegram":
-        shared_log = str(config.get("logging", "file", "") or "")
-        if shared_log:
-            config.data.setdefault("logging", {})["file"] = str(home / Path(shared_log).name)
+    if str(config.get("logging", "file", "") or ""):
+        config.data.setdefault("logging", {})["file"] = str(home / LOG_NAME)
     return apply(config, gateway)
 
 
-def save(items: list[Gateway], path: Path | None = None) -> Path:
-    target = path or gateways_file()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(render(items), encoding="utf-8")
-    return target
+def save(items: list[Gateway]) -> Path:
+    """Write each gateway to its own directory; a gateway missing from `items` loses its file."""
+    root = gateways_dir()
+    keep = {item.name for item in items}
+    for item in items:
+        target = gateway_file(item.name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(render([item]), encoding="utf-8")
+    if root.is_dir():
+        for path in root.glob("*/gateway.toml"):
+            if path.parent.name not in keep:
+                path.unlink()
+                _prune(path.parent)
+    return root
+
+
+def _prune(directory: Path) -> None:
+    """Remove a gateway directory once nothing is left in it."""
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
 
 
 def validate_name(name: str) -> str:
@@ -340,20 +397,29 @@ def read_env_file() -> dict[str, str]:
     return values
 
 
+def _read_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
 def token(gateway: Gateway) -> str:
-    """This gateway's credential: the environment wins, then .env."""
+    """This gateway's credential: the environment wins, then its own .env, then the shared .env
+    an install has not migrated yet."""
     name = gateway.token_var()
-    value = os.environ.get(name) or read_env_file().get(name) or ""
-    if not value and gateway.name == "telegram":
-        # older machines keep the token under the platform name only
-        value = os.environ.get("TELEGRAM_BOT_TOKEN") or read_env_file().get(
-            "TELEGRAM_BOT_TOKEN") or ""
-    return value
+    return (os.environ.get(name) or _read_env(env_file(gateway.name)).get(name)
+            or read_env_file().get(name) or "")
 
 
 def set_token(gateway: Gateway, value: str) -> Path:
-    """Write one credential into .env, leaving the other keys alone."""
-    path = _env_file()
+    """Write this gateway's credential into its own .env, leaving any other keys alone."""
+    path = env_file(gateway.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     key = gateway.token_var()
     lines: list[str] = []
@@ -371,12 +437,9 @@ def set_token(gateway: Gateway, value: str) -> Path:
     return path
 
 
-def unset_token(gateway: Gateway) -> bool:
-    """Remove this gateway's credential from .env, leaving the other keys alone."""
-    path = _env_file()
+def _drop_key(path: Path, key: str) -> bool:
     if not path.is_file():
         return False
-    key = gateway.token_var()
     lines = path.read_text(encoding="utf-8").splitlines()
     kept = [raw for raw in lines if not raw.strip().startswith(f"{key}=")]
     if len(kept) == len(lines):
@@ -384,6 +447,130 @@ def unset_token(gateway: Gateway) -> bool:
     path.write_text("\n".join(kept).rstrip("\n") + ("\n" if kept else ""), encoding="utf-8")
     path.chmod(0o600)
     return True
+
+
+def unset_token(gateway: Gateway) -> bool:
+    """Remove this gateway's credential, wherever it is stored. Its own .env goes when nothing
+    else is left in it, and the gateway's config directory with it when that is empty too."""
+    key = gateway.token_var()
+    own = env_file(gateway.name)
+    removed = _drop_key(own, key)
+    removed = _drop_key(_env_file(), key) or removed
+    if own.is_file() and not _read_env(own):
+        own.unlink()
+    _prune(own.parent)
+    return removed
+
+
+# ------------------------------------------------------------------ migration
+
+
+def migrate(state_for: str = "") -> list[str]:
+    """Move an install from the old layout; returns one line per thing moved.
+
+    Definitions and credentials move whenever this runs: a running gateway already holds its
+    credential in its environment, and `token()` still finds a credential in either place.
+    State moves only for `state_for`, the gateway about to start, and only while nothing holds its
+    old lock, so no running process is writing the files being moved. Safe to run again.
+    """
+    from .config import default_state_dir
+
+    moved: list[str] = []
+    legacy = gateways_file()
+    if legacy.is_file() and not any(gateways_dir().glob("*/gateway.toml")):
+        items = _read(legacy)
+        if items:
+            save(items)
+            legacy.rename(legacy.with_name("gateways.toml.migrated"))
+            moved.append(f"definitions: {legacy} -> {gateways_dir()}/<name>/gateway.toml")
+    shared = read_env_file()
+    for item in load():
+        key = item.token_var()
+        if key in shared and not _read_env(env_file(item.name)).get(key):
+            set_token(item, shared[key])
+            _drop_key(_env_file(), key)
+            moved.append(f"credential {key}: shared .env -> {env_file(item.name)}")
+
+    root = default_state_dir()
+    old_store = root / "sessions.db"
+    if old_store.is_file():
+        moved.extend(_copy_cli_rows(old_store, root / "cli" / "sessions.db"))
+    if state_for == "telegram" and old_store.is_file():
+        moved.extend(_move_root_state(root))
+    if state_for:
+        old_lock = root / f"serve-{state_for}.lock"
+        if old_lock.is_file() and not _held(old_lock):
+            old_lock.unlink()
+    return moved
+
+
+def _has_sessions(store: Path) -> bool:
+    import sqlite3
+
+    if not store.is_file():
+        return False
+    connection = sqlite3.connect(store)
+    try:
+        return any(connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                   for table in ("sessions", "inflight"))
+    except sqlite3.Error:
+        return True  # unreadable: do not overwrite it
+    finally:
+        connection.close()
+
+
+def _held(lock: Path) -> bool:
+    from .lock import holder
+
+    return holder(lock) is not None
+
+
+def _move_root_state(root: Path) -> list[str]:
+    """The first gateway kept its state at the root of the state directory."""
+    target = state_dir("telegram")
+    if _held(root / "serve-telegram.lock") or _has_sessions(target / "sessions.db"):
+        return []
+    if (target / "sessions.db").exists():
+        (target / "sessions.db").unlink()  # an empty store something opened before the move
+    target.mkdir(parents=True, exist_ok=True)
+    moved: list[str] = []
+    names = ["sessions.db", "sessions.db-journal", "overrides.json", LOG_NAME]
+    names += [f"{LOG_NAME}.{index}" for index in range(1, 10)]
+    for name in names:
+        source = root / name
+        if source.is_file():
+            source.rename(target / name)
+            moved.append(f"state: {source} -> {target / name}")
+    return moved
+
+
+def _copy_cli_rows(old_store: Path, cli_store: Path) -> list[str]:
+    """`ompwire chat` kept its sessions in the same store; copy its rows to its own, once."""
+    import sqlite3
+
+    if cli_store.exists():
+        return []
+    from .store import SessionStore
+
+    SessionStore(str(cli_store)).close()  # the schema
+    source = sqlite3.connect(old_store)
+    target = sqlite3.connect(cli_store)
+    try:
+        copied = 0
+        for table in ("sessions", "prefs"):
+            columns = [row[1] for row in source.execute(f"PRAGMA table_info({table})")]
+            if not columns:
+                continue
+            names = ", ".join(columns)
+            marks = ", ".join("?" for _ in columns)
+            rows = source.execute(f"SELECT {names} FROM {table} WHERE key LIKE 'cli:%'").fetchall()
+            target.executemany(f"INSERT OR IGNORE INTO {table} ({names}) VALUES ({marks})", rows)
+            copied += len(rows)
+        target.commit()
+    finally:
+        source.close()
+        target.close()
+    return [f"cli sessions: {copied} row(s) -> {cli_store}"] if copied else []
 
 
 def apply(config: Any, gateway: Gateway) -> Any:

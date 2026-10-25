@@ -68,7 +68,8 @@ def test_status_shows_every_setting_that_decides_behaviour(monkeypatch, tmp_path
     assert rows["approvals"] == "yolo (bypassed)"
     assert "telegram token" not in rows
     assert rows["mcp"] == "source none"
-    assert str(store) in rows["sessions"]
+    assert str(store) in rows["sessions cli"]  # `ompwire chat` keeps the configured store
+    assert "gateways/telegram/sessions.db" in rows["sessions telegram"]  # each bot its own
     assert str(log) in rows["log"]
     assert rows["processes"] == "not running"
 

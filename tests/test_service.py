@@ -100,7 +100,7 @@ def test_start_writes_the_unit_and_enables_it(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(service, "_systemd_available", lambda: True)
     monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": unit)
-    monkeypatch.setattr(service, "_env_file", lambda: env)
+    monkeypatch.setattr(service, "_env_file", lambda gateway="": env)
     monkeypatch.setattr(service, "_workdir", lambda: "/home/you")
     monkeypatch.setattr(service, "command_path", lambda: "/home/you/.local/bin/ompwire")
     monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
@@ -131,7 +131,7 @@ def test_start_rewrites_a_stale_unit(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(service, "_systemd_available", lambda: True)
     monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": unit)
-    monkeypatch.setattr(service, "_env_file", lambda: env)
+    monkeypatch.setattr(service, "_env_file", lambda gateway="": env)
     monkeypatch.setattr(service, "_workdir", lambda: "/home/you")
     monkeypatch.setattr(service, "_credential_works", lambda gateway: True)
     monkeypatch.setattr(service, "agent_binary", lambda command="": "/home/you/.local/bin/omp")
@@ -237,7 +237,7 @@ def test_start_refuses_a_rejected_credential(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(service, "_systemd_available", lambda: True)
     monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": _tmp_unit(gateway))
-    monkeypatch.setattr(service, "_env_file", lambda: _env(tmp_path))
+    monkeypatch.setattr(service, "_env_file", lambda gateway="": _env(tmp_path))
     monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
     monkeypatch.setattr(gateways, "load", lambda config=None: [gateways.Gateway(name="telegram")])
     monkeypatch.setattr(gateways, "token", lambda item: "old:token")
@@ -262,7 +262,7 @@ def test_start_proceeds_when_the_credential_verifies(monkeypatch, tmp_path, caps
 
     monkeypatch.setattr(service, "_systemd_available", lambda: True)
     monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": unit)
-    monkeypatch.setattr(service, "_env_file", lambda: env)
+    monkeypatch.setattr(service, "_env_file", lambda gateway="": env)
     monkeypatch.setattr(service, "_workdir", lambda: "/home/you")
     monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
     monkeypatch.setattr(service.subprocess, "run",
@@ -315,7 +315,7 @@ class TestUnitPath:
         monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": target)
         monkeypatch.setattr(service, "_systemd_available", lambda: True)
         monkeypatch.setattr(service, "command_path", lambda: "/usr/bin/ompwire")
-        monkeypatch.setattr(service, "_env_file", lambda: tmp_path / ".env")
+        monkeypatch.setattr(service, "_env_file", lambda gateway="": tmp_path / ".env")
         monkeypatch.setattr(service, "_workdir", lambda: "/home/you")
         monkeypatch.setattr(service, "state", lambda gateway="telegram": "active")
 
@@ -366,7 +366,7 @@ class TestStartPreconditions:
         monkeypatch.setattr(service, "_systemd_available", lambda: True)
         monkeypatch.setattr(service, "agent_binary", lambda command="": None)
         monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
-        monkeypatch.setattr(service, "_env_file", lambda: tmp_path / ".env")
+        monkeypatch.setattr(service, "_env_file", lambda gateway="": tmp_path / ".env")
         (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=x\n", encoding="utf-8")
         monkeypatch.setattr(service, "_credential_works", lambda gateway="": True)
 
@@ -379,7 +379,7 @@ class TestStartPreconditions:
         monkeypatch.setattr(service, "_systemd_available", lambda: True)
         monkeypatch.setattr(service, "agent_binary", lambda command="": None)
         monkeypatch.setattr("ompwire.update.serving_processes", lambda: [])
-        monkeypatch.setattr(service, "_env_file", lambda: tmp_path / ".env")
+        monkeypatch.setattr(service, "_env_file", lambda gateway="": tmp_path / ".env")
         (tmp_path / ".env").write_text("TELEGRAM_BOT_TOKEN=x\n", encoding="utf-8")
         monkeypatch.setattr(service, "_credential_works", lambda gateway="": True)
         monkeypatch.setattr(service, "_workdir", lambda: "/home/you")

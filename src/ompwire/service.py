@@ -115,9 +115,17 @@ WantedBy=default.target
 """
 
 
-def _env_file() -> Path:
+def _env_file(gateway: str = "") -> Path:
+    """The credential file a unit loads: the gateway's own once it has one, the shared one
+    for an install that has not migrated (and for schedules, which need no bot token)."""
     from .setup import _paths
 
+    if gateway:
+        from .gateways import env_file
+
+        own = env_file(gateway)
+        if own.is_file():
+            return own
     return _paths()[2]
 
 
@@ -175,7 +183,7 @@ def start(gateway: str = "telegram", *, force: bool = False, now: bool = True) -
               f"     stop it first (kill the pid), then `ompwire gateway start {gateway}`")
         return 1
 
-    env_file = _env_file()
+    env_file = _env_file(gateway)
     if not env_file.is_file():
         print(f"FAIL {env_file} is missing: run `ompwire gateway start` to add a credential")
         return 1
@@ -285,7 +293,7 @@ def restart(gateway: str = "telegram") -> int:
     # Rewrite the unit before restarting it. The unit is generated from this machine's paths, so a
     # plain `systemctl restart` would keep running an old PATH or an old ExecStart written by a
     # previous version: the process restarts and the same bug restarts with it.
-    refreshed = render_unit(command_path(), _env_file(), _workdir(), gateway)
+    refreshed = render_unit(command_path(), _env_file(gateway), _workdir(), gateway)
     if target.read_text(encoding="utf-8") != refreshed:
         target.write_text(refreshed, encoding="utf-8")
         print(f"ok   unit refreshed: {target}")

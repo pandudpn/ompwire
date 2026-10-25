@@ -88,7 +88,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "extra_instructions": "",
     },
     "session": {
-        "store": "~/.local/state/ompwire/sessions.db",
+        # `ompwire chat`'s own store; every gateway gets state/gateways/<name>/sessions.db
+        "store": "~/.local/state/ompwire/cli/sessions.db",
         "idle_timeout": 1800,
     },
     "stream": {

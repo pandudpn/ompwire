@@ -79,6 +79,8 @@ def _gateway_rows() -> list[tuple[str, str]]:
 def _sessions(store_path: str) -> str:
     from .store import SessionStore
 
+    if not Path(store_path).expanduser().is_file():
+        return f"{store_path} (none yet)"
     try:
         store = SessionStore(store_path)
     except Exception as exc:
@@ -160,7 +162,10 @@ def collect(config_path: str | None = None) -> list[tuple[str, str]]:
     rows.append(("mcp", detail))
 
     rows.append(("processes", _gateway_state()[1]))
-    rows.append(("sessions", _sessions(str(config.get("session", "store")))))
+    from . import gateways
+
+    for owner, store_file in gateways.stores(config):
+        rows.append((f"sessions {owner}", _sessions(str(store_file))))
     rows.append(("log", _log_line(config)))
     return rows
 
