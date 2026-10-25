@@ -50,7 +50,6 @@ def _gateway_file(monkeypatch, tmp_path, body: str = ""):
         target.write_text(body, encoding="utf-8")
     monkeypatch.setattr(gateways, "gateways_file", lambda: target)
     # the legacy fallback reads config.toml, which on a real machine has a [telegram] block
-    monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
     return target
 
 

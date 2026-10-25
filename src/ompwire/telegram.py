@@ -181,8 +181,9 @@ class Transport:
         self._login_seen: dict[int, list[str]] = {}
         self._login_before: dict[int, dict[str, tuple[str, str]]] = {}
         self.credential_db = str(config.get("agent", "credential_db", "~/.omp/agent/agent.db"))
-        self.token = str(config.get("telegram", "bot_token", "") or "")
-        self.allowed = {int(str(u)) for u in (config.get("telegram", "allowed_users") or []) if str(u).strip()}
+        self.token = str(config.get("gateway", "credential", "") or "")
+        self.allowed = {int(str(u)) for u in (config.get("gateway", "allowed_users") or [])
+                        if str(u).strip()}
         self.agents: dict[int, engine.ChatAgent] = {}
         self.queues: dict[int, asyncio.Queue[tuple[str, Any]]] = {}
         self.workers: dict[int, asyncio.Task] = {}
@@ -1625,7 +1626,7 @@ class Transport:
             self.enqueue(chat_id, "prompt", payload)
 
     def _home_chat(self) -> int | None:
-        home = str(self.config.get("telegram", "home_channel", "") or "")
+        home = str(self.config.get("gateway", "home_channel", "") or "")
         if home.strip():
             try:
                 return int(home)
@@ -1952,11 +1953,12 @@ def configure_logging(config: Config) -> None:
 def serve(config: Config) -> int:
     configure_logging(config)
     transport = Transport(config)
+    name = config.get("gateway", "name", "?")
     if not transport.token:
-        print("error: TELEGRAM_BOT_TOKEN is not set")
+        print(f"error: gateway {name!r} has no credential; run `ompwire gateway start {name}`")
         return 2
     if not transport.allowed:
-        print("error: telegram.allowed_users is empty, nobody could talk to the bot")
+        print(f"error: gateway {name!r} has no allowed users, nobody could talk to the bot")
         return 2
     from telegram.error import Conflict, InvalidToken
 

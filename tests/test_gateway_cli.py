@@ -21,7 +21,6 @@ def sandbox(monkeypatch, tmp_path):
 
     monkeypatch.setattr("ompwire.setup._paths", Paths())
     monkeypatch.setattr(gateways, "gateways_file", lambda: config_dir / "gateways.toml")
-    monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
     monkeypatch.setattr("ompwire.service._systemd_available", lambda: False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     return config_dir

@@ -33,7 +33,7 @@ class Bot:
 def _config(tmp_path):
     config = load_config(env={})
     config.data["session"]["store"] = str(tmp_path / "s.db")
-    config.data.setdefault("telegram", {})["allowed_users"] = [7]
+    config.data["gateway"] = {"name": "telegram", "allowed_users": [7]}
     return config
 
 

@@ -30,7 +30,6 @@ ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "OMPWIRE_IDLE_TIMEOUT": ("session", "idle_timeout"),
     "OMPWIRE_FILES_MAX_MB": ("files", "max_mb"),
     "OMPWIRE_FILES_INCOMING_DIR": ("files", "incoming_dir"),
-    "TELEGRAM_BOT_TOKEN": ("telegram", "bot_token"),
 }
 
 # Rides along on every session, on top of the configured prose. These are protocol, not taste:
@@ -123,10 +122,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "gateway": {
         "platform": "telegram",  # the only transport implemented so far
     },
+    # Telegram-only behaviour; who the bot is and who may use it live in the gateway's own
+    # folder and reach the transport as [gateway] (gateways.apply)
     "telegram": {
-        "bot_token": "",  # secret: env only
-        "allowed_users": [],
-        "home_channel": "",
+        "busy_message": "steer",
+        "resume_interrupted": True,
     },
 }
 
@@ -286,11 +286,6 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
     for env_name, (section, key) in ENV_OVERRIDES.items():
         if env_name in env and env[env_name] != "":
             merged.setdefault(section, {})[key] = _coerce(env[env_name])
-
-    # Scalar env names people already have exported share names with config keys.
-    for section, key, env_name in (("telegram", "bot_token", "TELEGRAM_BOT_TOKEN"),):
-        if merged.get(section, {}).get(key, "") == "" and env.get(env_name):
-            merged.setdefault(section, {})[key] = env[env_name]
 
     if merged["agent"]["cwd"]:
         merged["agent"]["cwd"] = str(Path(merged["agent"]["cwd"]).expanduser())

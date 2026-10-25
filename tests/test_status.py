@@ -47,7 +47,6 @@ def _sandbox(monkeypatch, tmp_path):
         "allowed_users = [111, 222]\nhome_channel = 111\n", encoding="utf-8")
     (config_dir / ".env").write_text("TELEGRAM_BOT_TOKEN=111:tok\n", encoding="utf-8")
     monkeypatch.setattr(gateways, "gateways_file", lambda: config_dir / "gateways.toml")
-    monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
     monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "test_bot")
     monkeypatch.setattr("ompwire.service.state", lambda gateway="telegram": "active")
     monkeypatch.setattr(status, "_gateway_state", lambda: ("stopped", "not running"))
@@ -139,7 +138,6 @@ def _doctor(monkeypatch, tmp_path, allowed: str):
         '[gateway.telegram]\ntype = "telegram"\nenabled = true\n'
         f"allowed_users = {allowed}\nhome_channel = 111\n", encoding="utf-8")
     (config_dir / ".env").write_text("TELEGRAM_BOT_TOKEN=111:tok\n", encoding="utf-8")
-    monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
     monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "test_bot")
     monkeypatch.setattr("ompwire.service.state", lambda gateway="telegram": "active")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/omp")

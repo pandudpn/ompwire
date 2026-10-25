@@ -100,7 +100,7 @@ def _run_gateway(config_path: str | None, name: str, force: bool) -> int:
         return 1
     # this gateway's own config: its settings over config.toml, its own sessions, overrides, log
     config = gateways.config_for(gateway, config_path)
-    if not str(config.get("telegram", "bot_token", "") or ""):
+    if not str(config.get("gateway", "credential", "") or ""):
         print(f"FAIL no credential for gateway {gateway.name!r}. "
               f"Run `ompwire gateway start {gateway.name}` or set {gateway.token_var()}.",
               file=sys.stderr)

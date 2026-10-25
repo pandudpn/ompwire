@@ -180,8 +180,9 @@ def _read(path: Path) -> list[Gateway]:
 
 
 def load(config: Any = None) -> list[Gateway]:
-    """Every configured gateway: one directory each, then the old gateways.toml an install has
-    not migrated yet, then a `[telegram]` block in config.toml."""
+    """Every configured gateway: one directory each, or the gateways.toml of a v0.14 install
+    that has not been migrated yet. `config` is accepted for callers that have one; the
+    definitions do not depend on it."""
     root = gateways_dir()
     found: list[Gateway] = []
     if root.is_dir():
@@ -191,35 +192,8 @@ def load(config: Any = None) -> list[Gateway]:
         return sorted(found, key=lambda gw: gw.name)
     legacy = gateways_file()
     if legacy.is_file():
-        found = _read(legacy)
-        if found:
-            return found
-    return _from_config(config)
-
-
-def _from_config(config: Any) -> list[Gateway]:
-    """A `[telegram]` block in config.toml is a gateway named `telegram`."""
-    if config is None:
-        from .config import load_config
-
-        try:
-            config = load_config()
-        except SystemExit:
-            return []
-    raw_allowed = config.get("telegram", "allowed_users") or []
-    home = config.get("telegram", "home_channel")
-    token = str(config.get("telegram", "bot_token") or "")
-    if not raw_allowed and not token:
-        return []
-    allowed: list[int] = []
-    for value in raw_allowed:
-        try:
-            allowed.append(int(value))
-        except (TypeError, ValueError):
-            continue
-    return [Gateway(name="telegram", kind="telegram",
-                    allowed=allowed,
-                    home=int(home) if str(home or "").strip().isdigit() else None)]
+        return _read(legacy)
+    return []
 
 
 def render(items: list[Gateway]) -> str:
@@ -574,12 +548,14 @@ def _copy_cli_rows(old_store: Path, cli_store: Path) -> list[str]:
 
 
 def apply(config: Any, gateway: Gateway) -> Any:
-    """Lay this gateway's credential and allow list onto the config the transport reads."""
-    section = dict(config.section("telegram"))
-    section["bot_token"] = token(gateway)
-    section["allowed_users"] = list(gateway.allowed)
-    if gateway.home:
-        section["home_channel"] = gateway.home
-    config.data["telegram"] = section
-    config.data["_gateway"] = {"name": gateway.name, "type": gateway.kind}
+    """Put this gateway's identity in the config its transport reads, under `[gateway]` whatever
+    the platform: a transport reads its credential and allow list from there, and keeps its own
+    platform section (`[telegram]`) for settings that only make sense on that platform."""
+    config.data["gateway"] = {
+        "name": gateway.name,
+        "type": gateway.kind,
+        "credential": token(gateway),
+        "allowed_users": list(gateway.allowed),
+        "home_channel": gateway.home,
+    }
     return config

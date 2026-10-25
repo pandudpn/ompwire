@@ -277,7 +277,7 @@ class ChatAgent:
         self.cwd = kept if kept and os.path.isdir(os.path.expanduser(kept)) else configured
         self.reasoning = bool(config.get("stream", "show_reasoning", False))
         # the bot that receives a scheduled result defaults to the bot being talked to
-        self.gateway_name = str(config.get("_gateway", "name", "telegram") or "telegram")
+        self.gateway_name = str(config.get("gateway", "name", "telegram") or "telegram")
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
         self.started_at = time.time()
         self.pending_options: list[str] = []

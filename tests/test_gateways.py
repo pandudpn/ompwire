@@ -21,7 +21,6 @@ def sandbox(monkeypatch, tmp_path):
 
     monkeypatch.setattr("ompwire.setup._paths", Paths())
     monkeypatch.setattr(gateways, "gateways_file", lambda: config_dir / "gateways.toml")
-    monkeypatch.setattr(gateways, "_from_config", lambda config=None: [])
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     return config_dir
 
@@ -100,25 +99,6 @@ class TestSelection:
             gateways.get("nope")
 
 
-class TestLegacyConfig:
-    def test_a_telegram_block_in_config_toml_still_counts(self):
-        class Config:
-            def get(self, section, key, default=None):
-                data = {"telegram": {"allowed_users": [42], "home_channel": 42}}
-                return data.get(section, {}).get(key, default)
-
-        items = gateways._from_config(Config())
-        assert [(item.name, item.kind, item.allowed) for item in items] == [
-            ("telegram", "telegram", [42])]
-
-    def test_an_empty_config_is_no_gateway(self):
-        class Config:
-            def get(self, section, key, default=None):
-                return default
-
-        assert gateways._from_config(Config()) == []
-
-
 class TestCredentials:
     def test_the_telegram_gateway_keeps_the_old_env_key(self, sandbox):
         assert gateways.Gateway(name="telegram").token_var() == "TELEGRAM_BOT_TOKEN"
@@ -157,15 +137,16 @@ class TestApply:
 
         gateways.set_token(gateways.Gateway(name="telegram"), "tok")
         gateway = gateways.add("telegram", "telegram", allowed=[42], home=42)
-        config = Config(data={"telegram": {"verbose": True}})
+        config = Config(data={"telegram": {"busy_message": "queue"}})
 
         gateways.apply(config, gateway)
 
-        assert config.get("telegram", "bot_token") == "tok"
-        assert config.get("telegram", "allowed_users") == [42]
-        assert config.get("telegram", "home_channel") == 42
-        assert config.get("telegram", "verbose") is True      # other keys survive
-        assert config.data["_gateway"]["name"] == "telegram"
+        assert config.get("gateway", "credential") == "tok"
+        assert config.get("gateway", "allowed_users") == [42]
+        assert config.get("gateway", "home_channel") == 42
+        assert config.get("gateway", "name") == "telegram"
+        # the platform section keeps only platform behaviour; no credential is copied into it
+        assert config.data["telegram"] == {"busy_message": "queue"}
 
 
 class TestLayout:
