@@ -41,7 +41,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, engine
+from . import __version__, engine, omp_config
 from . import schedules as schedule_lib
 from .acp import AcpError
 from .attachments import Outgoing, incoming_summary, safe_name
@@ -92,6 +92,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("verbose", "toggle tool-call trace"),
     ("commands", "search the agent's own slash commands"),
     ("queue", "queue a prompt behind the running turn"),
+    ("compact", "run omp's context compaction now"),
+    ("compaction", "show or set omp's auto-compaction threshold"),
     ("steer", "add an instruction to the running turn"),
     ("schedule", "scheduled turns: list, run now, remove"),
     ("reasoning", "show or hide the agent's thinking"),
@@ -318,6 +320,24 @@ class Transport:
             return
         await self.submit(update.effective_chat.id, message, message)
 
+    async def on_command(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """A slash command this transport does not own goes to the agent as a prompt.
+
+        FORWARD_HINT promises /skill:<name> and /compact work; without this they died in a
+        Telegram "unknown command" void. Registered commands never reach here: their
+        CommandHandler runs first and stops the update.
+        """
+        if not self._authorized(update):
+            return await self._deny(update)
+        message = update.effective_message
+        if message is None or not message.text:
+            return
+        name = message.text.split()[0].split("@")[0][1:].lower()
+        if name in {cmd for cmd, _ in COMMANDS} | {"start"}:
+            return
+        log.info("forwarding /%s to the agent chat=%s", name, update.effective_chat.id)
+        await self.submit(update.effective_chat.id, message, message)
+
     async def submit(self, chat_id: int, payload: Any, message: Any) -> None:
         """Route one incoming message: into the running turn, or into the queue.
 
@@ -429,6 +449,8 @@ class Transport:
             ("yolo", "on" if agent.yolo else "off"),
             ("trace", "verbose" if agent.verbose else "quiet"),
             ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
+            ("context", engine.context_line(agent.context["used"], agent.context["size"]))
+            if agent.context["size"] > 0 else ("context", "unknown"),
             ("clock", now_wib()),
         ]
         await update.effective_message.reply_text(
@@ -446,12 +468,69 @@ class Transport:
             ("output", f"{usage['output']:,}"),
             ("cached", f"{usage['cached']:,}"),
             ("tools", agent.tools_used),
+            ("context", engine.context_line(agent.context["used"], agent.context["size"]))
+            if agent.context["size"] > 0 else ("context", "unknown"),
         ]
         await update.effective_message.reply_text(
             card("🧮 usage", f"session {agent.session_id[:8]}", rows,
                  "counters reset when the agent process restarts"),
             parse_mode=ParseMode.HTML,
         )
+
+
+    async def cmd_compact(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Run omp's own /compact. While busy it queues: steering a compaction makes no sense."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        chat_id = update.effective_chat.id
+        agent = self.agent_for(chat_id)
+        payload = _TextOnly("/compact", update.effective_message)
+        if agent.busy:
+            depth = self.enqueue(chat_id, "prompt", payload)
+            await update.effective_message.reply_text(
+                f"queued (position {depth}). the running turn finishes first.")
+            return
+        log.info("compact requested chat=%s", chat_id)
+        await self.submit(chat_id, payload, update.effective_message)
+
+    async def cmd_compaction(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show or change omp's auto-compaction threshold. Applies to every omp client."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        agent = self.agent_for(update.effective_chat.id)
+        arg = (ctx.args or [""])[0].strip().lower().rstrip("%")
+        if not arg:
+            current = omp_config.read_compaction()
+            threshold = current.get("thresholdPercent", "?")
+            line = engine.context_line(agent.context["used"], agent.context["size"])
+            state = "off" if current.get("enabled") is False else "on"
+            await update.effective_message.reply_text(
+                card("🗜️ compaction", f"{state} at {threshold}%",
+                     [("context", line if agent.context["size"] > 0 else "unknown")],
+                     "/compaction 10-95 · /compaction off · /compaction on · applies to every "
+                     "omp client, new agent processes; /kill restarts this chat's agent"),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        if arg == "off":
+            new = omp_config.set_compaction(enabled=False)
+        elif arg == "on":
+            new = omp_config.set_compaction(enabled=True)
+        else:
+            try:
+                percent = int(arg)
+            except ValueError:
+                return await update.effective_message.reply_text("usage: /compaction [10-95|off|on]")
+            try:
+                new = omp_config.set_compaction(thresholdPercent=percent)
+            except ValueError as exc:
+                return await update.effective_message.reply_text(str(exc))
+        if await self._busy(update, agent, "/compaction"):
+            return
+        target = "off" if new.get("enabled") is False else "on"
+        await self.announce(update.effective_chat.id,
+                            change("compaction", target, f"{new.get('thresholdPercent', '?')}%",
+                                   "applies to every omp client, new agent processes"))
 
     async def on_photo(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Forward a Telegram photo to the agent as an ACP image block."""
@@ -1200,7 +1279,8 @@ class Transport:
             ("session", ["new", "sessions", "resume", "continue", "fork", "cwd", "kill"]),
             ("agent", ["model", "mode", "thinking", "approve", "trace", "verbose", "yolo"]),
             ("catalog", ["skills", "login", "commands"]),
-            ("running", ["stop", "queue", "steer", "status", "usage", "context"]),
+            ("running", ["stop", "queue", "steer", "status", "usage", "context",
+                         "compact", "compaction"]),
             ("info", ["whoami", "help"]),
         ]
         sections = [(heading, [(name, names[name]) for name in wanted if name in names])
@@ -1369,6 +1449,8 @@ class Transport:
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("usage", self.cmd_usage))
         app.add_handler(CommandHandler("context", self.cmd_context))
+        app.add_handler(CommandHandler("compact", self.cmd_compact))
+        app.add_handler(CommandHandler("compaction", self.cmd_compaction))
         app.add_handler(CommandHandler("skills", self.cmd_skills))
         app.add_handler(CommandHandler("login", self.cmd_login))
         app.add_handler(CommandHandler("commands", self.cmd_commands))
@@ -1393,6 +1475,9 @@ class Transport:
         app.add_handler(CommandHandler("start", self.cmd_help))
         app.add_handler(CallbackQueryHandler(self.on_callback))
         app.add_error_handler(self.on_error)
+        # Registered commands stop at their CommandHandler; what is left reaches on_command,
+        # which forwards it to the agent, and on_text takes plain prose.
+        app.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, self.on_command))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
         app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self.on_photo))
         # any other document: PDF, zip, csv, text. The image filter above owns the rest.

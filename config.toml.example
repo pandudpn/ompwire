@@ -52,6 +52,7 @@ enabled = true
 show_tool_calls = true
 show_usage = false       # per-turn token line; use /usage instead
 min_gap = 1.0              # seconds between messages; Telegram allows about one a second per chat
+compaction_warn = 0.6     # fraction of the context window that triggers one ⚠️ notice per crossing
 
 [mcp]
 # Where the session's MCP servers come from:

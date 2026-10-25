@@ -1,0 +1,414 @@
+"""Context window display, compaction notices, omp config edits, and forwarded commands.
+
+ChatAgent grabs the running loop in its constructor, so every test builds its agent inside
+`asyncio.run` and hands plain data out for the asserts.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import types
+
+import pytest
+
+from ompwire import engine, omp_config, telegram
+from ompwire.acp import PromptResult, Update
+from ompwire.config import load_config
+
+
+class Bot:
+    def __init__(self):
+        self.messages: list[str] = []
+
+    async def send_message(self, _chat_id, text, **_kw):
+        self.messages.append(text)
+        return types.SimpleNamespace(
+            edit_text=lambda body, **kw: None,
+            reply_text=lambda body, **kw: None,
+        )
+
+
+class Client:
+    alive = True
+
+    def __init__(self, updates):
+        self.updates = updates
+        self.on_update = None
+
+    def close(self, _sid):
+        return None
+
+    def prompt(self, _sid, _text, images=None, timeout=900.0, collect=True):
+        for update in self.updates:
+            if self.on_update is not None:
+                self.on_update(update)
+        text = "".join(u.text for u in self.updates if u.kind == "agent_message_chunk")
+        return PromptResult(stop_reason="end_turn", usage={}, text=text, updates=[])
+
+
+def usage(used, size):
+    return Update(kind="usage_update", session_id="s",
+                  raw={"sessionUpdate": "usage_update", "used": used, "size": size})
+
+
+def message(text):
+    return Update(kind="agent_message_chunk", session_id="s",
+                  raw={"sessionUpdate": "agent_message_chunk",
+                       "content": {"type": "text", "text": text}})
+
+
+def _config(tmp_path, **stream):
+    config = load_config(env={})
+    config.data["session"]["store"] = str(tmp_path / "s.db")
+    config.data.setdefault("stream", {}).update({"min_gap": 0.0, **stream})
+    return config
+
+
+def _make_agent(config, updates):
+    """Returns a factory; call it inside a running loop."""
+    def make():
+        agent = telegram.chat_agent(config, 7, "tg:7", types.SimpleNamespace(bot=Bot()))
+        agent.client = Client(updates)
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        return agent
+    return make
+
+
+class _Message:
+    def __init__(self, text):
+        self.text = text
+        self.replies: list[str] = []
+
+    async def reply_text(self, body, **_kw):
+        self.replies.append(body)
+
+    async def set_reaction(self, *_a, **_k):
+        raise AttributeError("no reactions in tests")
+
+
+def _transport(tmp_path, agent):
+    config = _config(tmp_path)
+    transport = telegram.Transport.__new__(telegram.Transport)
+    transport.config = config
+    transport.app = types.SimpleNamespace(bot=Bot())
+    transport.agents = {7: agent}
+    transport.queues = {}
+    transport.workers = {}
+    transport.stopping = False
+    transport.allowed = {1}
+    return transport
+
+
+def _update(text, user_id=1):
+    return types.SimpleNamespace(
+        effective_message=_Message(text),
+        effective_chat=types.SimpleNamespace(id=7),
+        effective_user=types.SimpleNamespace(id=user_id),
+    )
+
+
+# ------------------------------------------------------------------ engine
+
+
+def test_usage_update_updates_context_and_skips_the_turn_queue(tmp_path):
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent._on_usage(74886, 1048576)
+        await asyncio.sleep(0)
+        return agent
+
+    agent = asyncio.run(go())
+    assert agent.context == {"used": 74886, "size": 1048576}
+    # nothing queued: the turn reader must not see usage updates
+    assert agent._updates.empty()
+
+
+def test_context_line_formats_k_m_and_percent():
+    assert engine.context_line(124_000, 1_000_000) == "124k / 1M (12%)"
+    assert engine.context_line(0, 0) == "unknown"
+    assert engine.context_line(100, 0) == "unknown"
+
+
+def test_warning_fires_once_on_crossing_and_re_arms(tmp_path):
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent._on_usage(500_000, 1_000_000)  # at 50%: no warning
+        await asyncio.sleep(0)
+        agent._on_usage(700_000, 1_000_000)  # crossing: one warning
+        await asyncio.sleep(0)
+        agent._on_usage(750_000, 1_000_000)  # still above: silent
+        await asyncio.sleep(0)
+        agent._on_usage(100_000, 1_000_000)  # back below: re-arm
+        await asyncio.sleep(0)
+        agent._on_usage(700_000, 1_000_000)  # crossing again: one more warning
+        await asyncio.sleep(0.1)
+        return agent
+
+    agent = asyncio.run(go())
+    warnings = [m for m in agent.surface.app.bot.messages if "⚠️" in m]
+    assert len(warnings) == 2
+    assert all("context at 70%" in m for m in warnings)
+
+
+def test_no_warning_before_size_is_known(tmp_path):
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent._on_usage(0, 0)
+        await asyncio.sleep(0.05)
+        return agent
+
+    agent = asyncio.run(go())
+    assert not agent.surface.app.bot.messages
+
+
+def test_no_drop_notice_on_the_first_update_or_after_new_session(tmp_path):
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent._on_usage(10_000, 1_000_000)  # first update: nothing to compare, no notice
+        await asyncio.sleep(0.05)
+        assert not agent.surface.app.bot.messages
+        await agent.new_session()
+        agent._on_usage(500_000, 1_000_000)  # new session: previous is unknown again
+        await asyncio.sleep(0.05)
+        assert not agent.surface.app.bot.messages
+        return agent
+
+    agent = asyncio.run(go())
+    assert not agent.surface.app.bot.messages
+
+
+def test_drop_notice_fires_on_a_real_drop(tmp_path):
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent._on_usage(700_000, 1_000_000)
+        await asyncio.sleep(0)
+        agent._on_usage(300_000, 1_000_000)  # -400k, both floor and half-of-prev
+        await asyncio.sleep(0.1)
+        return agent
+
+    agent = asyncio.run(go())
+    drops = [m for m in agent.surface.app.bot.messages if "compacted" in m]
+    assert len(drops) == 1
+    assert "700k" in drops[0] and "300k" in drops[0]
+
+
+
+
+def test_no_drop_notice_for_a_compact_turn(tmp_path):
+    async def go():
+        agent = _make_agent(_config(tmp_path), [message("Compaction complete. 700k -> 100k")])()
+        agent._on_usage(700_000, 1_000_000)
+        await asyncio.sleep(0)
+        await agent.ask("/compact")
+        await asyncio.sleep(0.1)
+        assert not [m for m in agent.surface.app.bot.messages if "compacted" in m]
+        # the flag resets: a later turn reports drops again
+        agent._on_usage(700_000, 1_000_000)
+        await asyncio.sleep(0)
+        agent._on_usage(90_000, 1_000_000)
+        await asyncio.sleep(0.1)
+        return agent
+
+    agent = asyncio.run(go())
+    assert [m for m in agent.surface.app.bot.messages if "compacted" in m]
+
+
+# ------------------------------------------------------------------ omp_config
+
+
+def test_omp_config_round_trip_preserves_the_file(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yml"
+    original = """# my omp config
+model: anthropic/claude-x  # keep this comment
+compaction:
+  thresholdPercent: 70
+edit:
+  mode: hashline  # trailing comment
+"""
+    cfg.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(omp_config, "CONFIG_PATH", cfg)
+
+    omp_config.set_compaction(thresholdPercent=55)
+    text = cfg.read_text(encoding="utf-8")
+    assert "thresholdPercent: 55" in text
+    assert "keep this comment" in text and "trailing comment" in text
+    backup = cfg.with_name("config.yml.ompwire-bak")
+    assert backup.read_text(encoding="utf-8") == original
+
+    omp_config.set_compaction(enabled=False)
+    assert "enabled: false" in cfg.read_text(encoding="utf-8")
+    assert omp_config.read_compaction() == {"thresholdPercent": 55, "enabled": False}
+
+    # backup written once: still the original
+    assert backup.read_text(encoding="utf-8") == original
+
+
+def test_omp_config_creates_a_missing_block(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("model: x\nother:\n  key: 1\n", encoding="utf-8")
+    monkeypatch.setattr(omp_config, "CONFIG_PATH", cfg)
+
+    omp_config.set_compaction(thresholdPercent=40)
+    text = cfg.read_text(encoding="utf-8")
+    assert "thresholdPercent: 40" in text
+    assert "key: 1" in text
+    assert omp_config.read_compaction() == {"thresholdPercent": 40}
+
+
+def test_omp_config_rejects_an_invalid_percent(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("compaction:\n  thresholdPercent: 70\n", encoding="utf-8")
+    monkeypatch.setattr(omp_config, "CONFIG_PATH", cfg)
+
+    with pytest.raises(ValueError):
+        omp_config.set_compaction(thresholdPercent=5)
+    with pytest.raises(ValueError):
+        omp_config.set_compaction(thresholdPercent=99)
+    assert "thresholdPercent: 70" in cfg.read_text(encoding="utf-8")
+    assert not cfg.with_name("config.yml.ompwire-bak").exists()
+
+
+# ------------------------------------------------------------------ telegram
+
+
+def test_telegram_compaction_updates_the_config_and_replies(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("compaction:\n  thresholdPercent: 70\n", encoding="utf-8")
+    monkeypatch.setattr(omp_config, "CONFIG_PATH", cfg)
+
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        transport = _transport(tmp_path, agent)
+        await transport.cmd_compaction(_update("/compaction 60"),
+                                       types.SimpleNamespace(args=["60"]))
+        return agent
+
+    asyncio.run(go())
+    assert "thresholdPercent: 60" in cfg.read_text(encoding="utf-8")
+
+
+def test_telegram_compact_while_busy_is_queued_not_steered(tmp_path):
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent.busy = True
+        steered: list[str] = []
+
+        async def fake_steer(_text, _images=None):
+            steered.append(_text)
+            return "injected", ""
+
+        agent.steer = fake_steer
+        transport = _transport(tmp_path, agent)
+        queued: list[str] = []
+
+        def fake_enqueue(chat_id, kind, payload):
+            queued.append(payload.text)
+            return 1
+
+        transport.enqueue = fake_enqueue
+        await transport.cmd_compact(_update("/compact"), None)
+        return steered, queued
+
+    steered, queued = asyncio.run(go())
+    assert not steered
+    assert queued == ["/compact"]
+
+
+def test_unregistered_command_is_forwarded_as_a_prompt(tmp_path):
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        transport = _transport(tmp_path, agent)
+        submitted: list[str] = []
+
+        async def fake_submit(chat_id, payload, message):
+            submitted.append(payload.text)
+
+        transport.submit = fake_submit
+        await transport.on_command(_update("/skill:foo bar"), None)
+        return submitted
+
+    assert asyncio.run(go()) == ["/skill:foo bar"]
+
+
+def test_registered_command_never_reaches_the_forwarder(tmp_path):
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        transport = _transport(tmp_path, agent)
+
+        async def fake_submit(*_a):
+            raise AssertionError("registered commands must stop at their handler")
+
+        transport.submit = fake_submit
+        await transport.on_command(_update("/status"), None)
+        return True
+
+    assert asyncio.run(go())
+
+
+# ------------------------------------------------------------------ cli
+
+
+def test_cli_context_prints_the_line(tmp_path, monkeypatch, capsys):
+    from ompwire import cli
+
+    config = _config(tmp_path)
+    lines = iter(["/context", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+
+    async def go():
+        surface = cli.TerminalSurface(config)
+        agent = engine.ChatAgent(config, "cli-test", surface)
+        agent._on_usage(74886, 1_048_576)
+        await asyncio.sleep(0)
+        return await cli._repl(agent, surface)
+
+    assert asyncio.run(go()) == 0
+    out = capsys.readouterr().out
+    assert "74.9k / 1M (7%)" in out
+
+
+def test_a_new_agent_process_does_not_report_a_compaction(tmp_path):
+    """Respawn and idle eviction reload the session; its first usage is not a drop."""
+    import asyncio
+    import types
+
+    from ompwire import telegram
+    from ompwire.config import load_config
+
+    config = load_config(env={})
+    config.data["session"]["store"] = str(tmp_path / "s.db")
+    notices: list[str] = []
+
+    class Client:
+        alive = True
+        on_update = None
+
+        def __init__(self, *_a, **_k):
+            pass
+
+        def initialize(self):
+            return {"agentInfo": {"name": "omp"}}
+
+        def new_session(self, *_a, **_k):
+            return {"sessionId": "s", "configOptions": []}
+
+        def set_config_option(self, *_a, **_k):
+            return {}
+
+    async def go():
+        agent = telegram.chat_agent(config, 7, "tg:7", types.SimpleNamespace(bot=None))
+
+        async def notice(text):
+            notices.append(text)
+
+        agent.surface.notice = notice
+        agent._on_usage(800_000, 1_000_000)
+        agent.client = None
+        agent._build_client = lambda yolo=False: Client()
+        await agent.ensure()
+        agent._on_usage(100_000, 1_000_000)
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert not any("compacted" in text for text in notices)

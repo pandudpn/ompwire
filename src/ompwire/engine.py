@@ -105,7 +105,6 @@ def _is_waiting(title: str) -> bool:
     """A call that only says it is waiting adds a line and no information."""
     return bool(WAITING_RE.match(title.strip()))
 
-
 def _chunks(text: str, limit: int) -> list[str]:
     out: list[str] = []
     while text:
@@ -149,6 +148,20 @@ def mcp_label(names: Iterable[str]) -> str:
     if len(names) > MCP_LABEL_MAX:
         shown += f" +{len(names) - MCP_LABEL_MAX}"
     return shown
+
+
+def context_line(used: int, size: int) -> str:
+    """One readable row for /status and /usage, e.g. "124k / 1.0M (12%)"."""
+    def short(n: int) -> str:
+        if n >= 1_000_000:
+            value, unit = n / 1_000_000, "M"
+        else:
+            value, unit = n / 1_000, "k"
+        text = f"{value:.1f}".rstrip("0").rstrip(".")
+        return f"{text}{unit}"
+    if size <= 0:
+        return "unknown"
+    return f"{short(used)} / {short(size)} ({used * 100 // size}%)"
 
 
 # Choices that belong to the chat, not to one ACP session: /new must not reset them.
@@ -284,6 +297,14 @@ class ChatAgent:
         self.info: dict[str, Any] = {}
         self.agent_version = ""
         self.advertised_commands: list[str] = []
+        # context window from usage_update; zeros until omp reports it
+        self.context = {"used": 0, "size": 0}
+        # warning fires once per crossing and re-arms when the context drops back below it
+        self._context_warned = False
+        # the previous usage_update, for the compaction drop notice; None = unknown
+        self._context_prev_used: int | None = None
+        # a /compact prompt reports its own before/after; the drop notice would double it
+        self._suppress_drop_notice = False
         self._updates: asyncio.Queue[AcpUpdate | None] = asyncio.Queue()
         self._pending_perm: dict[str, dict[str, Any]] = {}
         self._loop = asyncio.get_running_loop()
@@ -316,6 +337,9 @@ class ChatAgent:
         if self.client is not None and self.client.alive:
             return
         self.client = self._build_client(yolo=yolo)
+        # a new process (start, respawn, idle eviction) reports usage from scratch: a lower first
+        # number there is a reload, not a compaction
+        self._context_prev_used = None
         info = await asyncio.to_thread(self.client.initialize)
         agent = info.get("agentInfo") or {}
         self.agent_version = str(agent.get("version") or "")
@@ -387,9 +411,61 @@ class ChatAgent:
             names = [f"/{c.get('name')}" for c in (update.raw.get("availableCommands") or [])]
             self._loop.call_soon_threadsafe(self.advertised_commands.__setitem__, slice(None), names)
             return
-        if update.kind in {"usage_update", "session_info_update"}:
+        if update.kind == "session_info_update":
+            return
+        if update.kind == "usage_update":
+            raw = update.raw
+            try:
+                used = int(raw.get("used") or 0)
+                size = int(raw.get("size") or 0)
+            except (TypeError, ValueError):
+                return
+            self._loop.call_soon_threadsafe(self._on_usage, used, size)
             return
         self._loop.call_soon_threadsafe(self._updates.put_nowait, update)
+
+    def _on_usage(self, used: int, size: int) -> None:
+        """Runs on the loop thread. Tracks the context window, the warning crossing and
+        compaction drops; usage_update never enters the turn queue."""
+        self.context["used"], self.context["size"] = used, size
+        if size > 0:
+            warn_at = float(self.config.get("stream", "compaction_warn", 0.6))
+            if used / size >= warn_at:
+                if not self._context_warned:
+                    self._context_warned = True
+                    self._loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(self._context_notice(self._warning_text(used, size))))
+            else:
+                self._context_warned = False
+        prev = self._context_prev_used
+        self._context_prev_used = used
+        if prev is None or size <= 0:
+            return
+        floor = 0.3 * size
+        fell = (prev - used) >= floor or (prev > 0 and (prev - used) >= 0.5 * prev)
+        if fell and not self._suppress_drop_notice:
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._context_notice(
+                    f"🗜️ context compacted · {context_line(prev, size).split(' / ')[0]} → "
+                    f"{context_line(used, size).split(' / ')[0]}")))
+        self._suppress_drop_notice = False
+
+    def _warning_text(self, used: int, size: int) -> str:
+        from .omp_config import read_compaction
+        threshold = read_compaction().get("thresholdPercent")
+        line = context_line(used, size)
+        pct = used * 100 // size
+        if isinstance(threshold, int):
+            return f"⚠️ context at {pct}% · omp compacts at {threshold}%"
+        return f"⚠️ context at {pct}% ({line})"
+
+    async def _context_notice(self, text: str) -> None:
+        """A notice outside a turn: surface.notice goes straight to the platform, so it is
+        safe to call while ask() is not running."""
+        try:
+            await self.surface.notice(text)
+        except Exception:
+            log.warning("context notice failed chat=%s", self.label, exc_info=True)
 
     def _on_permission(self, params: dict[str, Any]) -> str | None:
         policy = approval_policy(self.config)
@@ -593,6 +669,8 @@ class ChatAgent:
                   resumes: int = 0, record: str | None = None) -> str:
         await self.ensure()
         self.busy = True
+        # omp's compact reply carries the before/after tokens; the drop notice would repeat it
+        self._suppress_drop_notice = text.strip() == "/compact"
         self._user_cancel = False
         self.last_used = time.time()
         started = time.time()
@@ -948,6 +1026,9 @@ class ChatAgent:
 
     async def new_session(self) -> str:
         self.forget_turn()
+        # the old context numbers belong to the old session; the next usage_update re-reads them
+        self._context_prev_used = None
+        self._context_warned = False
         if self.client is not None and self.client.alive and self.session_id:
             await asyncio.to_thread(self.client.close, self.session_id)
         self.client = None
@@ -959,11 +1040,15 @@ class ChatAgent:
         if self.client is not None:
             await asyncio.to_thread(self.client.close, self.session_id)
         self.client = None
+        self._context_prev_used = None
+        self._context_warned = False
         self.store.put(self.key, session_id, self.cwd)
         await self.ensure()
 
     async def fork(self) -> str:
         await self.ensure()
+        self._context_prev_used = None
+        self._context_warned = False
         result = await asyncio.to_thread(self.client.request, "session/fork",
                                           {"sessionId": self.session_id, "cwd": self.cwd})
         new_id = str(result.get("sessionId") or "")

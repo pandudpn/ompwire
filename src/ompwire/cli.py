@@ -12,12 +12,13 @@ import contextlib
 import sys
 from typing import Any
 
-from . import engine
+from . import engine, omp_config
 from .acp import AcpError
 from .config import Config
 
 OUTPUT_LINES = 3  # a tool's output here is a hint that it worked, not the report
-HELP = "/new  fresh session · /stop  cancel turn · /model <id> · /mode <default|plan> · /exit"
+HELP = ("/new  fresh session · /stop  cancel turn · /model <id> · /mode <default|plan> · "
+        "/context  context usage · /compaction [10-95|off|on] · /exit")
 
 
 def _dim(text: str) -> str:
@@ -186,6 +187,31 @@ async def _repl(agent: engine.ChatAgent, surface: TerminalSurface) -> int:
             continue
         if line == "/help":
             print(HELP)
+            continue
+        if line == "/context":
+            used, size = agent.context["used"], agent.context["size"]
+            print(engine.context_line(used, size), flush=True)
+            continue
+        if line == "/compaction":
+            arg = line[len("/compaction"):].strip().lower().rstrip("%")
+            try:
+                if not arg:
+                    current = omp_config.read_compaction()
+                    state = "off" if current.get("enabled") is False else "on"
+                    used, size = agent.context["used"], agent.context["size"]
+                    print(f"{state} at {current.get('thresholdPercent', '?')}% · "
+                          f"context {engine.context_line(used, size)}", flush=True)
+                elif arg == "off":
+                    omp_config.set_compaction(enabled=False)
+                    print("compaction off", flush=True)
+                elif arg == "on":
+                    omp_config.set_compaction(enabled=True)
+                    print("compaction on", flush=True)
+                else:
+                    new = omp_config.set_compaction(thresholdPercent=int(arg))
+                    print(f"compaction at {new.get('thresholdPercent')}%", flush=True)
+            except (ValueError, OSError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
             continue
         if line.startswith("/model ") or line.startswith("/mode "):
             config_id, value = line[1:].split(maxsplit=1)

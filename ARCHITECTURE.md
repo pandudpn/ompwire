@@ -177,7 +177,8 @@ decision behind it:
 | `agent_message_chunk` | the answer, buffered and posted as a new message at the next tool call or the end of the turn |
 | `agent_thought_chunk` | the reasoning, shown only with `/reasoning on`, kept to its tail |
 | `tool_call`, `tool_call_update` | one message per call, posted when it completes or fails, when `stream.show_tool_calls` is on |
-| `usage_update`, `session_info_update` | read for accounting, never rendered |
+| `usage_update` | fills `agent.context`, drives the ⚠️ warning at `stream.compaction_warn` and the 🗜️ drop notice after a compaction; never enters the turn queue |
+| `session_info_update` | read for accounting, never rendered |
 | `available_commands_update` | fills `/commands` |
 | `config_option_update`, `current_mode_update` | kept so the pickers show current values |
 

@@ -122,6 +122,8 @@ conversations, because every live chat owns its own `omp` subprocess. Each unit 
 | `/model`, `/mode`, `/thinking` | switch, with an inline keyboard |
 | `/cwd <path>` | start a session in another directory |
 | `/status`, `/usage`, `/context` | what is running, what it cost, how full the context is |
+| `/compact` | run omp's context compaction now |
+| `/compaction [10-95\|off\|on]` | show or set omp's auto-compaction threshold (edits omp's config.yml; new agent processes pick it up) |
 | `/skills [query]`, `/commands` | what the agent can do |
 | `/login` | authenticate a model provider |
 | `/approve`, `/verbose`, `/yolo` | approval policy, tool trace, bypass approvals |
