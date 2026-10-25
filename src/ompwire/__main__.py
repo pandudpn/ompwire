@@ -249,14 +249,14 @@ def cmd_gateway(args: argparse.Namespace) -> int:
 
     if action in ("remove", "rm"):
         try:
-            item = gateways.remove(args.name)
-        except gateways.GatewayError as exc:
-            print(f"FAIL {exc}", file=sys.stderr)
+            return _gateway_remove(args, gateways, service)
+        except EOFError:
+            print("\nFAIL input ended before the removal was confirmed; nothing was removed. "
+                  "Without a terminal, pass the name and --yes.", file=sys.stderr)
             return 1
-        service.remove(item.name, quiet=True)
-        print(f"ok   removed gateway {item.name!r} and its unit (credential left in .env: "
-              f"{item.token_var()})")
-        return 0
+        except KeyboardInterrupt:
+            print("\n--   cancelled; nothing was removed")
+            return 130
 
     if action == "start":
         return _gateway_start(args, gateways, service)
@@ -335,6 +335,91 @@ def _allowed_ids(args: argparse.Namespace) -> list[int] | None:
         return [int(part) for part in raw]
     except ValueError:
         return []
+
+
+def _gateway_remove(args: argparse.Namespace, gateways, service) -> int:
+    """Take one gateway away: its unit, its definition, its credential, and (if asked) its state.
+
+    It asks which gateway when no name is given, refuses while a schedule still reports to it,
+    and wants the name typed back before deleting anything.
+    """
+    import shutil as _shutil
+
+    from . import schedules
+
+    try:
+        items = gateways.load(load_config(args.config))
+    except (gateways.GatewayError, ValueError) as exc:
+        print(f"FAIL {exc}", file=sys.stderr)
+        return 1
+    if not items:
+        print("no gateway configured; nothing to remove")
+        return 0
+
+    name = (getattr(args, "name", "") or "").strip().lower()
+    if not name:
+        if args.yes:
+            print("FAIL name the gateway to remove; --yes never picks one for you", file=sys.stderr)
+            return 1
+        print("gateways:")
+        picked = _choose("which", [f"{item.name}   ({item.kind}, {service.state(item.name)})"
+                                   for item in items])
+        if picked is None:
+            print("FAIL that is not one of the gateways listed", file=sys.stderr)
+            return 1
+        name = items[picked].name
+    item = next((entry for entry in items if entry.name == name), None)
+    if item is None:
+        known = ", ".join(entry.name for entry in items)
+        print(f"FAIL no gateway named {name!r} (configured: {known})", file=sys.stderr)
+        return 1
+
+    try:
+        reporting = sorted(entry.name for entry in schedules.load().values()
+                           if entry.gateway == name)
+    except schedules.ScheduleError:
+        reporting = []
+    if reporting and not args.force:
+        print(f"FAIL schedules still report to {name!r}: {', '.join(reporting)}. Remove them "
+              f"(`ompwire schedule remove <name>`) or point them elsewhere first; --force removes "
+              f"the gateway anyway and their next run fails.", file=sys.stderr)
+        return 1
+
+    home = gateways.state_dir(name)
+    # the first gateway keeps the shared state directory; it is never deleted with it
+    own_state = home != gateways.state_dir("telegram") and home.is_dir()
+    keep_state = True
+    if args.yes:
+        keep_state = not getattr(args, "purge", False)
+    else:
+        print(f"remove {name!r}:")
+        choice = _choose("how", [
+            "remove the gateway: unit, definition and credential; keep its sessions and log",
+            "full delete: also its sessions, chat toggles and log" + (
+                "" if own_state else " (none of its own to delete)"),
+        ])
+        if choice is None:
+            print("FAIL that is not one of the choices listed", file=sys.stderr)
+            return 1
+        keep_state = choice == 0
+        typed = input(f"type {name} to confirm: ").strip()
+        if typed != name:
+            print("--   not confirmed; nothing was removed")
+            return 1
+
+    service.remove(name, quiet=True)
+    gateways.remove(name)
+    print(f"ok   removed gateway {name!r} and its unit")
+    if gateways.unset_token(item):
+        print(f"ok   credential removed from .env ({item.token_var()})")
+    if own_state and not keep_state:
+        _shutil.rmtree(home)
+        print(f"ok   removed its sessions and log: {home}")
+    elif own_state:
+        print(f"--   kept its sessions and log: {home}")
+    if reporting:
+        print(f"warn schedules that still report to {name!r} will fail: {', '.join(reporting)}")
+    return 0
 
 
 def _choose(prompt: str, options: list[str], default: int = 1) -> int | None:
@@ -985,10 +1070,13 @@ def build_parser() -> argparse.ArgumentParser:
     gw.add_argument("--cwd", default="", help="start: this gateway's own working directory")
     gw.add_argument("--approval", default="", choices=["", "write", "yolo"],
                     help="start: this gateway's own approval mode")
+    gw.add_argument("--purge", action="store_true",
+                    help="remove --yes: also delete the gateway's sessions and log")
     gw.add_argument("--no-start", action="store_true",
                     help="start: save the gateway and credential, do not start it")
     gw.add_argument("--force", action="store_true",
-                    help="start: write the unit even when a check fails")
+                    help="start: write the unit even when a check fails; remove: even when a "
+                         "schedule reports to it")
     gw.add_argument("--yes", action="store_true", help="start: no prompts; fail instead of asking")
     gw.set_defaults(func=cmd_gateway, gateway_help=gw.print_help)
 

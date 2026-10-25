@@ -371,6 +371,21 @@ def set_token(gateway: Gateway, value: str) -> Path:
     return path
 
 
+def unset_token(gateway: Gateway) -> bool:
+    """Remove this gateway's credential from .env, leaving the other keys alone."""
+    path = _env_file()
+    if not path.is_file():
+        return False
+    key = gateway.token_var()
+    lines = path.read_text(encoding="utf-8").splitlines()
+    kept = [raw for raw in lines if not raw.strip().startswith(f"{key}=")]
+    if len(kept) == len(lines):
+        return False
+    path.write_text("\n".join(kept).rstrip("\n") + ("\n" if kept else ""), encoding="utf-8")
+    path.chmod(0o600)
+    return True
+
+
 def apply(config: Any, gateway: Gateway) -> Any:
     """Lay this gateway's credential and allow list onto the config the transport reads."""
     section = dict(config.section("telegram"))

@@ -64,7 +64,7 @@ def test_list_marks_a_dead_credential(sandbox, monkeypatch, capsys):
 
 def test_remove_deletes_the_definition(sandbox, capsys):
     gateways.add("telegram")
-    assert cli.main(["gateway", "remove", "telegram"]) == 0
+    assert cli.main(["gateway", "remove", "telegram", "--yes"]) == 0
     assert gateways.load() == []
     assert "removed gateway" in capsys.readouterr().out
 
@@ -489,3 +489,78 @@ def test_scripted_start_sets_own_settings_with_flags(sandbox, monkeypatch):
                      "--allowed", "5", "--model", "x/y", "--approval", "yolo", "--yes"]) == 0
 
     assert gateways.get("work").settings == {"agent": {"model": "x/y", "approval_mode": "yolo"}}
+
+
+# ------------------------------------------------------------------ gateway remove
+def _two_bots(sandbox, monkeypatch, tmp_path):
+    from ompwire import config as config_module
+
+    state = tmp_path / "state-root"
+    monkeypatch.setattr(config_module, "default_state_dir", lambda: state)
+    gateways.save([gateways.Gateway(name="telegram", allowed=[1]),
+                   gateways.Gateway(name="work", allowed=[2])])
+    gateways.set_token(gateways.Gateway(name="telegram"), "1:main")
+    gateways.set_token(gateways.Gateway(name="work"), "2:work")
+    work_state = state / "gateways" / "work"
+    work_state.mkdir(parents=True)
+    (work_state / "sessions.db").write_text("x")
+    removed: list[str] = []
+    monkeypatch.setattr("ompwire.service.remove", lambda name, **_k: removed.append(name) or 0)
+    return work_state, removed
+
+
+def test_remove_asks_which_then_keeps_state_by_default(sandbox, monkeypatch, tmp_path, capsys):
+    work_state, removed = _two_bots(sandbox, monkeypatch, tmp_path)
+    _answers(monkeypatch, "2", "1", "work")
+
+    assert cli.main(["gateway", "remove"]) == 0
+
+    assert [item.name for item in gateways.load()] == ["telegram"]
+    assert removed == ["work"]
+    env = (sandbox / ".env").read_text()
+    assert "2:work" not in env and "1:main" in env  # only its own credential goes
+    assert work_state.is_dir()  # kept
+    assert "kept its sessions and log" in capsys.readouterr().out
+
+
+def test_full_delete_removes_the_state_too(sandbox, monkeypatch, tmp_path):
+    work_state, _removed = _two_bots(sandbox, monkeypatch, tmp_path)
+    _answers(monkeypatch, "2", "2", "work")
+
+    assert cli.main(["gateway", "remove"]) == 0
+    assert not work_state.exists()
+
+
+def test_remove_needs_the_name_typed_back(sandbox, monkeypatch, tmp_path, capsys):
+    work_state, removed = _two_bots(sandbox, monkeypatch, tmp_path)
+    _answers(monkeypatch, "2", "2", "wrok")
+
+    assert cli.main(["gateway", "remove"]) == 1
+    assert len(gateways.load()) == 2 and removed == [] and work_state.is_dir()
+    assert "2:work" in (sandbox / ".env").read_text()
+
+
+def test_scripted_remove_and_purge(sandbox, monkeypatch, tmp_path):
+    work_state, _removed = _two_bots(sandbox, monkeypatch, tmp_path)
+    asked = _answers(monkeypatch)
+
+    assert cli.main(["gateway", "remove", "work", "--yes", "--purge"]) == 0
+    assert asked == [] and not work_state.exists()
+
+
+def test_yes_never_picks_a_gateway_to_remove(sandbox, monkeypatch, tmp_path, capsys):
+    _two_bots(sandbox, monkeypatch, tmp_path)
+    assert cli.main(["gateway", "remove", "--yes"]) == 1
+    assert len(gateways.load()) == 2
+
+
+def test_remove_refuses_while_a_schedule_reports_to_it(sandbox, monkeypatch, tmp_path, capsys):
+    from ompwire import schedules
+
+    _two_bots(sandbox, monkeypatch, tmp_path)
+    monkeypatch.setattr(schedules, "load",
+                        lambda: {"morning": schedules.Schedule(name="morning", cron="0 7 * * *",
+                                                               prompt="p", gateway="work")})
+    assert cli.main(["gateway", "remove", "work", "--yes"]) == 1
+    assert "morning" in capsys.readouterr().err
+    assert len(gateways.load()) == 2
