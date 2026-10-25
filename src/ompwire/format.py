@@ -49,7 +49,7 @@ def tokens(count: object) -> str:
         return "?"
     if abs(n) < 1_000:
         return str(n)
-    if abs(n) < 1_000_000:
+    if round(abs(n) / 1_000, 1) < 1_000:
         value, unit = n / 1_000, "k"
     else:
         value, unit = n / 1_000_000, "M"
