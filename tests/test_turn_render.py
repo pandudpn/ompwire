@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from ompwire import telegram
+from ompwire import engine, telegram
 from ompwire.acp import PromptResult, Update
 from ompwire.config import load_config
 
@@ -93,7 +93,7 @@ def rendered(monkeypatch):
         app = types.SimpleNamespace(bot=bot)
 
         async def go():
-            agent = telegram.ChatAgent(config, chat_id=1, key="test", app=app)
+            agent = telegram.chat_agent(config, 1, key="test", app=app)
             agent.client = FakeClient(updates)
             agent.client.on_update = agent._on_update  # ensure() would otherwise leave it unset
             agent.session_id = "s"
@@ -134,7 +134,7 @@ def test_a_subagent_is_named_in_the_trace(rendered):
 
 
 def test_a_long_reasoning_stream_is_cut_to_its_tail(rendered):
-    long = "x" * (telegram.REASONING_CHARS + 500) + "EKOR"
+    long = "x" * (engine.REASONING_CHARS + 500) + "EKOR"
     messages = rendered([thought(long), message("selesai")], reasoning=True)
     thinking = [body for body in messages if "🧠" in body][-1]
     assert "EKOR" in thinking
@@ -143,7 +143,7 @@ def test_a_long_reasoning_stream_is_cut_to_its_tail(rendered):
 
 def test_a_scheduled_run_is_a_card_not_a_log_line():
     """What the first version looked like: a bare "schedule · name" line above raw text."""
-    from ompwire.format import run_card, run_status
+    from ompwire.tg_html import run_card, run_status
 
     card = run_card("morning", "every day at 07:00", run_status(True, "done"),
                     [("took", "12.4s"), ("sent to", "telegram · ephemeral")],
@@ -157,7 +157,7 @@ def test_a_scheduled_run_is_a_card_not_a_log_line():
 
 
 def test_a_failed_run_says_so_in_the_card():
-    from ompwire.format import run_card, run_status
+    from ompwire.tg_html import run_card, run_status
 
     card = run_card("morning", "every day at 07:00", run_status(False, "agent failed"),
                     [("took", "0.4s")], "<pre>ACP command not found: omp</pre>", "")
@@ -221,7 +221,7 @@ def test_the_subagent_brief_is_shown_so_you_know_what_it_was_asked(rendered):
     ("```\ncode\n```", "code"),
 ])
 def test_a_brief_skips_markdown_labels(brief, shown):
-    from ompwire.telegram import _task_brief
+    from ompwire.engine import _task_brief
 
     assert _task_brief(brief) == shown
 
@@ -285,7 +285,7 @@ def test_a_read_only_command_does_not_wait_for_a_click(rendered):
     answered: list[str] = []
 
     async def go():
-        agent = telegram.ChatAgent(config, chat_id=1, key="readonly",
+        agent = telegram.chat_agent(config, 1, key="readonly",
                                    app=_types.SimpleNamespace(bot=bot))
         params = {"toolCall": {"kind": "execute", "title": "git log",
                               "rawInput": {"command": "git log --oneline -3"}},
@@ -334,7 +334,7 @@ def _paced_turn(bot, updates, *, min_gap=0.0, pause=0.05):
     config.data["stream"]["min_gap"] = min_gap
 
     async def go():
-        agent = telegram.ChatAgent(config, chat_id=1, key="paced",
+        agent = telegram.chat_agent(config, 1, key="paced",
                                    app=types.SimpleNamespace(bot=bot))
         agent.client = SpacedClient(updates, pause)
         agent.client.on_update = agent._on_update
@@ -398,7 +398,7 @@ def test_a_trace_dropped_by_flood_control_is_named_in_the_chat(monkeypatch):
     async def short_sleep(delay, *a, **k):  # the 30 s flood window, without waiting 30 s
         return await real_sleep(min(delay, 0.01), *a, **k)
 
-    monkeypatch.setattr(telegram.asyncio, "sleep", short_sleep)
+    monkeypatch.setattr(engine.asyncio, "sleep", short_sleep)
     bot = FloodTraces()
     _paced_turn(bot, [tool_call("t1", "a"), tool_progress("t1", "", status="completed"),
                       message("jawaban")])
@@ -432,11 +432,11 @@ def test_a_flood_window_on_the_answer_is_waited_out(monkeypatch):
     async def no_wait(_delay, *_a, **_k):
         return None
 
-    monkeypatch.setattr(telegram.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(engine.asyncio, "sleep", no_wait)
     bot = FloodOnce()
 
     async def go():
-        agent = telegram.ChatAgent(config, chat_id=1, key="floodonce",
+        agent = telegram.chat_agent(config, 1, key="floodonce",
                                    app=types.SimpleNamespace(bot=bot))
         agent.client = FakeClient([message("jawaban lengkap")])
         agent.client.on_update = agent._on_update

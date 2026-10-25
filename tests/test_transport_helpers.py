@@ -95,7 +95,7 @@ def test_uptime_is_compact():
 
 
 def test_grid_pads_labels_and_escapes_values():
-    from ompwire.format import grid
+    from ompwire.tg_html import grid
 
     block = grid([("cwd", "/home/you"), ("model", "a<b")])
     assert block.startswith("<pre>") and block.endswith("</pre>")
@@ -104,7 +104,7 @@ def test_grid_pads_labels_and_escapes_values():
 
 
 def test_card_and_change_render_html():
-    from ompwire.format import card, change
+    from ompwire.tg_html import card, change
 
     rendered = card("🟢 ompwire", "0.1.0", [("agent", "omp 18.12.6")], "footer")
     assert "<b>🟢 ompwire</b>" in rendered
@@ -195,7 +195,7 @@ def test_mode_picker_stays_single_column():
 
 
 def test_tool_block_fences_command_and_output_together():
-    from ompwire.format import tool_block
+    from ompwire.tg_html import tool_block
 
     block = tool_block("execute", "", command="ls -1 | head -2",
                        output="a\nb", status="completed")
@@ -207,7 +207,7 @@ def test_tool_block_fences_command_and_output_together():
 
 
 def test_tool_block_keeps_multiline_commands_readable():
-    from ompwire.format import tool_block
+    from ompwire.tg_html import tool_block
 
     command = "python3 - <<'PY'\nprint(1)\nPY"
     body = tool_block("execute", "", command=command).split("<pre>")[1].split("</pre>")[0]
@@ -216,7 +216,7 @@ def test_tool_block_keeps_multiline_commands_readable():
 
 
 def test_tool_block_escapes_html_in_output():
-    from ompwire.format import tool_block
+    from ompwire.tg_html import tool_block
 
     body = tool_block("execute", "", command="echo '<b>'", output="<b>x</b>")
     assert "&lt;b&gt;" in body
@@ -225,7 +225,7 @@ def test_tool_block_escapes_html_in_output():
 def test_chat_formatting_hint_is_forwarded_to_the_agent():
     """Without the hint the model writes commands inline; omp needs to be told."""
     from ompwire.config import load_config
-    from ompwire.telegram import ChatAgent
+    from ompwire.engine import ChatAgent
 
     config = load_config(env={})
     agent = ChatAgent.__new__(ChatAgent)
@@ -245,7 +245,7 @@ def test_the_markers_are_described_even_with_no_prose_configured():
     """There is no switch: a reply that cannot carry a file is a reply this transport does not
     understand, so the marker explanation is not something a config can drop."""
     from ompwire.config import load_config
-    from ompwire.telegram import ChatAgent
+    from ompwire.engine import ChatAgent
 
     config = load_config(env={})
     config.data.setdefault("agent", {})["append_system_prompt"] = ""
@@ -263,7 +263,7 @@ def test_the_markers_are_described_even_with_no_prose_configured():
 def test_the_marker_protocol_is_always_described():
     """An upgraded install keeps its old config prose, so the markers cannot live there."""
     from ompwire.config import load_config
-    from ompwire.telegram import ChatAgent
+    from ompwire.engine import ChatAgent
 
     config = load_config(env={})
     config.data.setdefault("agent", {})["append_system_prompt"] = ""
@@ -281,7 +281,7 @@ def test_the_marker_protocol_is_always_described():
 
 def test_the_subagent_is_named_in_the_tool_block():
     """omp runs subagents through the `task` tool; ACP has no event of its own for them."""
-    from ompwire.format import tool_block
+    from ompwire.tg_html import tool_block
 
     block = tool_block("other", "Reading note.txt via subagent", "", "", "in_progress",
                        "ReadNote (sonic)")
@@ -290,7 +290,7 @@ def test_the_subagent_is_named_in_the_tool_block():
 
 def test_reasoning_is_off_until_asked():
     from ompwire.config import load_config
-    from ompwire.telegram import ChatAgent
+    from ompwire.engine import ChatAgent
 
     config = load_config(env={})
     agent = ChatAgent.__new__(ChatAgent)

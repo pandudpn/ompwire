@@ -19,13 +19,10 @@ import logging
 import logging.handlers
 import os
 import pathlib
-import re
 import signal
 import time
-import uuid
-from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 # PTB 22 warns on every RetryAfter.retry_after read until a process opts into the timedelta it
 # returns from v23. _retry_window already takes either, so opt in rather than log noise.
@@ -43,39 +40,33 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, allowlist, gateways
+from . import __version__, engine
 from . import schedules as schedule_lib
-from .acp import AcpClient, AcpError, AcpTimeout, pick_permission_option
-from .acp import Update as AcpUpdate
-from .attachments import extract as extract_files
-from .attachments import hide_partial as hide_file_partial
+from .acp import AcpError
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
 from .catalog import credential_snapshot, list_providers, list_skills, skill_body
 from .config import Config, approval_policy, save_override
-from .format import card, change, esc, help_sections, now_wib, tool_block
+from .engine import (
+    PERMISSION_TIMEOUT,
+    PREF_KEYS,
+    RESUME_LIMIT,
+    RESUME_PROMPT,
+    FloodWait,
+    ToolTrace,
+    mcp_label,
+    resolve_mcp_servers,
+)
+from .format import now_wib
 from .format import uptime as fmt_uptime
 from .login import LoginSession
-from .mcp_hub import hub_servers, normalize
-from .mcp_hub import merge_entry as merge_mcp_entry
-from .mdrender import split_blocks, strip_agent_noise, strip_html, to_html, to_plain
-from .questions import extract as extract_options
-from .questions import hide_partial
+from .mdrender import split_blocks, strip_html, to_html, to_plain
 from .store import SessionStore
+from .tg_html import card, change, esc, help_sections, tool_block
 
 log = logging.getLogger("ompwire.telegram")
 
 TELEGRAM_LIMIT = 4000  # leave headroom under the 4096 hard cap
-REASONING_CHARS = 1200  # the tail matters; the beginning usually restates the question
-PERMISSION_TIMEOUT = 120.0
-# One more try after a restart is worth it; a turn that keeps dying with the gateway is the cause.
-RESUME_LIMIT = 2
-RESUME_PROMPT = (
-    "The chat gateway restarted while you were working on the request below, and your previous "
-    "turn was cut off. Everything you did before the cut is in this session's history. Check "
-    "what is already done, do not repeat finished steps, and finish the request.\n\n"
-    "Original request:\n{prompt}"
-)
 IDLE_CHECK_INTERVAL = 60.0
 
 COMMANDS: list[tuple[str, str]] = [
@@ -119,23 +110,6 @@ def two_columns(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboard
     return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
 
-MCP_LABEL_MAX = 6
-
-
-def mcp_label(names: Iterable[str]) -> str:
-    """How the banner names the MCP servers: the first few, then a count of the rest."""
-    names = [str(name) for name in names]
-    if not names:
-        return "none"
-    shown = ", ".join(names[:MCP_LABEL_MAX])
-    if len(names) > MCP_LABEL_MAX:
-        shown += f" +{len(names) - MCP_LABEL_MAX}"
-    return shown
-
-
-# Choices that belong to the chat, not to one ACP session: /new must not reset them.
-PREF_KEYS = ("model", "mode", "thinking")
-
 FORWARD_HINT = (
     "Everything else is sent to the agent as a prompt. Its own commands work here, "
     "including /skill:<name> and /compact."
@@ -160,28 +134,6 @@ async def send_md(bot, chat_id: int, text: str):
         return await bot.send_message(chat_id, to_plain(text))
 
 
-WAITING_RE = re.compile(r"^(waiting for|menunggu)\b", re.IGNORECASE)
-
-
-def _task_brief(text: str) -> str:
-    """The first meaningful line of a subagent brief.
-
-    omp sends the brief as markdown that opens with a heading ("# Target"), which says nothing on
-    its own. Drop the headings and keep the first line that carries the assignment.
-    """
-    for line in str(text or "").splitlines():
-        clean = line.strip()
-        if not clean or clean.startswith("#") or clean.startswith("```"):
-            continue  # headings and fences label the brief, they are not the brief
-        return " ".join(clean.split())[:120]
-    return ""
-
-
-def _is_waiting(title: str) -> bool:
-    """A call that only says it is waiting adds a line and no information."""
-    return bool(WAITING_RE.match(title.strip()))
-
-
 def _unique_commands() -> list[tuple[str, str]]:
     """Telegram rejects a duplicate command name, so the menu is deduped."""
     seen: set[str] = set()
@@ -192,809 +144,6 @@ def _unique_commands() -> list[tuple[str, str]]:
         seen.add(name)
         out.append((name, description))
     return out
-
-
-def _chunks(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
-    out: list[str] = []
-    while text:
-        out.append(text[:limit])
-        text = text[limit:]
-    return out or [""]
-
-
-def resolve_mcp_servers(config: Any) -> list[dict[str, Any]]:
-    """The servers a session is opened with.
-
-    One resolver, because the banner lives on a different class than the session: a copy of this
-    logic in the banner reported "none" while the hub was supplying twenty-four servers.
-    """
-    source = str(config.get("mcp", "source", "inline") or "inline").lower()
-    if source == "none":
-        return []
-    if source == "mcp-hub":
-        entries = hub_servers(
-            config.get("mcp", "hub_path", "~/mcp-hub/servers.yaml"),
-            include=config.get("mcp", "include", []) or [],
-            exclude=config.get("mcp", "exclude", []) or [],
-        )
-        overrides = config.get("mcp", "overrides", {}) or {}
-        for entry in entries:
-            patch = overrides.get(entry.get("name")) or {}
-            merge_mcp_entry(entry, patch)
-        return normalize(entries)
-    return normalize(config.get("mcp", "servers", []) or [])
-
-
-class ChatAgent:
-    """One chat's ACP agent: subprocess, session id, queue and counters."""
-
-    def __init__(self, config: Config, chat_id: int, key: str, app: Application) -> None:
-        self.config = config
-        self.chat_id = chat_id
-        self.key = key
-        self.app = app
-        self.store = SessionStore(config.get("session", "store"))
-        self.client: AcpClient | None = None
-        self.session_id = ""
-        self.cwd = str(config.get("agent", "cwd") or "~")
-        self.reasoning = bool(config.get("stream", "show_reasoning", False))
-        # the bot that receives a scheduled result defaults to the bot being talked to
-        self.gateway_name = str(config.get("_gateway", "name", "telegram") or "telegram")
-        self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
-        self.started_at = time.time()
-        self.pending_options: list[str] = []
-        # when this chat last got a message; the pacing gap is measured from it across turns
-        self._last_post = 0.0
-        self.last_used = time.time()
-        self.busy = False
-        self._user_cancel = False
-        self.verbose = bool(config.get("stream", "show_tool_calls", True))
-        # yolo survives /new: it is stored per chat, like model/mode/thinking.
-        # With no stored choice the config decides, so setup can ship yolo on.
-        stored_yolo = self.store.prefs(key).get("yolo")
-        if stored_yolo is None:
-            self.yolo = bool(config.get("agent", "yolo", False))
-        else:
-            self.yolo = stored_yolo == "on"
-        self.usage = {"input": 0, "output": 0, "cached": 0, "turns": 0}
-        self.turns = 0
-        self.tools_used = 0
-        self.options: dict[str, dict[str, Any]] = {}
-        self.info: dict[str, Any] = {}
-        self.agent_version = ""
-        self.advertised_commands: list[str] = []
-        self._updates: asyncio.Queue[AcpUpdate | None] = asyncio.Queue()
-        self._pending_perm: dict[str, dict[str, Any]] = {}
-        self._loop = asyncio.get_running_loop()
-        self._lock = asyncio.Lock()
-
-    # ------------------------------------------------------------------ setup
-    def _build_client(self, yolo: bool = False) -> AcpClient:
-        args = list(self.config.get("acp", "args") or ["--mode", "acp"])
-        approval = "yolo" if (yolo or self.yolo) else str(self.config.get("agent", "approval_mode", ""))
-        hint = str(self.config.get("agent", "append_system_prompt", "") or "").strip()
-        from .config import PROTOCOL_HINT
-
-        # always: the markers are how a reply carries a file or a question, not a preference
-        hint = f"{hint}\n\n{PROTOCOL_HINT}".strip()
-        if approval:
-            args.append(f"--approval-mode={approval}")
-        if hint:
-            args += ["--append-system-prompt", hint]
-        return AcpClient(
-            command=str(self.config.get("acp", "command", "omp")),
-            args=args,
-            cwd=self.cwd,
-            on_update=self._on_update,
-            on_permission=self._on_permission,
-            startup_timeout=float(self.config.get("acp", "startup_timeout", 60.0)),
-        )
-
-    async def ensure(self, yolo: bool = False) -> None:
-        if self.client is not None and self.client.alive:
-            return
-        self.client = self._build_client(yolo=yolo)
-        info = await asyncio.to_thread(self.client.initialize)
-        agent = info.get("agentInfo") or {}
-        self.agent_version = str(agent.get("version") or "")
-        self.info = info
-        log.info("agent up for %s: %s %s (approval=%s, mcp=%d)", self.chat_id,
-                 agent.get("name"), agent.get("version"),
-                 "yolo" if self.yolo else self.config.get("agent", "approval_mode", "write"),
-                 len(self._mcp_servers()))
-        record = self.store.get(self.key)
-        previous = self.client.on_update
-        self.client.on_update = None  # session/load replays the transcript
-        try:
-            if record is not None:
-                try:
-                    result = await asyncio.to_thread(
-                        self.client.load_session, record.session_id, self.cwd, self._mcp_servers()
-                    )
-                    self.session_id = record.session_id
-                except AcpError:
-                    result = await asyncio.to_thread(self.client.new_session, self.cwd, self._mcp_servers())
-                    self.session_id = str(result.get("sessionId") or "")
-            else:
-                result = await asyncio.to_thread(self.client.new_session, self.cwd, self._mcp_servers())
-                self.session_id = str(result.get("sessionId") or "")
-        except AcpError as exc:
-            if not self._mcp_servers():
-                raise
-            log.warning("session/new with mcp servers failed (%s); retrying without them", exc)
-            result = await asyncio.to_thread(self.client.new_session, self.cwd, [])
-            self.session_id = str(result.get("sessionId") or "")
-        finally:
-            self.client.on_update = previous
-        self.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
-        self.store.put(self.key, self.session_id, self.cwd)
-        await self._apply_preferences()
-
-    def _mcp_servers(self) -> list[dict[str, Any]]:
-        return resolve_mcp_servers(self.config)
-
-    def prefs(self) -> dict[str, str]:
-        """Per-chat choices that must outlive a session (/new used to reset them)."""
-        return self.store.prefs(self.key)
-
-    async def _apply_preferences(self) -> None:
-        stored = self.prefs()
-        for config_id in PREF_KEYS:
-            value = stored.get(config_id) or str(self.config.get("agent", config_id, "") or "")
-            if not value or self.client is None:
-                continue
-            try:
-                result = await asyncio.to_thread(
-                    self.client.set_config_option, self.session_id, config_id, value
-                )
-                # the reply carries the authoritative option set; without this the
-                # pickers keep showing the previous value after a restart or /new
-                updated = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
-                if updated:
-                    self.options = updated
-                log.info("preference applied %s=%s (session=%s, source=%s, effective=%s)",
-                         config_id, value, self.session_id[:8],
-                         "store" if stored.get(config_id) else "config",
-                         (self.options.get(config_id) or {}).get("currentValue"))
-            except AcpError as exc:
-                log.warning("set %s=%s failed: %s", config_id, value, exc)
-
-    # ------------------------------------------------------- thread -> loop
-    def _on_update(self, update: AcpUpdate) -> None:
-        if update.kind == "available_commands_update":
-            names = [f"/{c.get('name')}" for c in (update.raw.get("availableCommands") or [])]
-            self._loop.call_soon_threadsafe(self.advertised_commands.__setitem__, slice(None), names)
-            return
-        if update.kind in {"usage_update", "session_info_update"}:
-            return
-        self._loop.call_soon_threadsafe(self._updates.put_nowait, update)
-
-    def _on_permission(self, params: dict[str, Any]) -> str | None:
-        policy = approval_policy(self.config)
-        title = params.get("title") or (params.get("toolCall") or {}).get("title") or "tool call"
-        if policy in {"allow", "deny"}:
-            log.info("permission auto-%s chat=%s tool=%s", policy, self.chat_id, title)
-            return pick_permission_option(params, policy)
-        # A read-only command is not worth a button. Asking for `git log` teaches the habit of
-        # tapping Allow without reading, which is exactly what the gate exists to prevent.
-        command = str(((params.get("toolCall") or {}).get("rawInput") or {}).get("command") or "")
-        if command and allowlist.is_read_only(command):
-            log.info("permission auto-allow chat=%s (read-only): %s", self.chat_id, command[:120])
-            return pick_permission_option(params, "allow")
-        token = f"perm-{uuid.uuid4().hex[:12]}"  # two requests can land in the same millisecond
-        slot: dict[str, Any] = {"optionId": None, "params": params}
-        self._pending_perm[token] = slot
-        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._ask_permission(token, params)))
-        log.info("permission requested chat=%s tool=%s options=%s", self.chat_id, title,
-                 [o.get("kind") for o in (params.get("options") or [])])
-        deadline = time.time() + float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
-        while time.time() < deadline:
-            if slot.get("optionId") is not None:
-                self._pending_perm.pop(token, None)
-                return slot["optionId"]
-            time.sleep(0.2)
-        log.warning("permission timed out chat=%s tool=%s (denied)", self.chat_id, title)
-        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._expire_permission(token)))
-        return None
-
-    OPTION_LABELS: ClassVar[dict[str, str]] = {
-        "allow_once": "✅ Allow once",
-        "allow_always": "✅ Always allow",
-        "reject_once": "⛔ Deny",
-        "reject_always": "⛔ Always deny",
-    }
-
-    @staticmethod
-    def _permission_detail(params: dict[str, Any]) -> tuple[str, str]:
-        """Split a permission request into (headline, monospace body)."""
-        tool_call = params.get("toolCall") or {}
-        raw_input = tool_call.get("rawInput") or {}
-        kind = str(tool_call.get("kind") or params.get("kind") or "tool")
-        command = str(raw_input.get("command") or "").strip()
-        title = str(params.get("title") or tool_call.get("title") or "").strip()
-        if command:
-            return kind, command
-        if title:
-            return kind, title
-        return kind, ""
-
-    def _option_label(self, option: dict[str, Any]) -> str:
-        kind = str(option.get("kind") or "")
-        known = self.OPTION_LABELS.get(kind)
-        if known:
-            return known
-        return str(option.get("name") or kind or "option")
-
-    async def _ask_permission(self, token: str, params: dict[str, Any]) -> None:
-        options = params.get("options") or []
-        kind, detail = self._permission_detail(params)
-        rows = [[InlineKeyboardButton(self._option_label(option), callback_data=f"{token}:{index}")]
-                for index, option in enumerate(options)]
-        head = card("🛡️ approval needed", kind, [],
-                    "pick one · the run is paused until you answer")
-        body = head + (f"\n<pre>{esc(detail[:1200])}</pre>" if detail else "")
-        slot = self._pending_perm.get(token)
-        try:
-            sent = await self.app.bot.send_message(self.chat_id, body,
-                                                   reply_markup=InlineKeyboardMarkup(rows),
-                                                   parse_mode=ParseMode.HTML)
-            if slot is not None:
-                slot["message"] = sent
-        except TelegramError as exc:
-            log.warning("could not send approval prompt: %s", exc)
-
-    async def deliver_files(self, raw: str) -> None:
-        """Upload the files the agent marked, and say what was dropped.
-
-        The marker never reaches the chat, so a path that does not work would otherwise disappear
-        without a trace. One short line names what was skipped and why.
-        """
-        max_mb = float(self.config.get("files", "max_mb", 20.0))
-        _, files, rejected = extract_files(raw, root=self.cwd, max_mb=max_mb)
-        for item in files:
-            try:
-                with item.path.open("rb") as handle:
-                    if item.as_photo:
-                        await self.app.bot.send_photo(self.chat_id, photo=handle)
-                    else:
-                        await self.app.bot.send_document(self.chat_id, document=handle)
-                log.info("file sent chat=%s path=%s bytes=%s", self.chat_id, item.path, item.size)
-            except Exception as exc:  # a send failure must not end the turn
-                log.warning("file send failed chat=%s path=%s: %s", self.chat_id, item.path, exc)
-                rejected.append(f"{item.path.name}: {exc}")
-        if rejected:
-            log.info("files rejected chat=%s: %s", self.chat_id, "; ".join(rejected))
-            shown = rejected[:4]
-            more = "" if len(rejected) <= 4 else f" (+{len(rejected) - 4} more)"
-            await self.send_md("skipped a file · " + " · ".join(shown) + more)
-
-    # ------------------------------------------------------------- schedules
-    def _schedule_name(self, proposal: schedule_lib.Proposal) -> str:
-        """A readable name from the prompt, unique among what already exists."""
-        words = re.findall(r"[a-z0-9]+", proposal.prompt.lower())[:3]
-        base = "-".join(words)[:24] or "scheduled"
-        existing = set(schedule_lib.load())
-        if base not in existing:
-            return base
-        for index in range(2, 100):
-            candidate = f"{base}-{index}"
-            if candidate not in existing:
-                return candidate
-        return f"{base}-{len(existing) + 1}"
-
-    async def offer_schedules(self, proposals: list[schedule_lib.Proposal]) -> None:
-        """A marker is a proposal: nothing is installed until a button is pressed."""
-        known = {item.name for item in gateways.load()}
-        for proposal in proposals:
-            gateway = proposal.gateway or self.gateway_name
-            problem = ""
-            if known and gateway not in known:
-                problem = f"unknown gateway '{gateway}'"
-            try:
-                expression = proposal.expression
-                schedule_lib.validate_calendar(f"{expression} {schedule_lib.DEFAULT_TIMEZONE}")
-            except schedule_lib.ScheduleError as exc:
-                problem = str(exc)
-            if problem:
-                await self.send_md(f"schedule rejected · {problem}")
-                continue
-            name = self._schedule_name(proposal)
-            self.pending_schedules[name] = proposal
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("Create schedule", callback_data=f"sched:new:{name}"),
-                InlineKeyboardButton("Cancel", callback_data=f"sched:cancel:{name}"),
-            ]])
-            body = card("schedule", expression, [
-                ("delivers to", gateway),
-                ("prompt", proposal.prompt[:200]),
-            ], "nothing runs until you press Create")
-            await self.app.bot.send_message(self.chat_id, body, parse_mode=ParseMode.HTML,
-                                            reply_markup=keyboard)
-
-    async def _schedule_run(self, name: str) -> None:
-        from . import schedule_run
-
-        await self.send_md(f"running {name} now…")
-        try:
-            code = await asyncio.to_thread(schedule_run.run, name)
-        except Exception as exc:
-            return await self.send_md(f"could not run {name} · {exc}")
-        if code != 0:
-            await self.send_md(f"{name} exited with code {code}; /schedule shows the status")
-
-    async def _schedule_remove(self, name: str) -> None:
-        try:
-            schedule_lib.uninstall(name)
-            item = schedule_lib.remove(name)
-        except schedule_lib.ScheduleError as exc:
-            return await self.send_md(f"could not remove · {exc}")
-        await self.send_md(f"schedule {item.name} removed, timer included")
-
-    async def _schedule_create(self, name: str) -> None:
-        proposal = self.pending_schedules.pop(name, None)
-        if proposal is None:
-            return await self.send_md("that proposal is gone; ask again")
-        gateway = proposal.gateway or self.gateway_name
-        try:
-            item = schedule_lib.Schedule(name=name, cron=proposal.cron, prompt=proposal.prompt,
-                                         gateway=gateway, calendar=proposal.calendar)
-            schedule_lib.add(name=name, cron=proposal.cron, calendar=proposal.calendar,
-                             prompt=proposal.prompt, gateway=gateway)
-            schedule_lib.install(item)
-            schedule_lib.enable(name)
-        except schedule_lib.ScheduleError as exc:
-            return await self.send_md(f"could not create the schedule · {exc}")
-        nxt = schedule_lib.next_elapse(name) or "see systemctl --user list-timers"
-        await self.send_md(f"schedule {name} created · {item.on_calendar} → {gateway}\nnext: {nxt}")
-
-    async def offer_options(self, options: list[str], chat_id: int | None = None) -> None:
-        """Buttons for the answers the agent offered, plus a free-text escape hatch.
-
-        Telegram cuts an inline button's label to one line on the phone, so a sentence-long
-        option arrived as "Teks per segmen + 1 pesan…". The full text goes in the message body,
-        numbered, and each button carries its number so the choice is never ambiguous.
-        """
-        target = chat_id or self.chat_id
-        self.pending_options = options
-        rows = [[InlineKeyboardButton(f"{index + 1}. {option}"[:64], callback_data=f"qo:{index}")]
-                for index, option in enumerate(options)]
-        rows.append([InlineKeyboardButton("✏️ Other answer", callback_data="qo:other")])
-        listed = "\n".join(f"<b>{index + 1}.</b> {esc(option)}"
-                           for index, option in enumerate(options))
-        log.info("question offered chat=%s options=%s", target, options)
-        await self.app.bot.send_message(
-            target,
-            card("❓ pick an answer", "tap one, or choose Other and just type it", [],
-                 "the chosen text is sent as your next message") + f"\n\n{listed}",
-            reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
-        )
-
-    async def handle_permission_callback(self, token: str, index: int) -> str | None:
-        """Record the user's choice, then rewrite the prompt into the decision."""
-        slot = self._pending_perm.get(token)
-        if slot is None:
-            return None
-        options = slot["params"].get("options") or []
-        if not (0 <= index < len(options)):
-            return None
-        option = options[index]
-        slot["optionId"] = option.get("optionId")
-        label = self._option_label(option)
-        log.info("permission answered chat=%s choice=%s", self.chat_id, label)
-        kind, detail = self._permission_detail(slot["params"])
-        body = card("🛡️ approval", f"{label} · {now_wib()}", [("tool", kind)],
-                    "decision recorded")
-        if detail:
-            body += f"\n<pre>{esc(detail[:800])}</pre>"
-        message = slot.get("message")
-        if message is not None:
-            try:
-                await message.edit_text(body, parse_mode=ParseMode.HTML)
-            except BadRequest as exc:
-                log.debug("approval edit failed: %s", exc)
-        return label
-
-    async def _expire_permission(self, token: str) -> None:
-        slot = self._pending_perm.get(token)
-        if slot is None:
-            return
-        kind, detail = self._permission_detail(slot["params"])
-        body = card("🛡️ approval", f"expired · {now_wib()}", [("tool", kind)],
-                    "no answer in time, the tool call was denied")
-        if detail:
-            body += f"\n<pre>{esc(detail[:800])}</pre>"
-        message = slot.get("message")
-        if message is not None:
-            try:
-                await message.edit_text(body, parse_mode=ParseMode.HTML)
-            except BadRequest:
-                pass
-            except Exception as exc:
-                log.debug("could not rewrite the expired approval prompt: %s", exc)
-
-    @staticmethod
-    def _retry_window(exc: Exception) -> float:
-        """PTB gives seconds today and a timedelta from v23; both mean the same wait."""
-        value = getattr(exc, "retry_after", 5)
-        if hasattr(value, "total_seconds"):
-            return float(value.total_seconds())
-        return float(value or 5)
-
-    # ------------------------------------------------------------------ turn
-    async def ask(self, text: str, message=None, images: list[dict[str, Any]] | None = None,
-                  resumes: int = 0, record: str | None = None) -> str:
-        await self.ensure()
-        self.busy = True
-        self._user_cancel = False
-        self.last_used = time.time()
-        started = time.time()
-        self.turns += 1
-        # written before the prompt goes out, deleted only when the turn really ends: a gateway
-        # restart in between leaves the row, and the next start picks the turn back up. A resume
-        # records the person's words, not the resume wrapper, so a second restart does not nest it.
-        self.store.begin_turn(self.key, record or text, resumes)
-        log.info("turn start chat=%s session=%s input_chars=%s", self.chat_id,
-                 self.session_id[:8], len(text))
-        # Every message is posted once and never edited, so its timestamp is when that step
-        # happened. Answer text is cut into segments at each tool call; each tool call is its own
-        # message, posted when it finishes so it carries its output.
-        #
-        # Telegram allows roughly one message a second per chat. drain() never waits on the
-        # network: it appends to an outbox, and one sender posts it in order, at least
-        # stream.min_gap apart. Tool traces that pile up while the sender waits (pacing or a
-        # flood window) go out together as one message, and a trace that is dropped after flood
-        # control is counted and named in the chat instead of vanishing.
-        segment: list[str] = []    # answer text since the last tool call
-        answer: list[str] = []     # the whole answer, for the markers read at the end
-        thinking: list[str] = []
-        trace: dict[str, dict[str, Any]] = {}
-        state: dict[str, Any] = {"text_msg": None, "tools": 0, "dropped": 0, "closed": False}
-        outbox: list[dict[str, Any]] = []
-        wake = asyncio.Event()
-        min_gap = float(self.config.get("stream", "min_gap", 1.0))
-
-        def enqueue(kind: str, body: str, *, html: bool, essential: bool) -> None:
-            outbox.append({"kind": kind, "body": body, "html": html, "essential": essential})
-            wake.set()
-
-        async def post(body: str, *, html: bool, essential: bool) -> Any:
-            """One new message. A flood window is waited out for the answer, not for a trace."""
-            for attempt in range(2):
-                wait = self._last_post + min_gap - time.monotonic()
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                try:
-                    sent_msg = await (self.send_html(body) if html else self.send_md(body))
-                    self._last_post = time.monotonic()
-                    return sent_msg
-                except RetryAfter as exc:
-                    window = self._retry_window(exc)
-                    self._last_post = time.monotonic() + window  # nothing goes out before it ends
-                    if attempt or window > (60 if essential else 10):
-                        log.warning("message dropped chat=%s after flood control (%.0fs)",
-                                    self.chat_id, window)
-                        return None
-                except TelegramError as exc:
-                    log.warning("message not delivered chat=%s: %s", self.chat_id, exc)
-                    return None
-            return None
-
-        def dropped_line() -> str:
-            count = state["dropped"]
-            return f"<i>… {count} tool call(s) not shown (Telegram flood control)</i>"
-
-        async def sender() -> None:
-            while True:
-                if not outbox:
-                    if state["closed"]:
-                        break
-                    wake.clear()
-                    await wake.wait()
-                    continue
-                if outbox[0]["kind"] != "trace":
-                    item = outbox.pop(0)
-                    sent_msg = await post(item["body"], html=item["html"],
-                                          essential=item["essential"])
-                    if sent_msg is not None and item["kind"] == "text":
-                        state["text_msg"] = sent_msg
-                    continue
-                # every trace waiting at the head of the outbox goes out as one message
-                blocks: list[str] = [dropped_line()] if state["dropped"] else []
-                taken = 0
-                while taken < len(outbox) and outbox[taken]["kind"] == "trace":
-                    candidate = "\n\n".join([*blocks, outbox[taken]["body"]])
-                    if taken and len(candidate) > TELEGRAM_LIMIT:
-                        break
-                    blocks.append(outbox[taken]["body"])
-                    taken += 1
-                del outbox[:taken]
-                if await post("\n\n".join(blocks), html=True, essential=False) is None:
-                    state["dropped"] += taken
-                else:
-                    state["dropped"] = 0
-            if state["dropped"]:
-                await post(dropped_line(), html=True, essential=True)
-
-        sender_task = asyncio.create_task(sender())
-
-        def flush_thinking() -> None:
-            shown = "".join(thinking).strip()
-            thinking.clear()
-            if not self.reasoning or not shown:
-                return
-            if len(shown) > REASONING_CHARS:
-                shown = "…\n" + shown[-REASONING_CHARS:]
-            # prose, so not a code block: monospace reads badly on a phone and a <pre> cannot
-            # collapse. An expandable quote stays one line until tapped.
-            enqueue("thinking",
-                    f"🧠 <i>reasoning</i>\n<blockquote expandable>{esc(shown)}</blockquote>",
-                    html=True, essential=False)
-
-        def flush_segment() -> None:
-            text = strip_agent_noise("".join(segment))
-            segment.clear()
-            text = hide_file_partial(hide_partial(text, final=True), final=True)
-            text = schedule_lib.hide_partial(text, final=True)
-            if not text.strip():
-                return
-            for part in _chunks(text, 3600):
-                enqueue("text", part, html=False, essential=True)
-
-        def post_tool(entry: dict[str, Any]) -> None:
-            entry["posted"] = True
-            if not self.verbose:
-                return
-            fields = (entry.get("kind", "tool"), entry.get("title", ""), entry.get("command", ""))
-            tail = (entry.get("status", ""), entry.get("subagent", ""), entry.get("steps") or [],
-                    entry.get("brief", ""))
-            body = tool_block(*fields, entry.get("output", ""), *tail)
-            if len(body) > TELEGRAM_LIMIT:
-                body = tool_block(*fields, "(output too long for one message)", *tail)
-            enqueue("trace", body, html=True, essential=False)
-
-        async def finish() -> None:
-            """End of turn: whatever is still buffered, then the markers in the whole answer."""
-            flush_thinking()
-            flush_segment()
-            for entry in trace.values():
-                if not entry.get("posted"):
-                    post_tool(entry)
-            state["closed"] = True
-            wake.set()
-            await sender_task  # the buttons and files come after the last message, in order
-            raw = "".join(answer)
-            _, options = extract_options(raw)
-            if options:
-                await self.offer_options(options)
-            await self.deliver_files(raw)
-            _clean, proposals = schedule_lib.extract(raw)
-            if proposals:
-                await self.offer_schedules(proposals)
-
-        async def drain() -> None:
-            while True:
-                update = await self._updates.get()
-                if update is None:
-                    return
-                if update.kind == "agent_thought_chunk" and update.text:
-                    thinking.append(update.text)
-                elif update.kind == "agent_message_chunk" and update.text:
-                    flush_thinking()
-                    segment.append(update.text)
-                    answer.append(update.text)
-                elif update.kind in {"tool_call", "tool_call_update"}:
-                    raw = update.raw
-                    call_id = str(raw.get("toolCallId") or f"anon{len(trace)}")
-                    entry = trace.setdefault(call_id, {"kind": "tool"})
-                    if update.kind == "tool_call":
-                        # the text before a tool call is a finished thought: post it now
-                        flush_thinking()
-                        flush_segment()
-                        if _is_waiting(str(raw.get("title") or "")):
-                            entry["posted"] = True
-                            continue
-                        state["tools"] += 1
-                        self.tools_used += 1
-                        entry["kind"] = str(raw.get("kind") or "tool")
-                        entry["title"] = str(raw.get("title") or "")
-                        raw_input = raw.get("rawInput") or {}
-                        entry["command"] = str(raw_input.get("command") or "")
-                        tasks = raw_input.get("tasks")
-                        if isinstance(tasks, list) and tasks:
-                            entry["kind"] = "subagent"
-                            # omp runs subagents through the `task` tool; ACP has no event of
-                            # its own for them, so the task list is the only place they appear
-                            entry["subagent"] = ", ".join(
-                                f"{item.get('name', '?')} ({item.get('agent', 'task')})"
-                                for item in tasks if isinstance(item, dict))[:80]
-                            first = next((item for item in tasks if isinstance(item, dict)), {})
-                            entry["brief"] = _task_brief(first.get("task", ""))
-                            tools = first.get("tools")
-                            if isinstance(tools, list) and tools:
-                                entry["brief"] = (entry["brief"] + " · tools: "
-                                                  + ", ".join(str(t) for t in tools))[:160]
-                        log.info("tool call chat=%s kind=%s command=%r", self.chat_id,
-                                 entry["kind"], entry["command"][:120] or entry["title"][:120])
-                    if entry.get("posted"):
-                        continue
-                    entry["status"] = str(raw.get("status") or entry.get("status", ""))
-                    steps = [item.get("text", "") for item in (raw.get("content") or [])
-                             if isinstance(item, dict) and item.get("text")]
-                    if steps:
-                        kept = entry.setdefault("steps", [])
-                        for step in steps:
-                            clean = " ".join(str(step).split())[:110]
-                            if clean and clean not in kept:
-                                kept.append(clean)
-                        del kept[:-4]
-                    output = raw.get("rawOutput") or {}
-                    chunks = [item.get("text", "") for item in (output.get("content") or [])
-                              if isinstance(item, dict)]
-                    if any(chunks):
-                        entry["output"] = "\n".join(chunks)
-                    if entry["status"] in {"completed", "failed"}:
-                        post_tool(entry)
-
-        drain_task = asyncio.create_task(drain())
-        try:
-            async with self.typing():
-                result = await asyncio.to_thread(
-                    self.client.prompt, self.session_id, text,
-                    images=images or None,
-                    timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
-                )
-        except AcpError as exc:
-            # A silent turn is abandoned here, so stop it in omp too: left running, its late
-            # chunks land in the next turn's stream and the chat sees the answer twice.
-            if self.client is not None and self.client.alive:
-                with contextlib.suppress(AcpError):
-                    self.client.cancel(self.session_id)
-            # scheduled, not immediate: the sentinel must queue behind updates the reader thread
-            # has already handed to the loop, or the last of a turn is dropped
-            self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
-            await drain_task
-            await finish()  # what did arrive is still worth showing
-            self.busy = False
-            # A crash or shutdown cut keeps the row, so the next start resumes it. A deliberate
-            # stop and a silence timeout do not: the person has already been told it failed.
-            if self._user_cancel or isinstance(exc, AcpTimeout):
-                self.store.end_turn(self.key)
-            raise
-        except BaseException:
-            # a cancelled turn (gateway shutdown) never reaches finish(); do not leave the sender
-            sender_task.cancel()
-            raise
-        self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
-        await drain_task
-        await finish()
-        self.busy = False
-        self.store.touch(self.key)
-        # A cancel nobody asked for is the gateway going down (systemd signals the agent too).
-        # Keep the row so the next start resumes; /stop, /kill and /new clear it. A try/finally
-        # here would delete it on exactly the path this table exists for.
-        if result.stop_reason != "cancelled" or self._user_cancel:
-            self.store.end_turn(self.key)
-
-        usage = result.usage or {}
-        self.usage["input"] += int(usage.get("inputTokens") or 0)
-        self.usage["output"] += int(usage.get("outputTokens") or 0)
-        self.usage["cached"] += int(usage.get("cachedReadTokens") or 0)
-        self.usage["turns"] += 1
-        log.info("turn end chat=%s stop=%s tools=%s in=%s out=%s cached=%s duration=%.1fs",
-                 self.chat_id, result.stop_reason, state["tools"],
-                 usage.get("inputTokens"), usage.get("outputTokens"),
-                 usage.get("cachedReadTokens"), time.time() - started)
-        anchor = state["text_msg"] or message
-        if self.config.get("stream", "show_usage", True) and anchor is not None:
-            try:
-                await anchor.reply_text(
-                    f"{result.stop_reason} · in {usage.get('inputTokens', '?')} "
-                    f"out {usage.get('outputTokens', '?')} cached {usage.get('cachedReadTokens', 0)}"
-                )
-            except TelegramError:
-                pass
-        return result.text
-
-    async def send_html(self, body: str):
-        return await send_html(self.app.bot, self.chat_id, body)
-
-    async def send_md(self, text: str):
-        return await send_md(self.app.bot, self.chat_id, text)
-
-    @contextlib.asynccontextmanager
-    async def typing(self):
-        """Keep the Telegram 'typing…' indicator alive for the duration of a turn."""
-        stop = asyncio.Event()
-
-        async def loop() -> None:
-            while not stop.is_set():
-                try:
-                    await self.app.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
-                except TelegramError:
-                    pass
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=4.0)
-                except TimeoutError:
-                    continue
-
-        task = asyncio.create_task(loop())
-        try:
-            yield
-        finally:
-            stop.set()
-            task.cancel()
-
-    async def cancel(self) -> bool:
-        if self.client is None or not self.session_id:
-            return False
-        self.forget_turn()
-        self.client.cancel(self.session_id)
-        return True
-
-    async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> tuple[str, str]:
-        """Hand a message to the running turn: (outcome, reason). `promptRequired` = idle."""
-        if self.client is None or not self.client.alive or not self.session_id:
-            return "promptRequired", ""
-        try:
-            outcome, reason = await asyncio.to_thread(
-                self.client.steer, self.session_id, text, images,
-                float(self.config.get("acp", "steer_timeout", 15.0)))
-        except AcpError as exc:
-            log.warning("steer failed chat=%s: %s", self.chat_id, exc)
-            return "failed", str(exc)
-        log.info("steer chat=%s outcome=%s chars=%s reason=%s", self.chat_id, outcome, len(text),
-                 reason or "-")
-        return outcome, reason
-
-    def forget_turn(self) -> None:
-        """The person ended this turn on purpose; a restart must not bring it back."""
-        self._user_cancel = True
-        self.store.end_turn(self.key)
-
-    async def respawn(self, yolo: bool) -> None:
-        self.yolo = yolo
-        self.store.set_pref(self.key, "yolo", "on" if yolo else "off")
-        self.forget_turn()
-        if self.client is not None:
-            await asyncio.to_thread(self.client.close, self.session_id)
-        self.client = None
-        await self.ensure(yolo=yolo)
-
-    async def stop_process(self) -> None:
-        """Close the agent process; the chat keeps its store and comes back on the next message."""
-        if self.client is not None:
-            await asyncio.to_thread(self.client.close, self.session_id)
-            self.client = None
-
-    async def shutdown(self) -> None:
-        await self.stop_process()
-        self.store.close()
-
-    async def new_session(self) -> str:
-        self.forget_turn()
-        if self.client is not None and self.client.alive and self.session_id:
-            await asyncio.to_thread(self.client.close, self.session_id)
-        self.client = None
-        self.store.clear(self.key)
-        await self.ensure()
-        return self.session_id
-
-    async def load(self, session_id: str) -> None:
-        if self.client is not None:
-            await asyncio.to_thread(self.client.close, self.session_id)
-        self.client = None
-        self.store.put(self.key, session_id, self.cwd)
-        await self.ensure()
-
-    async def fork(self) -> str:
-        await self.ensure()
-        result = await asyncio.to_thread(self.client.request, "session/fork",
-                                          {"sessionId": self.session_id, "cwd": self.cwd})
-        new_id = str(result.get("sessionId") or "")
-        if new_id:
-            self.session_id = new_id
-            self.store.put(self.key, new_id, self.cwd)
-        return new_id
 
 
 class Transport:
@@ -1011,7 +160,7 @@ class Transport:
         self.credential_db = str(config.get("agent", "credential_db", "~/.omp/agent/agent.db"))
         self.token = str(config.get("telegram", "bot_token", "") or "")
         self.allowed = {int(str(u)) for u in (config.get("telegram", "allowed_users") or []) if str(u).strip()}
-        self.agents: dict[int, ChatAgent] = {}
+        self.agents: dict[int, engine.ChatAgent] = {}
         self.queues: dict[int, asyncio.Queue[tuple[str, Any]]] = {}
         self.workers: dict[int, asyncio.Task] = {}
         # set on SIGTERM: the worker stops taking turns, so the interrupted one stays on record
@@ -1024,10 +173,10 @@ class Transport:
     async def send_md(self, chat_id: int, text: str):
         return await send_md(self.app.bot, chat_id, text)
 
-    def agent_for(self, chat_id: int) -> ChatAgent:
+    def agent_for(self, chat_id: int) -> engine.ChatAgent:
         agent = self.agents.get(chat_id)
         if agent is None:
-            agent = ChatAgent(self.config, chat_id, f"tg:{chat_id}", self.app)
+            agent = chat_agent(self.config, chat_id, f"tg:{chat_id}", self.app)
             self.agents[chat_id] = agent
         return agent
 
@@ -1108,7 +257,7 @@ class Transport:
                 if kind == "prompt":
                     message = payload
                     try:
-                        await agent.ask(message.text, message=message,
+                        await agent.ask(message.text,
                                         images=getattr(payload, "images", None),
                                         resumes=int(getattr(payload, "resumes", 0)),
                                         record=getattr(payload, "original", None))
@@ -1185,7 +334,7 @@ class Transport:
             except TelegramError as reply_exc:
                 log.warning("react fallback reply failed: %s", reply_exc)
 
-    def _agent_gate(self, agent: ChatAgent) -> str:
+    def _agent_gate(self, agent: engine.ChatAgent) -> str:
         """What the agent itself was started with, which is what decides whether anything asks."""
         if getattr(agent, "yolo", False):
             return "yolo · no tool asks"
@@ -1197,7 +346,7 @@ class Transport:
         timeout = float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
         return f"{mode} · asks · {timeout:.0f}s"
 
-    def session_card(self, agent: ChatAgent, title: str, note: str = "") -> str:
+    def session_card(self, agent: engine.ChatAgent, title: str, note: str = "") -> str:
         options = getattr(agent, "options", {}) or {}
         rows = [
             ("session", agent.session_id[:8]),
@@ -1692,15 +841,15 @@ class Transport:
     PAGE_SIZE = 8          # single-column configs (mode, thinking)
     PAGE_SIZE_TWO_COL = 10  # two columns x five rows
 
-    def _values(self, agent: ChatAgent, config_id: str) -> list[str]:
+    def _values(self, agent: engine.ChatAgent, config_id: str) -> list[str]:
         option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
         return [str(o.get("value")) for o in (option.get("options") or [])]
 
-    def _current(self, agent: ChatAgent, config_id: str) -> str:
+    def _current(self, agent: engine.ChatAgent, config_id: str) -> str:
         option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
         return str(option.get("currentValue") or "?")
 
-    def _providers(self, agent: ChatAgent, config_id: str) -> list[tuple[str, list[int]]]:
+    def _providers(self, agent: engine.ChatAgent, config_id: str) -> list[tuple[str, list[int]]]:
         """Group option values by the provider prefix of their id."""
         values = self._values(agent, config_id)
         grouped: dict[str, list[int]] = {}
@@ -1718,7 +867,7 @@ class Transport:
 
     async def _show_config(
         self,
-        agent: ChatAgent,
+        agent: engine.ChatAgent,
         chat_id: int,
         config_id: str,
         screen: str = "l",
@@ -1799,7 +948,7 @@ class Transport:
                 pass
         await self.app.bot.send_message(chat_id, text, reply_markup=markup)
 
-    async def _apply_pick(self, agent: ChatAgent, config_id: str, value: str) -> tuple[str, str]:
+    async def _apply_pick(self, agent: engine.ChatAgent, config_id: str, value: str) -> tuple[str, str]:
         """Set a config option; returns (previous, current) so the caller can render once."""
         previous = self._current(agent, config_id)
         result = await asyncio.to_thread(agent.client.set_config_option, agent.session_id, config_id, value)
@@ -2151,7 +1300,7 @@ class Transport:
             return await query.answer()
         try:
             token, index = data.rsplit(":", 1)
-            label = await agent.handle_permission_callback(token, int(index))
+            label = await agent.answer_permission(token, int(index))
             await query.answer(label or "expired")
         except (ValueError, AttributeError):
             await query.answer("bad callback")
@@ -2357,6 +1506,148 @@ class Transport:
             log.warning("shutdown notice send failed: %s", exc)
 
 
+TELEGRAM_LIMIT = 4000  # leave headroom under the 4096 hard cap
+
+
+def _retry_window(exc: Exception) -> float:
+    """PTB gives seconds today and a timedelta from v23; both mean the same wait."""
+    value = getattr(exc, "retry_after", 5)
+    if hasattr(value, "total_seconds"):
+        return float(value.total_seconds())
+    return float(value or 5)
+
+
+class TelegramSurface(engine.Surface):
+    """The engine's output side for one Telegram chat: posting, cards, buttons, files."""
+
+    def __init__(self, app: Application, chat_id: int) -> None:
+        self.app = app
+        self.chat_id = chat_id
+        self.label = str(chat_id)
+        self.limit = TELEGRAM_LIMIT
+
+    async def post(self, body: str, *, kind: str):
+        try:
+            if kind == "text":
+                return await send_md(self.app.bot, self.chat_id, body)
+            return await send_html(self.app.bot, self.chat_id, body)
+        except RetryAfter as exc:
+            raise FloodWait(_retry_window(exc)) from exc
+
+    def trace(self, t: ToolTrace) -> str:
+        return tool_block(t.kind, t.title, t.command, t.output, t.status, t.subagent,
+                          t.steps, t.brief)
+
+    def reasoning(self, text: str) -> str:
+        # prose, so not a code block: monospace reads badly on a phone and a <pre> cannot
+        # collapse. An expandable quote stays one line until tapped.
+        return f"🧠 <i>reasoning</i>\n<blockquote expandable>{esc(text)}</blockquote>"
+
+    def dropped(self, count: int) -> str:
+        return f"<i>… {count} tool call(s) not shown (Telegram flood control)</i>"
+
+    def join(self, blocks: list[str]) -> str:
+        return "\n\n".join(blocks)
+
+    @contextlib.asynccontextmanager
+    async def typing(self):
+        """Keep the Telegram 'typing…' indicator alive for the duration of a turn."""
+        stop = asyncio.Event()
+
+        async def loop() -> None:
+            while not stop.is_set():
+                try:
+                    await self.app.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
+                except TelegramError:
+                    pass
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=4.0)
+                except TimeoutError:
+                    continue
+
+        task = asyncio.create_task(loop())
+        try:
+            yield
+        finally:
+            stop.set()
+            task.cancel()
+
+    async def offer_options(self, options: list[str]) -> None:
+        """Numbered buttons plus a free-text escape hatch.
+
+        Telegram cuts an inline button's label to one line on the phone, so a sentence-long
+        option arrived as "Teks per segmen + 1 pesan…". The full text goes in the message body,
+        numbered, and each button carries its number so the choice is never ambiguous.
+        """
+        rows = [[InlineKeyboardButton(f"{index + 1}. {option}"[:64], callback_data=f"qo:{index}")]
+                for index, option in enumerate(options)]
+        rows.append([InlineKeyboardButton("✏️ Other answer", callback_data="qo:other")])
+        listed = "\n".join(f"<b>{index + 1}.</b> {esc(option)}"
+                           for index, option in enumerate(options))
+        await self.app.bot.send_message(
+            self.chat_id,
+            card("❓ pick an answer", "tap one, or choose Other and just type it", [],
+                 "the chosen text is sent as your next message") + f"\n\n{listed}",
+            reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
+        )
+
+    async def ask_permission(self, token: str, kind: str, detail: str,
+                             labels: list[str]):
+        rows = [[InlineKeyboardButton(label, callback_data=f"{token}:{index}")]
+                for index, label in enumerate(labels)]
+        head = card("🛡️ approval needed", kind, [],
+                    "pick one · the run is paused until you answer")
+        body = head + (f"\n<pre>{esc(detail[:1200])}</pre>" if detail else "")
+        return await self.app.bot.send_message(self.chat_id, body,
+                                               reply_markup=InlineKeyboardMarkup(rows),
+                                               parse_mode=ParseMode.HTML)
+
+    async def settle_permission(self, handle, kind: str, detail: str, outcome: str,
+                                expired: bool) -> None:
+        if expired:
+            body = card("🛡️ approval", f"expired · {now_wib()}", [("tool", kind)],
+                        "no answer in time, the tool call was denied")
+        else:
+            body = card("🛡️ approval", f"{outcome} · {now_wib()}", [("tool", kind)],
+                        "decision recorded")
+        if detail:
+            body += f"\n<pre>{esc(detail[:800])}</pre>"
+        try:
+            await handle.edit_text(body, parse_mode=ParseMode.HTML)
+        except BadRequest as exc:
+            if expired:
+                pass
+            else:
+                log.debug("approval edit failed: %s", exc)
+
+    async def send_file(self, path, as_photo: bool) -> None:
+        with path.open("rb") as handle:
+            if as_photo:
+                await self.app.bot.send_photo(self.chat_id, photo=handle)
+            else:
+                await self.app.bot.send_document(self.chat_id, document=handle)
+
+    async def offer_schedule(self, name: str, expression: str, gateway: str,
+                             prompt: str) -> None:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Create schedule", callback_data=f"sched:new:{name}"),
+            InlineKeyboardButton("Cancel", callback_data=f"sched:cancel:{name}"),
+        ]])
+        body = card("schedule", expression, [
+            ("delivers to", gateway),
+            ("prompt", prompt[:200]),
+        ], "nothing runs until you press Create")
+        await self.app.bot.send_message(self.chat_id, body, parse_mode=ParseMode.HTML,
+                                        reply_markup=keyboard)
+
+    async def notice(self, text: str):
+        return await send_md(self.app.bot, self.chat_id, text)
+
+
+def chat_agent(config: Config, chat_id: int, key: str, app: Application) -> engine.ChatAgent:
+    return engine.ChatAgent(config, key, TelegramSurface(app, chat_id))
+
+
 async def app_send(app: Application, chat_id: int, text: str) -> None:
     await app.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
 
@@ -2427,3 +1718,4 @@ def serve(config: Config) -> int:
               "     one: `ompwire gateway list` shows what is running.")
         return 2
     return 0
+

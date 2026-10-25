@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import types
 
-from ompwire import telegram
+from ompwire import engine, telegram
 from ompwire.acp import PromptResult
 from ompwire.config import load_config
 from ompwire.store import SessionStore
@@ -56,7 +56,7 @@ def _config(tmp_path):
 
 
 def _agent(config, client):
-    agent = telegram.ChatAgent(config, chat_id=7, key="tg:7", app=types.SimpleNamespace(bot=Bot()))
+    agent = telegram.chat_agent(config, 7, "tg:7", types.SimpleNamespace(bot=Bot()))
     agent.client = client
     agent.session_id = "s"
     return agent
@@ -111,7 +111,7 @@ def test_a_resume_records_the_original_words_not_the_wrapper(tmp_path):
 
     async def go():
         await _agent(config, Client(stop_reason="cancelled")).ask(
-            telegram.RESUME_PROMPT.format(prompt="fix it"), resumes=1, record="fix it")
+            engine.RESUME_PROMPT.format(prompt="fix it"), resumes=1, record="fix it")
 
     asyncio.run(go())
     assert _pending(config) == [("tg:7", "fix it", 1)]

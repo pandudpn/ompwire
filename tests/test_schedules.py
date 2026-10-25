@@ -222,3 +222,32 @@ def test_a_stepped_hour_range_is_refused_with_direction_not_a_traceback():
     with pytest.raises(schedules.ScheduleError) as excinfo:
         schedules.to_on_calendar("0 9-17/2 * * *")
     assert "--on-calendar" in str(excinfo.value)
+
+
+def test_a_scheduled_result_is_delivered_as_a_card(monkeypatch):
+    """The delivery path only runs at the scheduled hour; a broken card should fail here first."""
+    import asyncio
+    import types
+
+    from ompwire import schedule_run
+
+    sent: list[tuple[int, str]] = []
+
+    class FakeBot:
+        def __init__(self, _token):
+            pass
+
+        async def send_message(self, chat_id, text, **_kw):
+            sent.append((chat_id, text))
+
+    monkeypatch.setattr("telegram.Bot", FakeBot)
+    gateway = types.SimpleNamespace(allowed=[42], name="telegram")
+    monkeypatch.setattr(schedule_run.gateways, "get", lambda _name: gateway)
+    monkeypatch.setattr(schedule_run.gateways, "token", lambda _gw: "t")
+    item = schedules.Schedule(name="pagi", cron="0 7 * * *", prompt="ringkas", gateway="telegram")
+
+    count = asyncio.run(schedule_run._deliver(item, "**selesai**", [], [], {"ok": True}))
+    assert count == 1
+    chat, body = sent[0]
+    assert chat == 42
+    assert "pagi" in body and "<b>selesai</b>" in body

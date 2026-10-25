@@ -150,7 +150,7 @@ def test_a_leftover_enabled_key_cannot_turn_attachments_off(tmp_path):
     import types
 
     from ompwire.config import load_config
-    from ompwire.telegram import ChatAgent
+    from ompwire.telegram import chat_agent
 
     work = tmp_path / "work"
     work.mkdir()
@@ -175,7 +175,7 @@ def test_a_leftover_enabled_key_cannot_turn_attachments_off(tmp_path):
             sent.append("message")
 
     async def run():
-        agent = ChatAgent(config, chat_id=1, key="k", app=types.SimpleNamespace(bot=Bot()))
+        agent = chat_agent(config, 1, "k", types.SimpleNamespace(bot=Bot()))
         await agent.deliver_files(f"<<file: {chart}>>")
 
     asyncio.run(run())

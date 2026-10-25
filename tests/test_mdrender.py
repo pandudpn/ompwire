@@ -77,8 +77,8 @@ def test_a_quote_in_a_url_cannot_break_out_of_the_href():
 
 
 def test_strip_html_unwraps_a_rendered_tool_block():
-    from ompwire.format import tool_block
     from ompwire.mdrender import strip_html
+    from ompwire.tg_html import tool_block
 
     body = tool_block("execute", "", command="ls | head -1", output="a<b")
     plain = strip_html(body)
@@ -158,7 +158,8 @@ def test_options_card_has_a_free_text_button():
     from types import SimpleNamespace
 
     from ompwire.config import load_config
-    from ompwire.telegram import ChatAgent
+    from ompwire.engine import ChatAgent
+    from ompwire.telegram import TelegramSurface
 
     sent = {}
 
@@ -168,8 +169,9 @@ def test_options_card_has_a_free_text_button():
 
     async def main():
         # ChatAgent binds the loop at construction time, so build it inside one
-        agent = ChatAgent(load_config(env={}), 5, "tg:5", SimpleNamespace(bot=SimpleNamespace(
-            send_message=fake_send_message)))
+        surface = TelegramSurface(SimpleNamespace(bot=SimpleNamespace(
+            send_message=fake_send_message)), 5)
+        agent = ChatAgent(load_config(env={}), "tg:5", surface)
         await agent.offer_options(["postgres", "mysql"])
         return agent
 
@@ -186,7 +188,8 @@ def test_a_long_option_is_shown_whole_in_the_message():
     from types import SimpleNamespace
 
     from ompwire.config import load_config
-    from ompwire.telegram import ChatAgent
+    from ompwire.engine import ChatAgent
+    from ompwire.telegram import TelegramSurface
 
     long = "Teks per segmen + 1 pesan per tool call, dengan timestamp asli untuk setiap langkah"
     sent = {}
@@ -196,8 +199,9 @@ def test_a_long_option_is_shown_whole_in_the_message():
         return SimpleNamespace(chat_id=chat_id)
 
     async def main():
-        agent = ChatAgent(load_config(env={}), 5, "tg:5", SimpleNamespace(bot=SimpleNamespace(
-            send_message=fake_send_message)))
+        surface = TelegramSurface(SimpleNamespace(bot=SimpleNamespace(
+            send_message=fake_send_message)), 5)
+        agent = ChatAgent(load_config(env={}), "tg:5", surface)
         await agent.offer_options([long, "pendek"])
 
     asyncio.run(main())

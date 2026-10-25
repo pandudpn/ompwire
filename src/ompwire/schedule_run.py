@@ -24,8 +24,9 @@ from typing import Any
 from . import attachments, gateways, schedules
 from .acp import AcpClient, AcpError
 from .config import PROTOCOL_HINT, load_config
-from .format import now_wib, run_card, run_status
+from .format import now_wib
 from .mdrender import to_html
+from .tg_html import run_card, run_status
 
 log = logging.getLogger("ompwire.schedule")
 

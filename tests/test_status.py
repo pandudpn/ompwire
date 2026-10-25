@@ -170,18 +170,18 @@ class TestMcpRow:
     """The banner said "mcp none" while the hub supplied every server."""
 
     def test_a_short_list_is_named_in_full(self):
-        from ompwire.telegram import mcp_label
+        from ompwire.engine import mcp_label
 
         assert mcp_label(["obsidian", "context7"]) == "obsidian, context7"
 
     def test_a_long_list_is_cut_with_a_count(self):
-        from ompwire.telegram import mcp_label
+        from ompwire.engine import mcp_label
 
         label = mcp_label([f"s{i}" for i in range(9)])
         assert label.endswith(" +3")
         assert label.count(",") == 5
 
     def test_an_empty_list_says_none(self):
-        from ompwire.telegram import mcp_label
+        from ompwire.engine import mcp_label
 
         assert mcp_label([]) == "none"

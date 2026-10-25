@@ -57,10 +57,16 @@ A gateway is one bot on one platform with its own credential and its own systemd
 seams are already there:
 
 1. `gateways.KINDS` and `gateways.IMPLEMENTED` in `gateways.py`.
-2. The transport module itself, following `telegram.py`: long polling or webhook in, one
-   `ChatSession` per conversation, each step posted as a new message, approvals as interactive replies.
-3. A credential variable per gateway; `gateways.Gateway.token_var()` derives it.
-4. Tests next to the existing ones. No network in tests.
+2. A `Surface` implementation in `engine.py`'s terms: `post`, `trace`/`reasoning`/`dropped`/`join`
+   renderers, a `typing` context, and the button surfaces (`offer_options`, `ask_permission`,
+   `offer_schedule`, `send_file`, `notice`). `telegram.TelegramSurface` is the reference; a rate
+   limit raises `engine.FloodWait`, any other send failure returns None.
+3. The transport module itself, following `telegram.py`: polling or webhook in, one
+   `engine.ChatAgent` per conversation via a `chat_agent(config, chat_id, key, app)` factory,
+   approvals and option answers routed back through the agent's `answer_permission` and
+   `pending_options`.
+4. A credential variable per gateway; `gateways.Gateway.token_var()` derives it.
+5. Tests next to the existing ones. No network in tests.
 
 A transport that cannot be started is worse than no transport: `gateway add` refuses anything
 that is not in `IMPLEMENTED`.

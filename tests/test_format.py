@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from ompwire.format import (
+from ompwire.format import uptime
+from ompwire.tg_html import (
     TOOL_LINE_WIDTH,
     card,
     change,
@@ -10,7 +11,6 @@ from ompwire.format import (
     grid,
     help_sections,
     tool_block,
-    uptime,
 )
 
 

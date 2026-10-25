@@ -19,7 +19,8 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 
 | Layer | Owns | When it fails |
 | --- | --- | --- |
-| Transport (`telegram.py`) | routing, posting each step, approvals, rendering, per-chat prefs | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
+| Engine (`engine.py`) | the turn itself: ACP session lifecycle, update drain, pacing, permissions, schedules, files. Speaks `Surface`, never a platform | a turn fails: recorded, the next gateway start resumes it |
+| Transport (`telegram.py`) | Telegram routing and buttons: handlers, `TelegramSurface` (posting, cards, approvals), pickers, per-chat prefs | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
 | `sessions.db` (`store.py`) | chat key to session id, prefs, approval override | unreadable: a new agent session, the chat key is kept |
 | ACP client (`acp.py`) | stdio framing, request ids, timeouts | the subprocess dies mid-turn: respawn, then `session/load` on the same id |
 | Agent (`omp`) | loop, tools, MCP, compaction, skills, memory, prompt | provider or tool error: reported to the chat as the agent's own text |
@@ -31,7 +32,8 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 
 | File | Lines | What it is |
 | --- | --- | --- |
-| `telegram.py` | ~1850 | the Telegram transport: handlers, streaming, approvals, pickers, rendering |
+| `engine.py` | ~870 | the platform-neutral agent engine: ChatAgent, the turn renderer, the `Surface` contract, `ToolTrace`, `FloodWait` |
+| `telegram.py` | ~1720 | the Telegram transport: handlers, pickers, `TelegramSurface`, buttons, banners |
 | `__main__.py` | ~650 | the CLI: one function per command, `argparse` wiring |
 | `setup.py` | ~580 | the wizard, `.env` writing token normalisation, `bot_identity` verification |
 | `update.py` | ~370 | install mode detection, update, restart of running gateways |
@@ -47,7 +49,8 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `mcp_hub.py` | ~150 | `servers.yaml` to `session/new` `mcpServers` |
 | `login.py` | ~135 | provider login on a pty, driven from chat |
 | `store.py` | ~127 | sqlite: chat key to session id |
-| `format.py` | ~118 | message cards, banners, usage lines |
+| `format.py` | ~44 | neutral helpers: `uptime`, WIB clock, the tool-trace clip |
+| `tg_html.py` | ~112 | Telegram HTML: cards, grids, tool blocks, help and run cards |
 | `lock.py` | ~100 | one flock per gateway |
 | `logs.py` | ~62 | redaction filter |
 | `questions.py` | ~40 | the `<<options: a \| b>>` marker turned into buttons |
