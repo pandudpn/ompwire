@@ -49,11 +49,12 @@ def tokens(count: object) -> str:
         return "?"
     if abs(n) < 1_000:
         return str(n)
-    if abs(n) < 1_000_000:
-        value, unit = n / 1_000, "k"
-    else:
-        value, unit = n / 1_000_000, "M"
+    value, unit = n / 1_000, "k"
     digits = 2 if abs(value) < 10 else 1
+    # 999,950 rounds to 1000.0 on the k scale, so the unit is chosen after rounding.
+    if abs(round(value, digits)) >= 1_000:
+        value, unit = n / 1_000_000, "M"
+        digits = 2 if abs(value) < 10 else 1
     text = f"{value:.{digits}f}".rstrip("0").rstrip(".")
     return f"{text}{unit}"
 

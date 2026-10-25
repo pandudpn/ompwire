@@ -146,6 +146,13 @@ def test_token_counts_read_like_a_person_wrote_them():
         "Compaction complete. Tokens: 94.6k → 58.6k (saved 36.1k)."
 
 
+def test_tokens_moves_to_m_when_the_rounded_value_reaches_1000():
+    from ompwire.format import tokens
+
+    assert [tokens(n) for n in (999_950, 999_999, 1_000_000, -999_950, -999_999)] == \
+        ["1M", "1M", "1M", "-1M", "-1M"]
+
+
 def test_context_line_formats_k_m_and_percent():
     assert engine.context_line(124_000, 1_000_000) == "124k / 1M (12%)"
     assert engine.context_line(0, 0) == "unknown"
