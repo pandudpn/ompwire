@@ -72,5 +72,6 @@ OMP's `config.yml`. A test run once disabled a real unit, and a subagent once wi
   broke. Release notes are generated from these commits.
 - The maintainer commits straight to `main`; there is no dev branch. Contributors work on a
   branch, as CONTRIBUTING.md describes.
-- Docs change with the code they describe: behaviour in README.md, a boundary or a wire fact in
+- Docs change with the code they describe: behaviour in docs/guide.md (and the README when it
+  changes what ompwire offers), a boundary or a wire fact in
   ARCHITECTURE.md, anything that widens what the bot can reach in SECURITY.md.

@@ -120,5 +120,7 @@ version bump sitting on `main` with no release behind it.
 
 ## Questions
 
-Open a discussion or an issue. For anything that looks like a security problem, read
-[SECURITY.md](SECURITY.md) first and do not open a public issue.
+Open an issue: the templates ask for what a report needs. Small fixes can go straight to a pull
+request; for anything larger, open an issue first so the shape is agreed before the code. For
+anything that looks like a security problem, read [SECURITY.md](SECURITY.md) first and do not
+open a public issue.

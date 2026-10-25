@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Documentation
-    url: https://github.com/pandudpn/ompwire#readme
-    about: Install, quick start, gateways, chat commands, configuration, troubleshooting.
+  - name: Guide
+    url: https://github.com/pandudpn/ompwire/blob/main/docs/guide.md
+    about: Gateways, chat commands, approvals, schedules, configuration, troubleshooting.
   - name: Architecture
     url: https://github.com/pandudpn/ompwire/blob/main/ARCHITECTURE.md
     about: Why the transport is this small, and which layer owns what.

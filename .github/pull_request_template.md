@@ -19,7 +19,7 @@ Not "tests pass". Which command, and what it printed:
 ## Checklist
 
 - [ ] `make lint` and `make test` are clean
-- [ ] Docs follow the change, as `RULES.md` describes (README, ARCHITECTURE, SECURITY)
+- [ ] Docs follow the change, as `RULES.md` describes (guide, README, ARCHITECTURE, SECURITY)
 - [ ] No token, chat id or `.env` content in the diff, the tests or the screenshots
 - [ ] New branch, no merge commits from `main` inside it
 - [ ] One concern per PR; unrelated cleanup goes to its own PR
