@@ -30,6 +30,17 @@ def now_wib() -> str:
     return datetime.now(WIB).strftime("%H:%M:%S WIB")
 
 
+def wib_time(iso: str) -> str:
+    """An ISO UTC timestamp from omp's transcript as a WIB clock time; today drops the date."""
+    try:
+        moment = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(WIB)
+    except ValueError:
+        return "?"
+    if moment.date() == datetime.now(WIB).date():
+        return moment.strftime("%H:%M WIB")
+    return moment.strftime("%d %b %H:%M WIB")
+
+
 def tokens(count: object) -> str:
     """A token count a person can read at a glance: 940, 58.6k, 1.05M."""
     try:

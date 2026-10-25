@@ -23,6 +23,13 @@ SESSIONS_DIR = Path("~/.omp/agent/sessions")
 COLLAPSE_RATIO = 0.05
 
 
+@dataclass(frozen=True)
+class Compaction:
+    at: str  # ISO timestamp, UTC
+    before: int
+    after: int
+
+
 @dataclass
 class SessionUsage:
     calls: int = 0
@@ -31,6 +38,8 @@ class SessionUsage:
     cache_read: int = 0
     cache_write: int = 0
     context: int = 0  # tokens the last trustworthy call carried
+    # every compaction omp logged, oldest first
+    compactions: list[Compaction] = field(default_factory=list)
     _path: Path | None = field(default=None, repr=False)
     _offset: int = field(default=0, repr=False)
     _compacted: bool = field(default=False, repr=False)
@@ -38,6 +47,10 @@ class SessionUsage:
     def _add(self, entry: dict) -> None:
         if entry.get("type") == "compaction":
             self._compacted = True
+            self.compactions.append(Compaction(
+                at=str(entry.get("timestamp") or ""),
+                before=int(entry.get("tokensBefore") or 0),
+                after=int(entry.get("tokensAfter") or 0)))
             return
         message = entry.get("message") if entry.get("type") == "message" else None
         if not isinstance(message, dict) or message.get("role") != "assistant":

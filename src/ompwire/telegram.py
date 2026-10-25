@@ -58,7 +58,7 @@ from .engine import (
     mcp_label,
     resolve_mcp_servers,
 )
-from .format import now_wib, tokens
+from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
 from .login import LoginSession
 from .mdrender import split_blocks, strip_html, to_html, to_plain
@@ -482,7 +482,7 @@ class Transport:
             ("yolo", "on" if agent.yolo else "off"),
             ("trace", "verbose" if agent.verbose else "quiet"),
             ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
-            ("context", self._context_row(agent)),
+            *self._context_rows(agent, self._session_usage(agent)),
             ("clock", now_wib()),
         ]
         await update.effective_message.reply_text(
@@ -494,7 +494,7 @@ class Transport:
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
-        seen = omp_sessions.usage(agent.session_id) if agent.session_id else None
+        seen = self._session_usage(agent)
         if seen is None:
             rows = [("tokens", "unknown (no transcript for this session yet)")]
         else:
@@ -504,25 +504,45 @@ class Transport:
                 ("cache", f"{tokens(seen.cache_read)} read · {tokens(seen.cache_write)} written"),
                 ("calls", f"{seen.calls:,}"),
             ]
-        rows.append(("context", self._context_row(agent, seen)))
+        rows += self._context_rows(agent, seen)
         await update.effective_message.reply_text(
             card("🧮 usage", f"session {agent.session_id[:8] or '-'}", rows),
             parse_mode=ParseMode.HTML,
         )
 
     @staticmethod
-    def _context_row(agent: engine.ChatAgent, seen: omp_sessions.SessionUsage | None = None) -> str:
+    def _session_usage(agent: engine.ChatAgent) -> omp_sessions.SessionUsage | None:
+        if not agent.session_id:
+            return None
+        try:
+            return omp_sessions.usage(agent.session_id)
+        except OSError:
+            return None
+
+    @staticmethod
+    def _context_rows(agent: engine.ChatAgent,
+                      seen: omp_sessions.SessionUsage | None = None) -> list[tuple[str, str]]:
+        """Where the context is, where omp will compact it, and when it last did."""
         used, size = agent.context["used"], agent.context["size"]
         if not used and seen is not None:
             used = seen.context
-        if size <= 0:
-            return tokens(used) if used else "unknown"
-        line = engine.context_line(used, size)
         compaction = omp_config.read_compaction()
         threshold = compaction.get("thresholdPercent")
+        if size > 0:
+            rows = [("context", engine.context_line(used, size))]
+        else:
+            rows = [("context", f"{tokens(used)} / limit not reported yet" if used else "unknown")]
         if compaction.get("enabled") is False:
-            return f"{line} · compaction off"
-        return f"{line} · omp compacts at {threshold}%" if isinstance(threshold, int) else line
+            rows.append(("compacts", "off"))
+        elif isinstance(threshold, int):
+            at = f" ({tokens(size * threshold // 100)})" if size > 0 else ""
+            rows.append(("compacts", f"at {threshold}%{at}"))
+        if seen is not None and seen.compactions:
+            last = seen.compactions[-1]
+            times = f" · {len(seen.compactions)}× this session" if len(seen.compactions) > 1 else ""
+            rows.append(("last", f"{wib_time(last.at)} · {tokens(last.before)} → "
+                                 f"{tokens(last.after)}{times}"))
+        return rows
 
     async def cmd_compact(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Run omp's own /compact. While busy it queues: steering a compaction makes no sense."""

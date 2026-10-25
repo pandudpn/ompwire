@@ -28,7 +28,7 @@ from .acp import Update as AcpUpdate
 from .attachments import extract as extract_files
 from .attachments import hide_partial as hide_file_partial
 from .config import Config, approval_policy
-from .format import humanize_token_report, tokens
+from .format import humanize_token_report, tokens, wib_time
 from .mcp_hub import hub_servers, normalize
 from .mcp_hub import merge_entry as merge_mcp_entry
 from .mdrender import strip_agent_noise
@@ -295,14 +295,15 @@ class ChatAgent:
         self.info: dict[str, Any] = {}
         self.agent_version = ""
         self.advertised_commands: list[str] = []
-        # context window from usage_update; zeros until omp reports it
-        self.context = {"used": 0, "size": 0}
+        # context window from usage_update; the size is remembered per chat, because after a
+        # restart /usage is asked before omp has sent its first report
+        self.context = {"used": 0, "size": int(self.store.prefs(key).get("context_size") or 0)}
+        # compactions already in the transcript; a higher count after a turn is a new one
+        self._compactions_seen: int | None = None
         # warning fires once per crossing and re-arms when the context drops back below it
         self._context_warned = False
-        # the previous usage_update, for the compaction drop notice; None = unknown
-        self._context_prev_used: int | None = None
-        # a /compact prompt reports its own before/after; the drop notice would double it
-        self._suppress_drop_notice = False
+        # a /compact prompt reports its own before/after; the notice would repeat it
+        self._compact_turn = False
         # last context report that looked real; outlives a process restart, not a session change
         self._context_good: int | None = None
         self._updates: asyncio.Queue[AcpUpdate | None] = asyncio.Queue()
@@ -337,9 +338,6 @@ class ChatAgent:
         if self.client is not None and self.client.alive:
             return
         self.client = self._build_client(yolo=yolo)
-        # a new process (start, respawn, idle eviction) reports usage from scratch: a lower first
-        # number there is a reload, not a compaction
-        self._context_prev_used = None
         info = await asyncio.to_thread(self.client.initialize)
         agent = info.get("agentInfo") or {}
         self.agent_version = str(agent.get("version") or "")
@@ -380,15 +378,37 @@ class ChatAgent:
     def _seed_context(self) -> None:
         """The first usage_update after a restart can be an unanchored sliver; the transcript
         knows what the last real call carried, so that is the reference to hold it against."""
-        if self._context_good:
+        seen = self._transcript()
+        if seen is None:
             return
-        try:
-            seen = omp_sessions.usage(self.session_id)
-        except OSError:
-            seen = None
-        if seen is not None and seen.context:
+        if self._compactions_seen is None:
+            self._compactions_seen = len(seen.compactions)
+        if not self._context_good and seen.context:
             self._context_good = seen.context
             self.context["used"] = seen.context
+
+    def _transcript(self) -> omp_sessions.SessionUsage | None:
+        try:
+            return omp_sessions.usage(self.session_id)
+        except OSError:
+            return None
+
+    async def _report_compaction(self) -> None:
+        """omp logs each compaction in its transcript, and that log is the only place it shows:
+        no event crosses ACP, and the context number alone cannot tell a compaction apart from a
+        report omp could not anchor. A new entry since the last turn gets one notice."""
+        seen = self._transcript()
+        if seen is None:
+            return
+        known, self._compactions_seen = self._compactions_seen, len(seen.compactions)
+        if known is None or len(seen.compactions) <= known or self._compact_turn:
+            return
+        latest = seen.compactions[-1]
+        if latest.after:
+            # the size right after compaction is the honest number until the next call reports
+            self._context_good = latest.after
+        await self._context_notice(f"🗜️ omp compacted the context at {wib_time(latest.at)} · "
+                                   f"{tokens(latest.before)} → {tokens(latest.after)}")
 
     def _mcp_servers(self) -> list[dict[str, Any]]:
         return resolve_mcp_servers(self.config)
@@ -442,12 +462,14 @@ class ChatAgent:
         """Runs on the loop thread. Tracks the context window, the warning crossing and
         compaction drops; usage_update never enters the turn queue."""
         good = self._context_good
-        if good and not self._suppress_drop_notice and not plausible_context(used, good):
+        if good and not self._compact_turn and not plausible_context(used, good):
             # omp anchors the number on the last assistant message; a turn resumed after a
             # restart can anchor on ~400 tokens against a 700k context. Keep the last good value.
             log.info("context report %s ignored (last good %s) chat=%s", used, good, self.label)
             return
         self._context_good = used
+        if size > 0 and size != self.context["size"]:
+            self.store.set_pref(self.key, "context_size", str(size))
         self.context["used"], self.context["size"] = used, size
         if size > 0:
             warn_at = float(self.config.get("stream", "compaction_warn", 0.6))
@@ -458,17 +480,6 @@ class ChatAgent:
                         lambda: asyncio.create_task(self._context_notice(self._warning_text(used, size))))
             else:
                 self._context_warned = False
-        prev = self._context_prev_used
-        self._context_prev_used = used
-        if prev is None or size <= 0:
-            return
-        floor = 0.3 * size
-        fell = (prev - used) >= floor or (prev > 0 and (prev - used) >= 0.5 * prev)
-        if fell and not self._suppress_drop_notice:
-            self._loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self._context_notice(
-                    f"🗜️ context compacted · {tokens(prev)} → {tokens(used)}")))
-        self._suppress_drop_notice = False
 
     def _warning_text(self, used: int, size: int) -> str:
         from .omp_config import read_compaction
@@ -689,8 +700,7 @@ class ChatAgent:
                   resumes: int = 0, record: str | None = None) -> str:
         await self.ensure()
         self.busy = True
-        # omp's compact reply carries the before/after tokens; the drop notice would repeat it
-        self._suppress_drop_notice = text.strip() == "/compact"
+        self._compact_turn = text.strip() == "/compact"
         self._user_cancel = False
         self.last_used = time.time()
         started = time.time()
@@ -972,6 +982,8 @@ class ChatAgent:
         await drain_task
         await finish()
         self.busy = False
+        await self._report_compaction()
+        self._compact_turn = False
         self.store.touch(self.key)
         # A cancel nobody asked for is the gateway going down (systemd signals the agent too).
         # Keep the row so the next start resumes; /stop, /kill and /new clear it. A try/finally
@@ -1044,7 +1056,7 @@ class ChatAgent:
     async def new_session(self) -> str:
         self.forget_turn()
         # the old context numbers belong to the old session; the next usage_update re-reads them
-        self._context_prev_used = None
+        self._compactions_seen = None
         self._context_good = None
         self._context_warned = False
         if self.client is not None and self.client.alive and self.session_id:
@@ -1058,7 +1070,7 @@ class ChatAgent:
         if self.client is not None:
             await asyncio.to_thread(self.client.close, self.session_id)
         self.client = None
-        self._context_prev_used = None
+        self._compactions_seen = None
         self._context_good = None
         self._context_warned = False
         self.store.put(self.key, session_id, self.cwd)
@@ -1066,7 +1078,7 @@ class ChatAgent:
 
     async def fork(self) -> str:
         await self.ensure()
-        self._context_prev_used = None
+        self._compactions_seen = None
         self._context_warned = False
         result = await asyncio.to_thread(self.client.request, "session/fork",
                                           {"sessionId": self.session_id, "cwd": self.cwd})

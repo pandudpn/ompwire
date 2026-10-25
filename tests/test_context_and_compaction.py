@@ -182,58 +182,6 @@ def test_no_warning_before_size_is_known(tmp_path):
     assert not agent.surface.app.bot.messages
 
 
-def test_no_drop_notice_on_the_first_update_or_after_new_session(tmp_path):
-    async def go():
-        agent = _make_agent(_config(tmp_path), [])()
-        agent._on_usage(10_000, 1_000_000)  # first update: nothing to compare, no notice
-        await asyncio.sleep(0.05)
-        assert not agent.surface.app.bot.messages
-        await agent.new_session()
-        agent._on_usage(500_000, 1_000_000)  # new session: previous is unknown again
-        await asyncio.sleep(0.05)
-        assert not agent.surface.app.bot.messages
-        return agent
-
-    agent = asyncio.run(go())
-    assert not agent.surface.app.bot.messages
-
-
-def test_drop_notice_fires_on_a_real_drop(tmp_path):
-    async def go():
-        agent = _make_agent(_config(tmp_path), [])()
-        agent._on_usage(700_000, 1_000_000)
-        await asyncio.sleep(0)
-        agent._on_usage(300_000, 1_000_000)  # -400k, both floor and half-of-prev
-        await asyncio.sleep(0.1)
-        return agent
-
-    agent = asyncio.run(go())
-    drops = [m for m in agent.surface.app.bot.messages if "compacted" in m]
-    assert len(drops) == 1
-    assert "700k" in drops[0] and "300k" in drops[0]
-
-
-
-
-def test_no_drop_notice_for_a_compact_turn(tmp_path):
-    async def go():
-        agent = _make_agent(_config(tmp_path), [message("Compaction complete. 700k -> 100k")])()
-        agent._on_usage(700_000, 1_000_000)
-        await asyncio.sleep(0)
-        await agent.ask("/compact")
-        await asyncio.sleep(0.1)
-        assert not [m for m in agent.surface.app.bot.messages if "compacted" in m]
-        # the flag resets: a later turn reports drops again
-        agent._on_usage(700_000, 1_000_000)
-        await asyncio.sleep(0)
-        agent._on_usage(90_000, 1_000_000)
-        await asyncio.sleep(0.1)
-        return agent
-
-    agent = asyncio.run(go())
-    assert [m for m in agent.surface.app.bot.messages if "compacted" in m]
-
-
 # ------------------------------------------------------------------ omp_config
 
 
@@ -388,52 +336,6 @@ def test_cli_context_prints_the_line(tmp_path, monkeypatch, capsys):
     assert "74.9k / 1.05M (7%)" in out
 
 
-def test_a_new_agent_process_does_not_report_a_compaction(tmp_path):
-    """Respawn and idle eviction reload the session; its first usage is not a drop."""
-    import asyncio
-    import types
-
-    from ompwire import telegram
-    from ompwire.config import load_config
-
-    config = load_config(env={})
-    config.data["session"]["store"] = str(tmp_path / "s.db")
-    notices: list[str] = []
-
-    class Client:
-        alive = True
-        on_update = None
-
-        def __init__(self, *_a, **_k):
-            pass
-
-        def initialize(self):
-            return {"agentInfo": {"name": "omp"}}
-
-        def new_session(self, *_a, **_k):
-            return {"sessionId": "s", "configOptions": []}
-
-        def set_config_option(self, *_a, **_k):
-            return {}
-
-    async def go():
-        agent = telegram.chat_agent(config, 7, "tg:7", types.SimpleNamespace(bot=None))
-
-        async def notice(text):
-            notices.append(text)
-
-        agent.surface.notice = notice
-        agent._on_usage(800_000, 1_000_000)
-        agent.client = None
-        agent._build_client = lambda yolo=False: Client()
-        await agent.ensure()
-        agent._on_usage(100_000, 1_000_000)
-        await asyncio.sleep(0)
-
-    asyncio.run(go())
-    assert not any("compacted" in text for text in notices)
-
-
 def _transcript(root, session_id, entries):
     import json
 
@@ -499,6 +401,8 @@ def test_usage_card_shows_session_totals_without_the_reset_footer(tmp_path):
     async def go():
         agent = _make_agent(_config(tmp_path), [])()
         agent.context.update(used=734_000, size=1_048_576)
+        cfg = tmp_path / "omp-config.yml"
+        cfg.write_text("compaction:\n  thresholdPercent: 70\n")
         transport = _transport(tmp_path, agent)
         msg = types.SimpleNamespace(replies=[])
 
@@ -514,6 +418,86 @@ def test_usage_card_shows_session_totals_without_the_reset_footer(tmp_path):
         return msg.replies[0]
 
     body = asyncio.run(go())
-    assert "input    420k" in body and "239.7M read" in body and "calls    2" in body
+    assert "compacts  at 70% (734k)" in body
+    assert "input     420k" in body and "239.7M read" in body and "calls     2" in body
     assert "734k / 1.05M (69%)" in body
     assert "reset" not in body
+
+
+def _compaction(before, after, at="2026-10-25T03:41:30.184Z"):
+    return {"type": "compaction", "timestamp": at, "tokensBefore": before, "tokensAfter": after}
+
+
+def test_a_compaction_omp_logged_during_a_turn_gets_one_notice(tmp_path):
+    _transcript(tmp_path, "s", [_call(100, 500, 734_000)])
+
+    async def go():
+        agent = _make_agent(_config(tmp_path), [message("ok")])()
+        agent._seed_context()
+        await agent.ask("first")  # nothing new in the transcript: silent
+        _transcript(tmp_path, "s", [_compaction(735_061, 68_185), _call(30_000, 900, 100_000)])
+        await agent.ask("second")
+        await agent.ask("third")  # the same compaction is not reported twice
+        return agent
+
+    agent = asyncio.run(go())
+    notices = [m for m in agent.surface.app.bot.messages if "compacted" in m]
+    assert len(notices) == 1
+    assert "735.1k → 68.2k" in notices[0] and "WIB" in notices[0]
+
+
+def test_compactions_already_in_the_transcript_are_not_announced_after_a_restart(tmp_path):
+    _transcript(tmp_path, "s", [_call(100, 500, 734_000), _compaction(735_061, 68_185),
+                                _call(30_000, 900, 100_000)])
+
+    async def go():
+        agent = _make_agent(_config(tmp_path), [message("ok")])()
+        agent._seed_context()
+        await agent.ask("hello")
+        return agent
+
+    agent = asyncio.run(go())
+    assert not [m for m in agent.surface.app.bot.messages if "compacted" in m]
+
+
+def test_a_compact_turn_does_not_repeat_omps_own_report(tmp_path):
+    _transcript(tmp_path, "s", [_call(100, 500, 734_000)])
+
+    async def go():
+        agent = _make_agent(_config(tmp_path), [message("Compaction complete.")])()
+        agent._seed_context()
+        _transcript(tmp_path, "s", [_compaction(734_600, 60_000)])
+        await agent.ask("/compact")
+        return agent
+
+    agent = asyncio.run(go())
+    assert not [m for m in agent.surface.app.bot.messages if "omp compacted" in m]
+
+
+def test_the_context_limit_is_remembered_across_a_restart(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        first = _make_agent(config, [])()
+        first._on_usage(200_000, 1_048_576)
+        second = _make_agent(config, [])()  # a new process: no usage_update yet
+        return second.context["size"]
+
+    assert asyncio.run(go()) == 1_048_576
+
+
+def test_usage_card_shows_when_omp_last_compacted(tmp_path):
+    _transcript(tmp_path, "s", [_call(100, 500, 734_000), _compaction(735_061, 68_185),
+                                _call(30_000, 900, 166_000)])
+
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        transport = _transport(tmp_path, agent)
+        transport._authorized = lambda _u: True
+        update = _update("/usage")
+        await transport.cmd_usage(update, None)
+        return update.effective_message.replies[0]
+
+    body = asyncio.run(go())
+    assert "735.1k → 68.2k" in body
+    assert "limit not reported yet" in body
