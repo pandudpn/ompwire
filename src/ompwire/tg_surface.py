@@ -24,7 +24,7 @@ from .delivery import Delivery
 from .engine import FloodWait, ToolTrace
 from .format import now_wib
 from .mdrender import strip_html, to_html, to_plain
-from .tg_html import card, esc, run_card, run_status, tool_block
+from .tg_html import card, esc, plan_card, run_card, run_status, tool_block
 
 log = logging.getLogger("ompwire.telegram")
 
@@ -109,8 +109,11 @@ class TelegramSurface(engine.Surface):
             raise FloodWait(_retry_window(exc)) from exc
 
     def trace(self, t: ToolTrace) -> str:
-        return tool_block(t.kind, t.title, t.command, t.output, t.status, t.subagent,
+        return tool_block(t.tool or t.kind, t.title, t.command, t.output, t.status, t.subagent,
                           t.steps, t.brief)
+
+    def plan(self, items: list[engine.PlanItem]) -> str:
+        return plan_card(items)
 
     def reasoning(self, text: str) -> str:
         # prose, so not a code block: monospace reads badly on a phone and a <pre> cannot

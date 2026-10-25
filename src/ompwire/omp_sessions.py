@@ -40,6 +40,8 @@ class SessionUsage:
     context: int = 0  # tokens the last trustworthy call carried
     # every compaction omp logged, oldest first
     compactions: list[Compaction] = field(default_factory=list)
+    # tool call id -> the tool's own name; ACP only sends a coarse kind ("other", "think")
+    tools: dict[str, str] = field(default_factory=dict)
     _path: Path | None = field(default=None, repr=False)
     _offset: int = field(default=0, repr=False)
     _compacted: bool = field(default=False, repr=False)
@@ -55,6 +57,9 @@ class SessionUsage:
         message = entry.get("message") if entry.get("type") == "message" else None
         if not isinstance(message, dict) or message.get("role") != "assistant":
             return
+        for part in message.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "toolCall" and part.get("id"):
+                self.tools[str(part["id"])] = str(part.get("name") or "")
         usage = message.get("usage")
         if not isinstance(usage, dict):
             return

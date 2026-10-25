@@ -192,11 +192,21 @@ decision behind it:
 | --- | --- |
 | `agent_message_chunk` | the answer, buffered and posted as a new message at the next tool call or the end of the turn |
 | `agent_thought_chunk` | the reasoning, shown only with `/reasoning on`, kept to its tail |
-| `tool_call`, `tool_call_update` | one message per call, posted when it completes or fails, when `stream.show_tool_calls` is on |
+| `tool_call`, `tool_call_update` | one message per call, posted when it completes or fails, when `stream.show_tool_calls` is on; headed by the tool's own name and an icon |
+| `plan` | the agent's todo list, posted as a fresh checklist each time it changes; a repeat (omp's reminder) and the emptied list at the end are skipped |
 | `usage_update` | fills `agent.context` and drives the ⚠️ warning at `stream.compaction_warn`; a report under 5% of the last good one is held, since omp can anchor it on a few hundred tokens after `session/load`; never enters the turn queue |
 | `session_info_update` | read for accounting, never rendered |
 | `available_commands_update` | fills `/commands` |
 | `config_option_update`, `current_mode_update` | kept so the pickers show current values |
+
+ACP gives a tool call only a coarse `kind`, and omp files most of its tools under `other` (`wait`,
+`ask`, `lsp`, every MCP tool) and its `todo` tool under `think`. omp's transcript records each call
+with its real name under the same id, so when a call finishes the transport reads the name from
+there (the same incremental read `/usage` uses). Until the transcript has it, only kinds that stand
+for one tool are named (`think` is `todo`, `fetch` is `web_search`); a call whose path is `xd://x`
+is named after the device. A finished `todo` call is held for one update: omp sends the list it
+produced right after, and the checklist replaces the trace. An omp that sends no list still gets
+the trace.
 
 A subagent has no event type of its own. omp runs one through its `task` tool, so a subagent shows
 up as a `tool_call` whose `rawInput.tasks[]` names it. The ACP `kind` for that call is `other`,

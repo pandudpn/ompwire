@@ -111,6 +111,25 @@ def _is_waiting(title: str) -> bool:
     """A call that only says it is waiting adds a line and no information."""
     return bool(WAITING_RE.match(title.strip()))
 
+
+# ACP gives each tool call a coarse kind and files most of omp's tools under "other". The
+# transcript names the real tool; until it does, only the kinds that stand for one tool are named.
+_KIND_TOOL = {"think": "todo", "fetch": "web_search"}
+
+
+def tool_name(kind: str, raw_input: dict[str, Any], named: str = "") -> str:
+    """The tool behind a call: omp's own name when the transcript has it, else a safe guess."""
+    path = str(raw_input.get("path") or "")
+    if path.startswith("xd://"):
+        # a device runs through read or write; the device says what happened, "write" does not
+        return path[len("xd://"):].split("/", 1)[0] or "device"
+    if named:
+        return named
+    if raw_input.get("tasks"):
+        return "task"
+    return _KIND_TOOL.get(kind, kind or "tool")
+
+
 def _chunks(text: str, limit: int) -> list[str]:
     out: list[str] = []
     while text:
@@ -179,6 +198,15 @@ class ToolTrace:
     subagent: str = ""
     steps: list[str] = field(default_factory=list)
     brief: str = ""
+    tool: str = ""  # omp's name for it (bash, wait, todo, …); kind is ACP's coarse class
+
+
+@dataclass(frozen=True)
+class PlanItem:
+    """One entry of the agent's todo list; status is pending, in_progress or completed."""
+
+    content: str
+    status: str
 
 
 class FloodWait(Exception):
@@ -222,6 +250,10 @@ class Surface(abc.ABC):
 
     @abc.abstractmethod
     def reasoning(self, text: str) -> str: ...
+
+    @abc.abstractmethod
+    def plan(self, items: list[PlanItem]) -> str:
+        """The agent's todo list, posted again whenever it changes."""
 
     @abc.abstractmethod
     def dropped(self, count: int) -> str: ...
@@ -276,6 +308,8 @@ class ChatAgent:
         # a directory removed since then would make every turn fail to start; fall back
         self.cwd = kept if kept and os.path.isdir(os.path.expanduser(kept)) else configured
         self.reasoning = bool(config.get("stream", "show_reasoning", False))
+        # the todo list last shown; omp repeats it as a reminder, and a repeat is not news
+        self._last_plan: list[PlanItem] = []
         # the bot that receives a scheduled result defaults to the bot being talked to
         self.gateway_name = str(config.get("gateway", "name", "telegram") or "telegram")
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
@@ -729,6 +763,8 @@ class ChatAgent:
         answer: list[str] = []     # the whole answer, for the markers read at the end
         thinking: list[str] = []
         trace: dict[str, ToolTrace] = {}
+        inputs: dict[str, dict[str, Any]] = {}  # each call's rawInput, to name its tool
+        held_todo: list[ToolTrace] = []  # finished todo calls waiting to see if a list follows
         posted: set[str] = set()
         state: dict[str, Any] = {"text_msg": None, "tools": 0, "dropped": 0, "closed": False}
         outbox: list[dict[str, Any]] = []
@@ -856,12 +892,42 @@ class ChatAgent:
         def post_tool(call_id: str) -> None:
             entry = trace[call_id]
             posted.add(call_id)
+            if entry.kind != "subagent":
+                seen = self._transcript()
+                named = seen.tools.get(call_id, "") if seen is not None else ""
+                entry.tool = tool_name(entry.kind, inputs.get(call_id, {}), named)
+            if entry.tool == "todo" and entry.status == "completed":
+                # omp sends the list a todo call produced right after the call ends, and that
+                # checklist says more than the trace. Hold the trace until the next update shows
+                # whether the list came; an omp that sends none still gets the trace.
+                held_todo.append(entry)
+                return
+            show_tool(entry)
+
+        def show_tool(entry: ToolTrace) -> None:
             if not self.verbose:
                 return
             body = self.surface.trace(entry)
             if len(body) > self.surface.limit:
                 body = self.surface.trace(replace(entry, output="(output too long for one message)"))
             enqueue("trace", body, essential=False)
+
+        def release_todo() -> None:
+            while held_todo:
+                show_tool(held_todo.pop(0))
+
+        def post_plan(raw_entries: Any) -> None:
+            held_todo.clear()  # the checklist stands in for the todo call that changed it
+            items = [PlanItem(content=" ".join(str(item.get("content") or "").split()),
+                              status=str(item.get("status") or "pending"))
+                     for item in (raw_entries or []) if isinstance(item, dict)]
+            items = [item for item in items if item.content]
+            # an emptied list (omp clears it once all is done) and a reminder repeating the
+            # last one carry nothing new
+            if not items or items == self._last_plan:
+                return
+            self._last_plan = items
+            enqueue("plan", self.surface.plan(items), essential=True)
 
         async def finish() -> None:
             """End of turn: whatever is still buffered, then the markers in the whole answer."""
@@ -870,6 +936,7 @@ class ChatAgent:
             for call_id in trace:
                 if call_id not in posted:
                     post_tool(call_id)
+            release_todo()
             state["closed"] = True
             wake.set()
             await sender_task  # the buttons and files come after the last message, in order
@@ -887,6 +954,8 @@ class ChatAgent:
                 update = await self._updates.get()
                 if update is None:
                     return
+                if update.kind != "plan":
+                    release_todo()  # no list followed the todo call, so its trace is the news
                 if update.kind == "agent_thought_chunk" and update.text:
                     thinking.append(update.text)
                 elif update.kind == "agent_message_chunk" and update.text:
@@ -901,6 +970,11 @@ class ChatAgent:
                     answer.append(update.text)
                     if streams:
                         stream_delta(final=False)
+                elif update.kind == "plan":
+                    flush_thinking()
+                    flush_segment()
+                    post_plan(update.raw.get("entries"))
+                    continue
                 elif update.kind in {"tool_call", "tool_call_update"}:
                     raw = update.raw
                     call_id = str(raw.get("toolCallId") or f"anon{len(trace)}")
@@ -917,10 +991,14 @@ class ChatAgent:
                         entry.kind = str(raw.get("kind") or "tool")
                         entry.title = str(raw.get("title") or "")
                         raw_input = raw.get("rawInput") or {}
+                        if not isinstance(raw_input, dict):
+                            raw_input = {}
+                        inputs[call_id] = raw_input
+                        entry.tool = tool_name(entry.kind, raw_input)
                         entry.command = str(raw_input.get("command") or "")
                         tasks = raw_input.get("tasks")
                         if isinstance(tasks, list) and tasks:
-                            entry.kind = "subagent"
+                            entry.kind = entry.tool = "subagent"
                             # omp runs subagents through the `task` tool; ACP has no event of
                             # its own for them, so the task list is the only place they appear
                             entry.subagent = ", ".join(
@@ -932,7 +1010,7 @@ class ChatAgent:
                             if isinstance(tools, list) and tools:
                                 entry.brief = (entry.brief + " · tools: "
                                                + ", ".join(str(x) for x in tools))[:160]
-                        log.info("tool call %s kind=%s command=%r", self.label,
+                        log.info("tool call %s tool=%s kind=%s command=%r", self.label, entry.tool,
                                  entry.kind, entry.command[:120] or entry.title[:120])
                     if call_id in posted:
                         continue
@@ -1062,6 +1140,7 @@ class ChatAgent:
         self.forget_turn()
         # the old context numbers belong to the old session; the next usage_update re-reads them
         self._compactions_seen = None
+        self._last_plan = []
         self._context_good = None
         self._context_warned = False
         if self.client is not None and self.client.alive and self.session_id:
@@ -1076,6 +1155,7 @@ class ChatAgent:
             await asyncio.to_thread(self.client.close, self.session_id)
         self.client = None
         self._compactions_seen = None
+        self._last_plan = []
         self._context_good = None
         self._context_warned = False
         self.store.put(self.key, session_id, self.cwd)

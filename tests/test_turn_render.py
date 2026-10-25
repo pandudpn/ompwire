@@ -172,7 +172,8 @@ def test_a_subagent_is_labelled_subagent_not_other(rendered):
                   tasks=[{"name": "ReadNote", "agent": "sonic"}]),
         message("done"),
     ])
-    trace = [body for body in messages if "🔧" in body][-1]
+    trace = [body for body in messages if "<code>subagent</code>" in body][-1]
+    assert trace.startswith("🤖")
     assert "<code>subagent</code>" in trace
     assert "<code>other</code>" not in trace
 
@@ -185,7 +186,7 @@ def test_what_the_subagent_is_doing_is_shown(rendered):
         tool_progress("t1", "Running agent ReadNote"),
         message("done"),
     ])
-    trace = [body for body in messages if "🔧" in body][-1]
+    trace = [body for body in messages if "<code>subagent</code>" in body][-1]
     assert "· Spawned agent ReadNote" in trace
     assert "· Running agent ReadNote" in trace
 
@@ -197,7 +198,7 @@ def test_a_waiting_call_is_not_shown_as_a_step(rendered):
         tool_call("t2", "Waiting for ReadNote result"),
         message("done"),
     ])
-    trace = [body for body in messages if "🔧" in body][-1]
+    trace = [body for body in messages if "<code>subagent</code>" in body][-1]
     assert "Waiting for" not in trace
 
 
@@ -210,7 +211,7 @@ def test_the_subagent_brief_is_shown_so_you_know_what_it_was_asked(rendered):
         }]),
         message("done"),
     ])
-    trace = [body for body in messages if "🔧" in body][-1]
+    trace = [body for body in messages if "<code>subagent</code>" in body][-1]
     assert "task: File: a.txt in the working directory" in trace
     assert "tools: read, shell" in trace
 
@@ -451,3 +452,74 @@ def test_a_long_answer_is_split_into_messages_once(rendered):
     messages = rendered([message("a" * 3700), message(" ekor")])
     answer = [body for body in messages if "aaaa" in body or "ekor" in body]
     assert len(answer) == 2
+
+
+def plan(*entries):
+    return Update(kind="plan", session_id="s", raw={
+        "sessionUpdate": "plan",
+        "entries": [{"content": text, "status": status, "priority": "medium"}
+                    for text, status in entries]})
+
+
+def kinded_call(call_id, kind, title, raw_input):
+    return Update(kind="tool_call", session_id="s", raw={
+        "sessionUpdate": "tool_call", "toolCallId": call_id, "kind": kind, "title": title,
+        "status": "pending", "rawInput": raw_input})
+
+
+def test_the_todo_list_is_posted_as_a_checklist_each_time_it_changes(rendered):
+    """omp sends the todo list as a `plan` update; it used to be dropped without a trace."""
+    messages = rendered([
+        kinded_call("t1", "think", "Planning", {"op": "init"}),
+        tool_progress("t1", "", status="completed"),
+        plan(("tulis tes", "in_progress"), ("rilis", "pending")),
+        kinded_call("t2", "think", "Marking item 1 done", {"op": "done"}),
+        tool_progress("t2", "", status="completed"),
+        plan(("tulis tes", "completed"), ("rilis", "in_progress")),
+        plan(("tulis tes", "completed"), ("rilis", "in_progress")),  # a reminder repeats it
+        plan(),  # omp clears the list once everything is done
+        message("selesai"),
+    ])
+    cards = [body for body in messages if body.startswith("📋 <b>Todo</b>")]
+    assert len(cards) == 2, messages
+    assert "0/2 done" in cards[0] and "▶️ <b>tulis tes</b>" in cards[0] and "⬜ rilis" in cards[0]
+    assert "1/2 done" in cards[1] and "☑️ <s>tulis tes</s>" in cards[1]
+    # the checklist replaces the todo call itself, which said only "Marking item 1 done"
+    assert not any("<code>todo</code>" in body for body in messages)
+
+
+def test_a_todo_call_with_no_list_after_it_still_shows(rendered):
+    messages = rendered([
+        kinded_call("t1", "think", "Marking item 1 done", {"op": "done"}),
+        tool_progress("t1", "", status="completed"),
+        message("selesai"),
+    ])
+    assert any(body.startswith("📋 <code>todo</code>") for body in messages), messages
+
+
+def test_a_tool_is_named_from_the_transcript_not_acp_kind(rendered, tmp_path):
+    """ACP files wait, ask, lsp and every MCP tool under "other"; omp's transcript has the name."""
+    import json
+
+    from ompwire import omp_sessions
+
+    folder = omp_sessions.SESSIONS_DIR / "-"
+    folder.mkdir(parents=True)
+    entry = {"type": "message", "message": {"role": "assistant", "content": [
+        {"type": "toolCall", "id": "t1", "name": "wait", "arguments": {}},
+        {"type": "toolCall", "id": "t2", "name": "mcp__kaneo_get_task", "arguments": {}}]}}
+    (folder / "2026-10-25T00-00-00-000Z_s.jsonl").write_text(json.dumps(entry) + "\n")
+    messages = rendered([
+        kinded_call("t1", "other", "Collecting suite result", {}),
+        tool_progress("t1", "3 passed", status="completed"),
+        kinded_call("t2", "other", "Reading the ticket", {"id": "x"}),
+        tool_progress("t2", "", status="completed"),
+        kinded_call("t3", "other", "Listing devices", {"path": "xd://github/pulls"}),
+        tool_progress("t3", "", status="completed"),
+        message("selesai"),
+    ])
+    traces = "\n".join(messages)
+    assert "⏳ <code>wait</code>" in traces
+    assert "🔌 <code>kaneo_get_task</code>" in traces
+    assert "<code>github</code>" in traces
+    assert "<code>other</code>" not in traces

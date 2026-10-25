@@ -58,7 +58,7 @@ class TerminalSurface(engine.Surface):
     # --------------------------------------------------------------- rendering
     def trace(self, t: engine.ToolTrace) -> str:
         detail = t.command or t.title
-        head = f"[tool] {t.kind}" + (f" · {detail}" if detail else "")
+        head = f"[tool] {t.tool or t.kind}" + (f" · {detail}" if detail else "")
         if t.status:
             head += f" · {t.status}"
         output = t.output.strip().splitlines()
@@ -70,6 +70,12 @@ class TerminalSurface(engine.Surface):
 
     def reasoning(self, text: str) -> str:
         return _dim(f"… reasoning\n{text}")
+
+    def plan(self, items: list[engine.PlanItem]) -> str:
+        marks = {"completed": "[x]", "in_progress": "[>]"}
+        done = sum(1 for item in items if item.status == "completed")
+        return "\n".join([f"[todo] {done}/{len(items)} done",
+                          *(f"  {marks.get(item.status, '[ ]')} {item.content}" for item in items)])
 
     def dropped(self, count: int) -> str:
         return f"… {count} tool call(s) not shown"

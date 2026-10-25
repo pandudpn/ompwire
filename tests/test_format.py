@@ -120,7 +120,7 @@ class TestToolBlock:
         assert "completed" not in tool_block("bash", "x", status="completed")
 
     def test_no_command_no_output_returns_the_head_only(self):
-        assert tool_block("bash", "") == "🔧 <code>bash</code>"
+        assert tool_block("bash", "") == "💻 <code>bash</code>"
 
 
 class TestHelpSections:

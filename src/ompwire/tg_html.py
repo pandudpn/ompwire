@@ -46,10 +46,34 @@ def change(label: str, old: object, new: object, note: str = "") -> str:
     return f"{line}\n<i>{esc(note)}</i>" if note else line
 
 
-def tool_block(kind: str, title: str, command: str = "", output: str = "", status: str = "",
+# What the tool is for, at a glance; anything not listed is a plugin or MCP tool
+TOOL_ICONS = {
+    "bash": "💻", "eval": "🐍", "read": "📖", "write": "✍️", "edit": "✏️", "delete": "🗑️",
+    "move": "📦", "grep": "🔍", "glob": "🔍", "find": "🔍", "ast_grep": "🔍", "ast_edit": "🧬",
+    "lsp": "🧭", "web_search": "🌐", "fetch": "🌐", "browser": "🌐", "github": "🐙",
+    "task": "🤖", "subagent": "🤖", "wait": "⏳", "todo": "📋", "ask": "❓", "debug": "🐞",
+    "checkpoint": "📍", "rewind": "⏪", "recall": "🧠", "retain": "🧠", "reflect": "🧠",
+    "memory_edit": "🧠", "learn": "🎓", "manage_skill": "🎓", "security_scan": "🛡️",
+    "image": "🖼️", "ida": "🔬", "computer": "🖱️",
+}
+
+
+def tool_icon(tool: str) -> str:
+    if tool.startswith("mcp__"):
+        return "🔌"
+    return TOOL_ICONS.get(tool, "🔧")
+
+
+def tool_label(tool: str) -> str:
+    """An MCP tool arrives as mcp__<server>_<tool>; the reader wants server and tool."""
+    return tool[len("mcp__"):] if tool.startswith("mcp__") else tool
+
+
+def tool_block(tool: str, title: str, command: str = "", output: str = "", status: str = "",
                subagent: str = "", steps: Iterable[str] = (), brief: str = "") -> str:
     """One tool call as a fenced block: the command and its output in one <pre>."""
-    head = f"🔧 <code>{esc(kind or 'tool')}</code>"
+    tool = tool or "tool"
+    head = f"{tool_icon(tool)} <code>{esc(tool_label(tool))}</code>"
     if status == "in_progress":
         head += " · <i>running</i>"
     elif status and status not in {"completed", "pending"}:
@@ -77,6 +101,24 @@ def tool_block(kind: str, title: str, command: str = "", output: str = "", statu
     if not lines:
         return head
     return f"{head}\n<pre>{esc(chr(10).join(lines))}</pre>"
+
+
+PLAN_MARKS = {"completed": "☑️", "in_progress": "▶️"}
+
+
+def plan_card(items: Iterable[Any]) -> str:
+    """The agent's todo list: done items struck through, the current one in bold."""
+    items = list(items)
+    done = sum(1 for item in items if item.status == "completed")
+    lines = [f"📋 <b>Todo</b> · <i>{done}/{len(items)} done</i>"]
+    for item in items:
+        text = esc(item.content)
+        if item.status == "completed":
+            text = f"<s>{text}</s>"
+        elif item.status == "in_progress":
+            text = f"<b>{text}</b>"
+        lines.append(f"{PLAN_MARKS.get(item.status, '⬜')} {text}")
+    return "\n".join(lines)
 
 
 def help_sections(sections: Iterable[tuple[str, Iterable[tuple[str, str]]]]) -> str:

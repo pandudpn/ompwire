@@ -34,8 +34,9 @@ button or a file looks.
 ## What you get
 
 **Every step, as it happens.** The agent's text up to each tool call, then the call with its
-output, each as its own message. You read what it ran and what came back, not only the final
-answer.
+output, each as its own message and named after the tool it ran. Its todo list shows up as a
+checklist that is posted again each time an item moves. You read what it ran and what came back,
+not only the final answer.
 
 **Talk while it works.** A message sent mid-turn is steered into the running turn, and the bot
 quotes your message with `↪️ steered`. If it cannot be steered, it waits in line as
