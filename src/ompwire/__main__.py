@@ -946,6 +946,7 @@ common flows:
   ompwire doctor                    verify agent, store and each gateway credential
   ompwire gateway list              bots, credentials and whether they run
   ompwire gateway start             pick a platform, add or update a bot, run it
+  ompwire gateway remove            remove a bot; keep or delete its sessions and log
   ompwire gateway logs telegram     follow its journal
   ompwire update [--edge]           newest release, or the tip of main (restarts gateways)
   ompwire restart                   restart the gateway without updating
@@ -953,8 +954,8 @@ common flows:
   ompwire chat                      chat with the agent from this terminal
   ompwire uninstall --dry-run       see what uninstalling would remove
 
-config: ~/.config/ompwire/config.toml (+ .env for the bot token)
-logs:   ~/.local/state/ompwire/ompwire.log
+config: ~/.config/ompwire/config.toml, one folder per bot in ~/.config/ompwire/gateways/
+state:  ~/.local/state/ompwire/gateways/<bot>/ (sessions, log), cli/ for ompwire chat
 """
 
 
@@ -1066,18 +1067,32 @@ def build_parser() -> argparse.ArgumentParser:
                     help="add: write the schedule without installing the timer")
     sc.set_defaults(func=cmd_schedule)
 
-    gw = _sub(sub, "gateway", "start, list and control gateway bots",
+    gw = _sub(sub, "gateway", "start, remove, list and control gateway bots",
               "A gateway is one bot on one platform: its own credential, its own allow list, "
-              "its own systemd unit. `start` does everything: pick a platform, pick or add a "
-              "profile, check the credential with the platform, write the unit, start it. Run "
-              "it again to restart, or to replace a credential.",
+              "its own systemd unit and its own folders. `start` does everything: pick a "
+              "platform, pick or add a profile, check the credential with the platform, write "
+              "the unit, start it. Run it again to restart, or to replace a credential. "
+              "`remove` asks which gateway and how far: keep its sessions and log, or delete "
+              "everything.\n\n"
+              "actions:\n"
+              "  start [NAME]    add or update a gateway, then run it\n"
+              "  remove [NAME]   remove a gateway; asks which, and confirms by name\n"
+              "  list            gateways, bot identity, allow list, unit state\n"
+              "  status [NAME]   unit path, state and where its logs are\n"
+              "  stop NAME       stop it and keep it down after a reboot\n"
+              "  restart NAME    rewrite the unit, then restart it\n"
+              "  logs NAME       its last 40 journal lines\n"
+              "  types           platforms this version knows, and which run today",
               "  ompwire gateway start\n"
               "  ompwire gateway start --platform telegram --name work\n"
               "  ompwire gateway start work --token-stdin < token.txt --yes\n"
+              "  ompwire gateway remove\n"
+              "  ompwire gateway remove work --yes --purge\n"
               "  ompwire gateway list")
     gw.add_argument("gateway_action", nargs="?", default=None, metavar="action",
                     choices=["list", "remove", "rm", "start", "stop", "restart",
-                             "status", "logs", "types", "_run"])
+                             "status", "logs", "types", "_run"],
+                    help="start, remove, list, status, stop, restart, logs, types")
     gw.add_argument("name", nargs="?", default="", help="gateway name")
     gw.add_argument("--name", dest="name_flag", default="", metavar="NAME",
                     help="start: gateway name (same as the positional name)")
@@ -1097,7 +1112,8 @@ def build_parser() -> argparse.ArgumentParser:
     gw.add_argument("--force", action="store_true",
                     help="start: write the unit even when a check fails; remove: even when a "
                          "schedule reports to it")
-    gw.add_argument("--yes", action="store_true", help="start: no prompts; fail instead of asking")
+    gw.add_argument("--yes", action="store_true",
+                    help="start, remove: no prompts; fail instead of asking")
     gw.set_defaults(func=cmd_gateway, gateway_help=gw.print_help)
 
     st = _sub(sub, "status", "what this installation is set to, and whether it is running",

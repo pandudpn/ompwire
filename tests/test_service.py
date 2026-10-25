@@ -190,6 +190,9 @@ class TestUninstallInteraction:
     def test_a_dry_run_only_reports_the_unit(self, monkeypatch, tmp_path, capsys):
         from ompwire import uninstall
 
+        # the real-install path: a sandboxed uninstall never touches units
+        monkeypatch.delenv("OMPWIRE_CONFIG_DIR", raising=False)
+
         unit = tmp_path / "ompwire.service"
         unit.write_text("unit\n", encoding="utf-8")
         monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": unit)
@@ -204,6 +207,9 @@ class TestUninstallInteraction:
     def test_remove_disables_the_unit_before_deleting_files(
             self, monkeypatch, tmp_path):
         from ompwire import uninstall
+
+        # the real-install path: a sandboxed uninstall never touches units
+        monkeypatch.delenv("OMPWIRE_CONFIG_DIR", raising=False)
 
         unit = tmp_path / "ompwire.service"
         unit.write_text("unit\n", encoding="utf-8")

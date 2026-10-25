@@ -29,6 +29,10 @@ def isolate_real_paths(monkeypatch, tmp_path):
     # every gateway's sessions, overrides, log and lock live under this; a status test once
     # created an empty store in the real ~/.local/state/ompwire/gateways/telegram
     monkeypatch.setattr(config_module, "default_state_dir", lambda: state)
+    # the real config.toml names a real log file; test_restart once opened it for appending
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(config_dir))
     # the session store holds per-chat preferences; a stray fixture once wrote a real one
     monkeypatch.setitem(config_module.DEFAULTS["session"], "store", str(state / "sessions.db"))
     # systemd is the host's; nothing in the suite should call it for real

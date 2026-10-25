@@ -69,7 +69,7 @@ policy = "{approval_policy}"
 
 [logging]
 level = "INFO"
-file = "~/.local/state/ompwire/ompwire.log"
+file = "~/.local/state/ompwire/cli/ompwire.log"
 """
 
 
