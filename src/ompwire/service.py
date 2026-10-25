@@ -13,8 +13,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-LEGACY_UNIT = "ompwire.service"
-
 
 def unit_name(gateway: str = "telegram") -> str:
     return f"ompwire-{gateway}.service"
@@ -22,10 +20,6 @@ def unit_name(gateway: str = "telegram") -> str:
 
 def unit_path(gateway: str = "telegram") -> Path:
     return Path.home() / ".config" / "systemd" / "user" / unit_name(gateway)
-
-
-def legacy_unit_path() -> Path:
-    return Path.home() / ".config" / "systemd" / "user" / LEGACY_UNIT
 
 
 def _systemd_available() -> bool:
@@ -219,12 +213,6 @@ def start(gateway: str = "telegram", *, force: bool = False, now: bool = True) -
     print(f"ok   {'started and enabled' if now else 'enabled'}: {unit_name(gateway)}")
     print(f"     logs:   journalctl --user -u {unit_name(gateway)} -f")
     print("     state:  ompwire gateway list")
-
-    legacy = legacy_unit_path()
-    if legacy.is_file():
-        print(f"--   {LEGACY_UNIT} was the single-gateway unit; removing it so only "
-              f"per-gateway units remain")
-        remove(gateway, path=legacy, quiet=True)
     return 0
 
 

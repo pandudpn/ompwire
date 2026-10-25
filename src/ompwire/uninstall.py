@@ -90,12 +90,11 @@ def under_systemd(pid: int) -> bool:
 def running_serves() -> list[tuple[int, str]]:
     """Find running gateways without always trusting pgrep to be installed.
 
-    Matches `gateway _run` and the older `gateway run` / `serve` spellings, so an upgrade cannot leave a
-    process behind that this code no longer recognises.
+    Matches `gateway _run`, the command every gateway unit runs.
     """
     output = ""
     try:
-        result = subprocess.run(["pgrep", "-af", "ompwire gateway (_run|run)|ompwire serve"], capture_output=True,
+        result = subprocess.run(["pgrep", "-af", "ompwire gateway _run"], capture_output=True,
                                 text=True, timeout=10, check=False)
         output = result.stdout
     except (OSError, subprocess.SubprocessError):
@@ -121,7 +120,7 @@ def running_serves() -> list[tuple[int, str]]:
             continue
         if "ompwire" not in command:
             continue
-        if not any(mark in command for mark in ("gateway _run", "gateway run", "serve")):
+        if "gateway _run" not in command:
             continue
         if under_systemd(pid):
             continue

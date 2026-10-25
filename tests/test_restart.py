@@ -17,12 +17,12 @@ def test_transport_command_prefers_the_python_line(monkeypatch):
     assert update._transport_command(1, "/usr/bin/zsh -lic ... ompwire gateway _run telegram") \
         == shell_line
     # a process started before this change (still spelled `serve`) is recognised too
-    assert update._transport_command(2, "ompwire serve") == python_line
+    assert update._transport_command(2, "ompwire gateway _run telegram") == python_line
 
 
 def test_no_transport_means_nothing_to_restart(monkeypatch):
     monkeypatch.setattr(update, "serving_processes", lambda: [])
-    monkeypatch.setattr(update, "_systemd_active", lambda: False)
+    monkeypatch.setattr(update, "_systemd_active", lambda unit: False)
     assert "nothing to restart" in update.restart_gateway()
 
 
@@ -32,7 +32,10 @@ def test_systemd_unit_is_used_when_active(monkeypatch):
     class Result:
         returncode = 0
 
-    monkeypatch.setattr(update, "_systemd_active", lambda: True)
+    from ompwire import gateways
+
+    monkeypatch.setattr(gateways, "load", lambda config=None: [gateways.Gateway(name="telegram")])
+    monkeypatch.setattr(update, "_systemd_active", lambda unit: True)
     monkeypatch.setattr(update.subprocess, "run",
                         lambda command, **kwargs: calls.append(command) or Result())
 
@@ -48,9 +51,10 @@ def test_a_bare_process_is_stopped_and_respawned(monkeypatch):
         pid = 999
 
     monkeypatch.setattr(update, "serving_processes",
-                        lambda: [(4242, "python3 .venv/bin/ompwire serve")])
+                        lambda: [(4242, "python3 .venv/bin/ompwire gateway _run telegram")])
     monkeypatch.setattr(update, "_argv_of",
-                        lambda pid: ["/repo/.venv/bin/python3", ".venv/bin/ompwire", "serve"])
+                        lambda pid: ["/repo/.venv/bin/python3", ".venv/bin/ompwire", "gateway",
+                                     "_run", "telegram"])
     monkeypatch.setattr(update, "_cwd_of", lambda pid: "/repo")
     def fake_kill(pid: int, sig: int) -> None:
         killed.append((pid, sig))
@@ -60,14 +64,15 @@ def test_a_bare_process_is_stopped_and_respawned(monkeypatch):
     monkeypatch.setattr(update.os, "kill", fake_kill)
     monkeypatch.setattr(update.subprocess, "Popen",
                         lambda argv, **kwargs: spawned.append(argv) or Child())
-    monkeypatch.setattr(update, "_systemd_active", lambda: False)
+    monkeypatch.setattr(update, "_systemd_active", lambda unit: False)
 
     message = update.restart_gateway(timeout=0.2)
 
     assert "restarted" in message and "999" in message
     assert killed[0] == (4242, 15)
     assert all(sig == 0 for _pid, sig in killed[1:])
-    assert spawned == [["/repo/.venv/bin/python3", ".venv/bin/ompwire", "serve"]]
+    assert spawned == [["/repo/.venv/bin/python3", ".venv/bin/ompwire", "gateway", "_run",
+                        "telegram"]]
 
 
 def test_check_never_restarts(monkeypatch, capsys):
@@ -113,7 +118,7 @@ def test_every_active_gateway_unit_is_restarted(monkeypatch):
     monkeypatch.setattr(gateways, "load", lambda config=None: [
         gateways.Gateway(name="telegram"), gateways.Gateway(name="telegram-2")])
     monkeypatch.setattr(update, "_systemd_active",
-                        lambda unit="ompwire": unit in {"ompwire-telegram", "ompwire-telegram-2"})
+                        lambda unit: unit in {"ompwire-telegram", "ompwire-telegram-2"})
     monkeypatch.setattr(update, "serving_processes", lambda: [])
     monkeypatch.setattr(update.subprocess, "run",
                         lambda command, **kwargs: restarted.append(command[-1]) or Result())

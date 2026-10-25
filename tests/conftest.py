@@ -22,7 +22,6 @@ def isolate_real_paths(monkeypatch, tmp_path):
     state.mkdir(exist_ok=True)
 
     monkeypatch.setattr(service, "unit_path", lambda gateway="telegram": units / f"{gateway}.service")
-    monkeypatch.setattr(service, "legacy_unit_path", lambda: units / "legacy.service")
     monkeypatch.setattr(gateways, "gateways_file", lambda: tmp_path / "gateways.toml")
     monkeypatch.setattr(lock, "lock_path", lambda gateway="": state / f"serve-{gateway or 'default'}.lock")
     monkeypatch.setattr(config_module, "OVERRIDES_PATH", state / "overrides.json")

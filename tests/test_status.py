@@ -184,3 +184,13 @@ class TestMcpRow:
         from ompwire.engine import mcp_label
 
         assert mcp_label([]) == "none"
+
+
+def test_processes_row_counts_running_gateway_units(monkeypatch):
+    """Status read the 0.9 unit `ompwire` and said "not running" while both gateways ran."""
+    from ompwire import update
+
+    monkeypatch.setattr(update, "_active_units", lambda: ["ompwire-telegram", "ompwire-work"])
+    state, detail = status._gateway_state()
+    assert state == "systemd"
+    assert "ompwire-telegram" in detail and "ompwire-work" in detail

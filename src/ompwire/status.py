@@ -35,11 +35,12 @@ def _agent_version(command: str, timeout: float = 6.0) -> str:
 
 
 def _gateway_state() -> tuple[str, str]:
-    """(state, detail) — systemd first, then a bare process, then nothing running."""
-    from .update import SYSTEMD_UNIT, _systemd_active, serving_processes
+    """(state, detail) — gateway units first, then a bare process, then nothing running."""
+    from .update import _active_units, serving_processes
 
-    if _systemd_active():
-        return "systemd", f"user unit {SYSTEMD_UNIT} is active"
+    units = _active_units()
+    if units:
+        return "systemd", f"{len(units)} gateway unit(s) active: {', '.join(units)}"
     serves = serving_processes()
     if serves:
         pids = ", ".join(str(pid) for pid, _command in serves)

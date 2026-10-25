@@ -67,7 +67,7 @@ def test_declining_the_prompt_removes_nothing(monkeypatch, tmp_path, capsys):
 
 def test_a_running_transport_blocks_removal(monkeypatch, tmp_path, capsys):
     config, _state, _data = _layout(monkeypatch, tmp_path)
-    monkeypatch.setattr(uninstall, "running_serves", lambda: [(4242, "ompwire serve")])
+    monkeypatch.setattr(uninstall, "running_serves", lambda: [(4242, "ompwire gateway _run telegram")])
 
     assert uninstall.run(yes=True) == 1
     assert config.is_dir()
@@ -77,7 +77,7 @@ def test_a_running_transport_blocks_removal(monkeypatch, tmp_path, capsys):
 
 def test_force_stops_the_transport_before_removing(monkeypatch, tmp_path):
     _config, _state, _data = _layout(monkeypatch, tmp_path)
-    monkeypatch.setattr(uninstall, "running_serves", lambda: [(4242, "ompwire serve")])
+    monkeypatch.setattr(uninstall, "running_serves", lambda: [(4242, "ompwire gateway _run telegram")])
     stopped: list[int] = []
     monkeypatch.setattr(uninstall, "stop", lambda pid: stopped.append(pid) or True)
 

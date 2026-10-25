@@ -149,16 +149,13 @@ def _command_for(mode: str, ref: str) -> list[str]:
     return []
 
 
-SYSTEMD_UNIT = "ompwire"      # the single-gateway unit from 0.9.x, still honoured
-
-
 def serving_processes() -> list[tuple[int, str]]:
     from .uninstall import running_serves
 
     return running_serves()
 
 
-def _systemd_active(unit: str = SYSTEMD_UNIT) -> bool:
+def _systemd_active(unit: str) -> bool:
     try:
         result = subprocess.run(["systemctl", "--user", "is-active", unit],
                                 capture_output=True, text=True, timeout=10, check=False)
@@ -170,9 +167,6 @@ def _systemd_active(unit: str = SYSTEMD_UNIT) -> bool:
 def _active_units() -> list[str]:
     """Every gateway unit that is running, so an update restarts all of them."""
     units: list[str] = []
-    legacy = _systemd_active()
-    if legacy:
-        units.append(SYSTEMD_UNIT)
     try:
         from . import gateways
 
@@ -215,10 +209,9 @@ def _transport_command(pid: int, command: str) -> list[str]:
         if not part.endswith("ompwire"):
             continue
         rest = argv[index + 1:]
-        if rest[:2] in (["gateway", "_run"], ["gateway", "run"]) or rest[:1] == ["serve"]:
+        if rest[:2] == ["gateway", "_run"]:
             return argv[index:]
-    return argv if ("gateway _run" in command or "gateway run" in command
-                    or "serve" in command) else []
+    return argv if "gateway _run" in command else []
 
 
 def restart_gateway(timeout: float = 20.0) -> str:
