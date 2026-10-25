@@ -38,11 +38,13 @@ change. It asks only what it does not know:
 2. Which profile, when that platform already has gateways: each is listed with its credential
    masked (`1234…alue`), plus "add a new profile". A platform can run several bots, each with
    its own name, credential and unit.
-3. The credential, when there is none or the platform rejects the stored one. For an existing
+3. The credential, when there is none or the platform rejects the stored one. Numbered steps
+   for getting one on that platform (for Telegram: @BotFather, `/newbot`) are printed first. For an existing
    profile it shows the current one masked and asks whether to replace it. Nothing is saved
    until the platform accepts it, and a running gateway is stopped before its credential
    changes, so the old one never keeps polling next to the new one.
-4. The allow list, when it is empty.
+4. The allow list, when it is empty, again with the steps to find a user id (for Telegram:
+   send any message to @userinfobot).
 
 Then it writes the systemd unit and starts it, or restarts it when it is already running.
 Running it again with nothing to change is a plain restart.

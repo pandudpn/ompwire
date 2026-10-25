@@ -70,7 +70,9 @@ It is not a gateway (no credential, no unit), so it is registered as neither.
 A transport that cannot be started is worse than no transport: `gateway start` refuses anything
 that is not in `IMPLEMENTED`. A new platform also adds its credential prompt and its check to
 `gateways.platform()` and `gateways.verify()`, so `gateway start` can ask for it and prove it
-before anything is saved.
+before anything is saved. Its `Platform` carries `credential_steps` and `user_id_steps`: the
+numbered how-to printed before each question, so nobody has to leave the terminal to learn
+where a token or a user id comes from. A test fails for an implemented platform without them.
 
 ## Releases
 

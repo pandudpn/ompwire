@@ -447,11 +447,16 @@ def _start_credential(args: argparse.Namespace, gateways, gateway, is_new: bool)
         candidate = ""
     else:
         candidate = current
+    shown_steps = False
     for attempt in range(3):
         if not candidate:
             if args.yes:
                 print(f"FAIL no {spec.credential} given; pass --token-stdin", file=sys.stderr)
                 return None
+            if not shown_steps:
+                # once, before the first question, also when a stored credential was rejected
+                _print_steps(f"how to get a {spec.credential}", spec.credential_steps)
+                shown_steps = True
             candidate = _ask_secret_line(spec.credential)
             if not candidate:
                 print("FAIL no credential given; nothing was written", file=sys.stderr)
@@ -466,6 +471,20 @@ def _start_credential(args: argparse.Namespace, gateways, gateway, is_new: bool)
             return None
         candidate = ""
     return None
+
+
+def _print_steps(title: str, steps: tuple[str, ...]) -> None:
+    """Numbered how-to before a question, wrapped to the terminal."""
+    if not steps:
+        return
+    import textwrap
+
+    width = min(shutil.get_terminal_size((88, 20)).columns, 88)
+    print(f"\n{title}:")
+    for index, step in enumerate(steps, 1):
+        print(textwrap.fill(step, width=width, initial_indent=f"  {index}. ",
+                            subsequent_indent="     "))
+    print()
 
 
 def _given_credential(args: argparse.Namespace) -> str | None:
@@ -496,6 +515,7 @@ def _start_allowed(args: argparse.Namespace, gateway, spec) -> list[int]:
         return given
     if gateway.allowed or args.yes:
         return list(gateway.allowed)
+    _print_steps(f"who may talk to it: {spec.user_ids}", spec.user_id_steps)
     answer = input(f"allowed {spec.user_ids} (comma separated, blank = nobody): ").strip()
     return [int(part) for part in answer.replace(" ", "").split(",") if part.isdigit()]
 

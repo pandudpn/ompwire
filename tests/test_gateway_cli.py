@@ -379,3 +379,37 @@ def test_input_that_ends_mid_question_is_a_message_not_a_traceback(sandbox, monk
     assert cli.main(["gateway", "start"]) == 1
     assert "input ended" in capsys.readouterr().err
     assert not (sandbox / "gateways.toml").exists()
+
+
+def test_every_implemented_platform_explains_its_credential_and_user_ids():
+    """The how-to is part of a platform, not an afterthought of the first one."""
+    for kind in gateways.IMPLEMENTED:
+        spec = gateways.platform(kind)
+        assert spec.credential_steps, kind
+        assert spec.user_id_steps, kind
+
+
+def test_first_start_shows_how_to_get_a_token_and_a_user_id(sandbox, monkeypatch, capsys):
+    _identifies(monkeypatch)
+    Units(monkeypatch, sandbox)
+    _answers(monkeypatch, "1", "42", secrets=["123:abcdef"])
+
+    assert cli.main(["gateway", "start"]) == 0
+
+    out = capsys.readouterr().out
+    assert "how to get a bot token from @BotFather:" in out
+    assert "/newbot" in out
+    assert "who may talk to it: telegram user ids:" in out
+    assert "@userinfobot" in out
+    assert out.index("/newbot") < out.index("credential valid")  # before the question
+
+
+def test_a_rerun_with_everything_known_prints_no_how_to(sandbox, monkeypatch, capsys):
+    _identifies(monkeypatch)
+    Units(monkeypatch, sandbox)
+    gateways.add("telegram", allowed=[42])
+    gateways.set_token(gateways.Gateway(name="telegram"), "123:abc")
+
+    assert cli.main(["gateway", "start", "telegram", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "/newbot" not in out and "@userinfobot" not in out

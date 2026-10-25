@@ -34,12 +34,35 @@ class Platform:
     kind: str
     credential: str  # what the person is asked for
     user_ids: str  # how the allow list is described
+    # shown right before each question, so nobody has to leave the terminal to find out how
+    credential_steps: tuple[str, ...] = ()
+    user_id_steps: tuple[str, ...] = ()
 
 
 def platform(kind: str) -> Platform:
     if kind == "telegram":
-        return Platform(kind, credential="bot token from @BotFather",
-                        user_ids="telegram user ids")
+        return Platform(
+            kind,
+            credential="bot token from @BotFather",
+            user_ids="telegram user ids",
+            credential_steps=(
+                "Open Telegram and start a chat with @BotFather (https://t.me/BotFather).",
+                "Send /newbot, then a display name, then a username that ends in \"bot\".",
+                "BotFather replies with the token: digits, a colon, then a long string, like "
+                "123456789:AAH... Copy all of it.",
+                "Already have a bot? Send /mybots, pick it, then API Token. /revoke there gives "
+                "a new token and stops the old one.",
+            ),
+            user_id_steps=(
+                "A user id is a number, not an @username.",
+                "In Telegram, start a chat with @userinfobot (https://t.me/userinfobot) and send "
+                "it any message.",
+                "It replies with your Id, a number like 123456789. Copy that.",
+                "For other people: ask each of them to do the same and send you their number.",
+                "Separate several ids with commas. Leave it blank and nobody can talk to the bot "
+                "until you run gateway start again.",
+            ),
+        )
     raise GatewayError(f"the {kind} transport is not implemented yet")
 
 
