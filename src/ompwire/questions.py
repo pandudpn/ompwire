@@ -30,7 +30,9 @@ def extract(text: str) -> tuple[str, list[str]]:
     if not matches:
         return text, []
     match = matches[-1]  # the question is asked at the end of the turn
-    options = [part.strip() for part in re.split(r"\||\n", match.group("body")) if part.strip()]
+    # an option with no letter or digit ("…", "-") is a placeholder, not a choice to offer
+    options = [part.strip() for part in re.split(r"\||\n", match.group("body"))
+               if re.search(r"\w", part)]
     cleaned = (text[: match.start()] + text[match.end():]).strip()
     deduped: list[str] = []
     for option in options:

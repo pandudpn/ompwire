@@ -58,6 +58,11 @@ valkey
         assert options == ["Discord", "WhatsApp", "stop"]
         assert "`<<options: …>>`" in text  # the explanation keeps its example
 
+    def test_a_placeholder_marker_offers_nothing(self):
+        text, options = extract("pick one\n<<options: … | ->>")
+        assert options == []
+        assert text == "pick one"  # the marker is still removed
+
     def test_only_a_mention_is_no_question_at_all(self):
         text, options = extract("write `<<options: a | b>>` on its own line")
         assert options == []
