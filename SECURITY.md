@@ -19,13 +19,18 @@ patched. `main` is unreleased code.
 
 ## Threat model
 
-ompwire exposes a personal agent on your own machine to one chat platform. It is single user
-on purpose, and the boundaries follow from that.
+ompwire exposes a personal agent on your own machine to the chat platforms you connect as
+gateways, and to your own terminal through `ompwire chat`. It is single user on purpose, and the
+boundaries follow from that. Every gateway gets the same rules below; Telegram is the one
+implemented today.
 
 **Who can talk to the agent**
 - Every update is dropped unless the sender's user id is in the gateway's `allowed_users`.
   Strangers get no reply, not a refusal.
-- Long polling only: no inbound port, no webhook secret, nothing listening.
+- No inbound network. The Telegram gateway uses long polling: no port, no webhook secret,
+  nothing listening. A future gateway that needs a webhook is a change to this model and has
+  to be documented here.
+- `ompwire chat` is reachable only by whoever already has a shell as your user.
 
 **What the agent may do without a person**
 - `approval_mode = write`: shell commands that can change the machine need a button press.
@@ -39,7 +44,8 @@ on purpose, and the boundaries follow from that.
 **What leaves the machine**
 - Outgoing files must resolve inside the agent's working directory, exist, fit `files.max_mb`,
   and at most five go out per reply. A model that read `~/.ssh` cannot post it by naming it.
-- Nothing is sent anywhere except Telegram and the model provider OMP talks to. No telemetry.
+- Nothing is sent anywhere except the connected chat platforms and the model provider OMP
+  talks to. No telemetry.
 
 **Secrets**
 - Bot tokens live in `~/.config/ompwire/.env` (mode `0600`), loaded by systemd through
@@ -80,7 +86,7 @@ on purpose, and the boundaries follow from that.
 
 ## If a token leaks
 
-Revoke first, then repair the local copy.
+Revoke first, then repair the local copy. For Telegram:
 
 ```bash
 # 1. revoke in @BotFather, then

@@ -1,14 +1,30 @@
 # ompwire
 
-Telegram front end for an [OMP](https://omp.sh) agent.
+Chat front end for an [OMP](https://omp.sh) agent. Talk to your agent from a chat app or from a
+terminal.
 
 OMP owns the agent: the loop, the tools, the skills, the memory and context compaction.
 ompwire carries messages between a chat and `omp --mode acp` and renders what comes back. One
 chat is one OMP session and one `omp` process.
 
 ```
-Telegram  <->  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
+Telegram  ─┐
+(gateways) ├─>  ompwire engine  <->  omp --mode acp  ->  tools, skills, MCP servers
+terminal  ─┘
 ```
+
+The engine knows nothing about any platform. A platform is a surface that renders messages,
+buttons and files its own way; a chat app connects as a gateway with its own bot and systemd
+unit, and the terminal needs neither. Adding a platform does not change how a turn runs.
+
+| Platform | Status | Start it with |
+| --- | --- | --- |
+| Telegram | implemented | `ompwire gateway add telegram` |
+| Terminal | implemented | `ompwire chat` |
+| WhatsApp | planned; `gateway add whatsapp` refuses and writes nothing | |
+| Discord | planned | |
+
+CONTRIBUTING.md lists what a new platform implements.
 
 It is built for one person on their own machine. The only state ompwire keeps is a SQLite file
 that maps a chat to a session id. There is no server, no web UI and no second agent loop.
@@ -33,10 +49,11 @@ that maps a chat to a session id. There is no server, no web UI and no second ag
 
 ## Requirements
 
-- Linux with `systemd --user`. A gateway only runs as a user unit.
+- Linux with `systemd --user` for gateways. A gateway only runs as a user unit.
 - Python 3.11 or newer.
 - `omp` on `PATH`.
-- A bot token from [@BotFather](https://t.me/BotFather).
+- A credential for each platform you connect. For Telegram, a bot token from
+  [@BotFather](https://t.me/BotFather). The terminal needs none.
 
 `omp --mode acp` is not listed in `omp --help`. `tests/test_acp_contract.py` checks the wire
 against the real binary, so an agent upgrade that changes it fails a test instead of a chat.
@@ -62,6 +79,12 @@ ln -sfn "$PWD/.venv/bin/ompwire" ~/.local/bin/ompwire
 
 ```bash
 ompwire setup                    # find the agent, pick model, mode, thinking, cwd
+ompwire chat                     # talk to it from this terminal right away
+```
+
+To reach it from a chat app, add a gateway. With Telegram:
+
+```bash
 ompwire gateway add telegram     # token (checked with getMe), then your user id
 ompwire gateway start telegram   # write the systemd unit, enable it, start it
 ompwire doctor                   # agent, store and credentials, one line per check
@@ -92,10 +115,13 @@ systemd and runs `enable --now`. The token is checked before anything is written
 unit with `Restart=always` on a revoked token looks like a crash loop.
 
 Each live chat owns its own `omp` process, so memory grows with conversations, not with bots.
-Each unit is capped at `MemoryMax=4G`. Telegram is the only platform implemented today;
-`gateway add whatsapp` refuses and writes nothing.
+Each unit is capped at `MemoryMax=4G`. `gateway add` refuses a platform that is not
+implemented yet, so nothing half-configured is ever written.
 
-## In the chat
+## In a chat app
+
+The commands and behaviour below are the Telegram gateway's. Another chat platform follows the
+same rules; the terminal has its own smaller set, described under [Terminal](#terminal).
 
 | Command | What it does |
 | --- | --- |
@@ -196,17 +222,35 @@ at 7, summarise the repo"); the agent proposes it and nothing is installed until
 `[stream] show_reasoning` sets the default. Subagents need no switch: OMP runs them through its
 `task` tool, and the trace labels that call `subagent` with its name and progress.
 
+## Terminal
+
+`ompwire chat` runs the same engine without a gateway: no bot, no token, no systemd unit. The
+answer is printed as it is written, because a terminal has no rate limit.
+
+```bash
+ompwire chat                          # conversation for this directory
+ompwire chat -q "summarise this repo" # one prompt, print the answer, exit
+ompwire chat --cwd ~/proj             # run the agent in another directory
+```
+
+Each directory keeps its own conversation (`cli:<cwd>`), separate from any chat app. Inside:
+`/new`, `/stop`, `/model <id>`, `/mode <default|plan>`, `/context`, `/compaction`, `/help` and
+`/exit`. Questions are answered by number or by typing, and approvals are asked inline.
+
+Without a terminal on stdin (`-q` from a script or a pipe) nobody can answer, so an approval
+request is allowed instead of hanging. Run one-shot prompts only where that is acceptable.
+
 ## Configuration
 
 | Path | Holds |
 | --- | --- |
 | `~/.config/ompwire/config.toml` | agent settings |
 | `~/.config/ompwire/gateways.toml` | one block per gateway: platform, allow list, home channel |
-| `~/.config/ompwire/.env` | one bot token per gateway, mode `0600` |
+| `~/.config/ompwire/.env` | one credential per gateway (the bot token for Telegram), mode `0600` |
 
 Precedence: defaults, then `config.toml`, then environment variables. Sections: `[acp]`,
 `[agent]`, `[session]`, `[stream]`, `[approval]`, `[files]`, `[logging]`, `[mcp]`,
-`[telegram]`. `ompwire config` prints the merged result with secrets masked.
+and one per platform (`[telegram]`). `ompwire config` prints the merged result with secrets masked.
 `OMPWIRE_CONFIG_DIR` points everything at another directory.
 
 `ompwire setup` can be run again: every prompt is pre-filled with what is on disk.
@@ -246,8 +290,8 @@ reports without a handshake.
 | Symptom | Cause |
 | --- | --- |
 | The bot never answers, no error | your user id is not on the allow list (`gateway list` shows it) |
-| `gateway add` says the token is rejected | revoked in @BotFather; use `--force` with the new one |
-| `409 Conflict` in the journal | a second process polls the same token |
+| `gateway add` says the token is rejected | Telegram: revoked in @BotFather; use `--force` with the new one |
+| `409 Conflict` in the journal | Telegram: a second process polls the same token |
 | `start` says systemd --user is unavailable | no user manager (container, CI) |
 | An answer stops mid-turn | `journalctl --user -u ompwire-<name> -f` |
 
