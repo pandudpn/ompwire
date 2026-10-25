@@ -33,4 +33,6 @@ def isolate_real_paths(monkeypatch, tmp_path):
     # the agent is the developer's: a test that cares about a missing agent patches this to None
     monkeypatch.setattr(service, "agent_binary", lambda command="": "/usr/bin/omp")
     monkeypatch.setattr(service, "agent_command", lambda: "omp")
+    # pacing is real time; the tests about pacing set their own gap
+    monkeypatch.setitem(config_module.DEFAULTS["stream"], "min_gap", 0.0)
     return tmp_path

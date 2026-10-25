@@ -68,7 +68,11 @@ Line counts move. If a number here is wrong, the file is right and this table is
 5. `session/update` frames stream back. Nothing is edited after it is sent: the prose written
    before each tool call is posted as a message when the tool call starts, each tool call is
    posted as its own message when it finishes (with its output), and whatever is left goes out
-   when the turn ends. Every message's timestamp is when that step happened.
+   when the turn ends. Every message's timestamp is when that step happened. Telegram allows
+   about one message a second per chat, so one sender posts the outbox in order at least
+   `stream.min_gap` apart; tool traces that finish while it waits (the gap, or a flood window)
+   go out together as one message, and a trace dropped after flood control is named in the
+   chat ("… N tool call(s) not shown") instead of disappearing.
 6. `session/request_permission` becomes an inline keyboard. The answer is an option id from
    what the agent offered, plus a persisted override so the same tool is not asked twice.
 7. Every action lands in a rotating log with token-shaped strings redacted before the handler

@@ -243,6 +243,8 @@ class ChatAgent:
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
         self.started_at = time.time()
         self.pending_options: list[str] = []
+        # when this chat last got a message; the pacing gap is measured from it across turns
+        self._last_post = 0.0
         self.last_used = time.time()
         self.busy = False
         self._user_cancel = False
@@ -636,40 +638,96 @@ class ChatAgent:
         # Every message is posted once and never edited, so its timestamp is when that step
         # happened. Answer text is cut into segments at each tool call; each tool call is its own
         # message, posted when it finishes so it carries its output.
+        #
+        # Telegram allows roughly one message a second per chat. drain() never waits on the
+        # network: it appends to an outbox, and one sender posts it in order, at least
+        # stream.min_gap apart. Tool traces that pile up while the sender waits (pacing or a
+        # flood window) go out together as one message, and a trace that is dropped after flood
+        # control is counted and named in the chat instead of vanishing.
         segment: list[str] = []    # answer text since the last tool call
         answer: list[str] = []     # the whole answer, for the markers read at the end
         thinking: list[str] = []
         trace: dict[str, dict[str, Any]] = {}
-        state: dict[str, Any] = {"text_msg": None, "tools": 0}
+        state: dict[str, Any] = {"text_msg": None, "tools": 0, "dropped": 0, "closed": False}
+        outbox: list[dict[str, Any]] = []
+        wake = asyncio.Event()
+        min_gap = float(self.config.get("stream", "min_gap", 1.0))
+
+        def enqueue(kind: str, body: str, *, html: bool, essential: bool) -> None:
+            outbox.append({"kind": kind, "body": body, "html": html, "essential": essential})
+            wake.set()
 
         async def post(body: str, *, html: bool, essential: bool) -> Any:
             """One new message. A flood window is waited out for the answer, not for a trace."""
             for attempt in range(2):
+                wait = self._last_post + min_gap - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
                 try:
-                    return await (self.send_html(body) if html else self.send_md(body))
+                    sent_msg = await (self.send_html(body) if html else self.send_md(body))
+                    self._last_post = time.monotonic()
+                    return sent_msg
                 except RetryAfter as exc:
                     window = self._retry_window(exc)
+                    self._last_post = time.monotonic() + window  # nothing goes out before it ends
                     if attempt or window > (60 if essential else 10):
                         log.warning("message dropped chat=%s after flood control (%.0fs)",
                                     self.chat_id, window)
                         return None
-                    await asyncio.sleep(window + 0.5)
                 except TelegramError as exc:
                     log.warning("message not delivered chat=%s: %s", self.chat_id, exc)
                     return None
             return None
 
-        async def flush_thinking() -> None:
+        def dropped_line() -> str:
+            count = state["dropped"]
+            return f"<i>… {count} tool call(s) not shown (Telegram flood control)</i>"
+
+        async def sender() -> None:
+            while True:
+                if not outbox:
+                    if state["closed"]:
+                        break
+                    wake.clear()
+                    await wake.wait()
+                    continue
+                if outbox[0]["kind"] != "trace":
+                    item = outbox.pop(0)
+                    sent_msg = await post(item["body"], html=item["html"],
+                                          essential=item["essential"])
+                    if sent_msg is not None and item["kind"] == "text":
+                        state["text_msg"] = sent_msg
+                    continue
+                # every trace waiting at the head of the outbox goes out as one message
+                blocks: list[str] = [dropped_line()] if state["dropped"] else []
+                taken = 0
+                while taken < len(outbox) and outbox[taken]["kind"] == "trace":
+                    candidate = "\n\n".join([*blocks, outbox[taken]["body"]])
+                    if taken and len(candidate) > TELEGRAM_LIMIT:
+                        break
+                    blocks.append(outbox[taken]["body"])
+                    taken += 1
+                del outbox[:taken]
+                if await post("\n\n".join(blocks), html=True, essential=False) is None:
+                    state["dropped"] += taken
+                else:
+                    state["dropped"] = 0
+            if state["dropped"]:
+                await post(dropped_line(), html=True, essential=True)
+
+        sender_task = asyncio.create_task(sender())
+
+        def flush_thinking() -> None:
             shown = "".join(thinking).strip()
             thinking.clear()
             if not self.reasoning or not shown:
                 return
             if len(shown) > REASONING_CHARS:
                 shown = "…\n" + shown[-REASONING_CHARS:]
-            await post(f"💭 <i>thinking</i>\n<blockquote expandable>{esc(shown)}</blockquote>",
-                       html=True, essential=False)
+            enqueue("thinking", f"💭 <i>thinking</i>\n<blockquote expandable>{esc(shown)}</blockquote>",
+                    html=True, essential=False)
 
-        async def flush_segment() -> None:
+        def flush_segment() -> None:
             text = strip_agent_noise("".join(segment))
             segment.clear()
             text = hide_file_partial(hide_partial(text, final=True), final=True)
@@ -677,11 +735,9 @@ class ChatAgent:
             if not text.strip():
                 return
             for part in _chunks(text, 3600):
-                sent_msg = await post(part, html=False, essential=True)
-                if sent_msg is not None:
-                    state["text_msg"] = sent_msg
+                enqueue("text", part, html=False, essential=True)
 
-        async def post_tool(entry: dict[str, Any]) -> None:
+        def post_tool(entry: dict[str, Any]) -> None:
             entry["posted"] = True
             if not self.verbose:
                 return
@@ -691,15 +747,18 @@ class ChatAgent:
             body = tool_block(*fields, entry.get("output", ""), *tail)
             if len(body) > TELEGRAM_LIMIT:
                 body = tool_block(*fields, "(output too long for one message)", *tail)
-            await post(body, html=True, essential=False)
+            enqueue("trace", body, html=True, essential=False)
 
         async def finish() -> None:
             """End of turn: whatever is still buffered, then the markers in the whole answer."""
-            await flush_thinking()
-            await flush_segment()
+            flush_thinking()
+            flush_segment()
             for entry in trace.values():
                 if not entry.get("posted"):
-                    await post_tool(entry)
+                    post_tool(entry)
+            state["closed"] = True
+            wake.set()
+            await sender_task  # the buttons and files come after the last message, in order
             raw = "".join(answer)
             _, options = extract_options(raw)
             if options:
@@ -717,7 +776,7 @@ class ChatAgent:
                 if update.kind == "agent_thought_chunk" and update.text:
                     thinking.append(update.text)
                 elif update.kind == "agent_message_chunk" and update.text:
-                    await flush_thinking()
+                    flush_thinking()
                     segment.append(update.text)
                     answer.append(update.text)
                 elif update.kind in {"tool_call", "tool_call_update"}:
@@ -726,8 +785,8 @@ class ChatAgent:
                     entry = trace.setdefault(call_id, {"kind": "tool"})
                     if update.kind == "tool_call":
                         # the text before a tool call is a finished thought: post it now
-                        await flush_thinking()
-                        await flush_segment()
+                        flush_thinking()
+                        flush_segment()
                         if _is_waiting(str(raw.get("title") or "")):
                             entry["posted"] = True
                             continue
@@ -771,7 +830,7 @@ class ChatAgent:
                     if any(chunks):
                         entry["output"] = "\n".join(chunks)
                     if entry["status"] in {"completed", "failed"}:
-                        await post_tool(entry)
+                        post_tool(entry)
 
         drain_task = asyncio.create_task(drain())
         try:
@@ -797,6 +856,10 @@ class ChatAgent:
             # stop and a silence timeout do not: the person has already been told it failed.
             if self._user_cancel or isinstance(exc, AcpTimeout):
                 self.store.end_turn(self.key)
+            raise
+        except BaseException:
+            # a cancelled turn (gateway shutdown) never reaches finish(); do not leave the sender
+            sender_task.cancel()
             raise
         self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
         await drain_task

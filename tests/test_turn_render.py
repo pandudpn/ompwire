@@ -88,7 +88,7 @@ def rendered(monkeypatch):
         config = load_config(env={})
         config.data.setdefault("stream", {})
         config.data["stream"].update({"show_tool_calls": verbose,
-                                      "show_reasoning": reasoning})
+                                      "show_reasoning": reasoning, "min_gap": 0.0})
         bot = FakeBot()
         app = types.SimpleNamespace(bot=bot)
 
@@ -311,29 +311,99 @@ def test_text_is_cut_at_each_tool_call_into_separate_messages(rendered):
     assert order == ["cek", "tool", "answer"]
 
 
-def test_each_tool_call_is_its_own_message_posted_once():
+class SpacedClient(FakeClient):
+    """Updates with a real pause between them, the way tool calls arrive from a live agent."""
+
+    def __init__(self, updates, pause=0.05):
+        super().__init__(updates)
+        self.pause = pause
+
+    def prompt(self, _session_id, _text, images=None, timeout=900.0, collect=True):
+        import time as _time
+
+        for update in self.updates:
+            self.on_update(update)
+            _time.sleep(self.pause)
+        return PromptResult(stop_reason="end_turn", usage={}, text="", updates=[])
+
+
+def _paced_turn(bot, updates, *, min_gap=0.0, pause=0.05):
     from ompwire.config import load_config
 
     config = load_config(env={})
-    bot = FakeBot()
-    updates = [tool_call("t1", "first"), tool_progress("t1", "half", status="in_progress"),
-               tool_progress("t1", "", status="completed"),
-               tool_call("t2", "second"), tool_progress("t2", "", status="failed"),
-               message("selesai")]
+    config.data["stream"]["min_gap"] = min_gap
 
     async def go():
-        agent = telegram.ChatAgent(config, chat_id=1, key="pertool",
+        agent = telegram.ChatAgent(config, chat_id=1, key="paced",
                                    app=types.SimpleNamespace(bot=bot))
-        agent.client = FakeClient(updates)
+        agent.client = SpacedClient(updates, pause)
         agent.client.on_update = agent._on_update
         agent.session_id = "s"
         await agent.ask("halo")
 
     asyncio.run(go())
+
+
+def test_each_tool_call_is_its_own_message_posted_once():
+    bot = FakeBot()
+    _paced_turn(bot, [tool_call("t1", "first"), tool_progress("t1", "half", status="in_progress"),
+                      tool_progress("t1", "", status="completed"),
+                      tool_call("t2", "second"), tool_progress("t2", "", status="failed"),
+                      message("selesai")])
     tools = [body for body in bot.messages if "🔧" in body]
     assert len(tools) == 2  # one per call, not one per progress update
     assert "first" in tools[0] and "second" in tools[1]
     assert "failed" in tools[1]
+
+
+def test_messages_are_paced_and_traces_that_pile_up_are_merged():
+    """Five calls finish while the sender is still inside its gap: they go out as one message."""
+    import itertools
+    import time as _time
+
+    stamps: list[float] = []
+
+    class StampBot(FakeBot):
+        async def send_message(self, chat_id, text, **kw):
+            stamps.append(_time.monotonic())
+            return await super().send_message(chat_id, text, **kw)
+
+    bot = StampBot()
+    updates = [message("mulai.")]
+    for index in range(5):
+        updates += [tool_call(f"t{index}", f"grep {index}"),
+                    tool_progress(f"t{index}", "", status="completed")]
+    updates.append(message("selesai."))
+    _paced_turn(bot, updates, min_gap=0.3, pause=0.01)
+
+    gaps = [later - earlier for earlier, later in itertools.pairwise(stamps)]
+    assert all(gap >= 0.25 for gap in gaps), gaps
+    traces = [body for body in bot.messages if "🔧" in body]
+    assert len(traces) < 5  # merged, not five separate messages
+    assert sum(body.count("🔧") for body in traces) == 5  # and none lost
+    assert bot.messages[0] == "mulai." and "selesai" in bot.messages[-1]
+
+
+def test_a_trace_dropped_by_flood_control_is_named_in_the_chat(monkeypatch):
+    from telegram.error import RetryAfter
+
+    class FloodTraces(FakeBot):
+        async def send_message(self, chat_id, text, **kw):
+            if "🔧" in text and "not shown" not in text:
+                raise RetryAfter(30)  # longer than a trace is worth waiting for
+            return await super().send_message(chat_id, text, **kw)
+
+    real_sleep = asyncio.sleep
+
+    async def short_sleep(delay, *a, **k):  # the 30 s flood window, without waiting 30 s
+        return await real_sleep(min(delay, 0.01), *a, **k)
+
+    monkeypatch.setattr(telegram.asyncio, "sleep", short_sleep)
+    bot = FloodTraces()
+    _paced_turn(bot, [tool_call("t1", "a"), tool_progress("t1", "", status="completed"),
+                      message("jawaban")])
+    assert any("jawaban" in body for body in bot.messages)
+    assert any("1 tool call(s) not shown" in body for body in bot.messages)
 
 
 def test_a_tool_call_that_never_finishes_is_still_shown_at_the_end(rendered):

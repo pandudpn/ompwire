@@ -95,6 +95,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "enabled": True,
         "show_tool_calls": True,
         "show_usage": False,  # per-turn token line; /usage covers it on demand
+        # seconds between two messages in one chat; Telegram allows about one a second
+        "min_gap": 1.0,
         # the agent's thinking arrives over ACP as agent_thought_chunk; off by default because
         # at thinking=xhigh it is long, and /reasoning turns it on for the turns that need it
         "show_reasoning": False,

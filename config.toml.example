@@ -51,6 +51,7 @@ idle_timeout = 1800        # drop the ACP subprocess after this many idle second
 enabled = true
 show_tool_calls = true
 show_usage = false       # per-turn token line; use /usage instead
+min_gap = 1.0              # seconds between messages; Telegram allows about one a second per chat
 
 [mcp]
 # Where the session's MCP servers come from:
