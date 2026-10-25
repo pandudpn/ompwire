@@ -18,6 +18,7 @@ import logging
 import logging.handlers
 import os
 import pathlib
+import re
 import signal
 import time
 from pathlib import Path
@@ -27,12 +28,20 @@ from typing import Any
 # returns from v23. _retry_window already takes either, so opt in rather than log noise.
 os.environ.setdefault("PTB_TIMEDELTA", "true")
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    Chat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MessageEntity,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -44,6 +53,7 @@ from . import schedules as schedule_lib
 from .acp import AcpError
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
+from .audience import CHANNEL, GROUP, PRIVATE, Audience
 from .config import Config, approval_policy, save_override
 from .engine import (
     PERMISSION_TIMEOUT,
@@ -53,7 +63,6 @@ from .engine import (
 )
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
-from .gateways import user_id
 from .tg_html import card, change, esc, help_sections
 from .tg_login import LoginMixin
 from .tg_pickers import PickerMixin
@@ -92,7 +101,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("mode", "show or set default|plan"),
     ("thinking", "show or set the thinking level"),
     ("approve", "show or set the approval policy"),
-    ("verbose", "toggle tool-call trace"),
+    ("verbose", "toggle activity in this chat: trace, todo, notices"),
     ("commands", "search the agent's own slash commands"),
     ("queue", "queue a prompt behind the running turn"),
     ("compact", "run omp's context compaction now"),
@@ -139,8 +148,10 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         self.credential_db = str(config.get("agent", "credential_db", "~/.omp/agent/agent.db"))
         self.token = str(config.get("gateway", "credential", "") or "")
         # Telegram names a person by a numeric id; the gateway keeps ids as text for every platform
-        self.allowed = {int(u) for u in map(user_id, config.get("gateway", "allowed_users") or [])
-                        if u}
+        self.audience = Audience.from_config(config)
+        self.allowed = {int(user) for user in self.audience.allowed}
+        self.username = ""   # the bot's own @name, set at startup; a group mention is checked against it
+        self.bot_id = 0
         self.agents: dict[int, engine.ChatAgent] = {}
         self.queues: dict[int, asyncio.Queue[tuple[str, Any]]] = {}
         self.workers: dict[int, asyncio.Task] = {}
@@ -161,17 +172,54 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
     def agent_for(self, chat_id: int) -> engine.ChatAgent:
         agent = self.agents.get(chat_id)
         if agent is None:
-            agent = chat_agent(self.config, chat_id, f"{KEY_PREFIX}{chat_id}", self.app)
+            # a negative id is a group or a channel: other people read it
+            agent = chat_agent(self.config, chat_id, f"{KEY_PREFIX}{chat_id}", self.app,
+                               shared=chat_id < 0)
             self.agents[chat_id] = agent
         return agent
 
     def _authorized(self, update: Update) -> bool:
+        return not self._refusal(update)
+
+    def _refusal(self, update: Update) -> str:
+        """Why this update is not taken ("" when it is): the gateway's audience decides."""
+        chat = update.effective_chat
+        if chat is None:
+            return "no chat"
+        if update.callback_query is not None:
+            # a button press: the person who pressed it, wherever the buttons were posted
+            user = update.effective_user
+            allowed = user is not None and str(user.id) in self.audience.allowed
+            return "" if allowed else "sender not allowed"
+        kind = {Chat.PRIVATE: PRIVATE, Chat.CHANNEL: CHANNEL}.get(chat.type, GROUP)
         user = update.effective_user
-        if user is None:
+        message = update.effective_message
+        return self.audience.admit(chat=str(chat.id), kind=kind,
+                                   sender=str(user.id) if user else "",
+                                   addressed=kind == GROUP and self._addressed(message))
+
+    def _addressed(self, message: Any) -> bool:
+        """A group message meant for the bot: an @mention of it, a reply to one of its messages,
+        or a command written for it (`/status@this_bot`)."""
+        if message is None:
             return False
-        if not self.allowed:
-            return False
-        return user.id in self.allowed
+        reply = message.reply_to_message
+        if reply is not None and reply.from_user is not None and reply.from_user.id == self.bot_id:
+            return True
+        text = message.text or message.caption or ""
+        entities = message.entities or message.caption_entities or ()
+        name = self.username.lower()
+        for entity in entities:
+            piece = text[entity.offset:entity.offset + entity.length].lower()
+            if entity.type == MessageEntity.MENTION and name and piece == f"@{name}":
+                return True
+            text_mention = entity.type == MessageEntity.TEXT_MENTION and entity.user is not None
+            if text_mention and entity.user.id == self.bot_id:
+                return True
+            if entity.type == MessageEntity.BOT_COMMAND and entity.offset == 0:
+                # a bare /command in a group reaches every bot; only /command@this_bot is ours
+                return name != "" and piece.endswith(f"@{name}")
+        return False
 
     async def cmd_schedule(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -206,11 +254,12 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     async def _deny(self, update: Update) -> None:
+        """Say nothing. A refusal tells a stranger, or a whole group, that a bot answers here;
+        the log line is where an owner finds out why a message was not taken."""
         user = update.effective_user
-        if update.effective_message is not None:
-            await update.effective_message.reply_text(
-                f"not authorized. your user id: {user.id if user else 'unknown'}"
-            )
+        log.info("update dropped chat=%s user=%s: %s",
+                 update.effective_chat.id if update.effective_chat else "?",
+                 user.id if user else "-", self._refusal(update) or "not allowed")
 
     # ----------------------------------------------------------------- queue
     def enqueue(self, chat_id: int, kind: str, payload: Any) -> int:
@@ -307,6 +356,8 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         interrupts a colleague. `[telegram] busy_message = "queue"` restores the old FIFO, and
         `/queue` always queues. Anything omp declines to inject still lands in the queue.
         """
+        if chat_id < 0:
+            payload = self._framed(payload, message)
         agent = self.agent_for(chat_id)
         if chat_id in self.answer_armed:
             # "Other answer" was tapped: this message is the answer, whatever else is waiting
@@ -320,9 +371,26 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             held = self.held.setdefault(chat_id, [])
             held.append((payload, message))
             log.info("held while a question is open chat=%s position=%s", chat_id, len(held))
-            await self._ack(message, held_text(len(held)))
+            await self._event(agent, message, held_text(len(held)))
             return
         await self._route(chat_id, agent, payload, message)
+
+    def _framed(self, payload: Any, message: Any) -> Any:
+        """A group or channel prompt as the agent should read it: the bot's own @mention taken
+        out, and the sender named, since one session serves everyone in that chat."""
+        text = str(getattr(payload, "text", "") or "")
+        if self.username:
+            text = re.sub(rf"@{re.escape(self.username)}\b", "", text, flags=re.IGNORECASE)
+            text = " ".join(text.split()) if "\n" not in text else text.strip()
+        user = getattr(message, "from_user", None)
+        chat = getattr(message, "sender_chat", None) or getattr(message, "chat", None)
+        who = (getattr(user, "full_name", "") or getattr(user, "username", "") if user is not None
+               else getattr(chat, "title", "") or "channel")
+        framed = _TextOnly(f"[{who}] {text}" if who else text, getattr(payload, "_message", message),
+                           images=list(getattr(payload, "images", None) or []))
+        framed.original = getattr(payload, "original", None)
+        framed.resumes = int(getattr(payload, "resumes", 0))
+        return framed
 
     async def _release_held(self, chat_id: int) -> None:
         """The question is settled: what was typed meanwhile runs next, in order."""
@@ -343,7 +411,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         if str(self.config.get("telegram", "busy_message", "steer")) == "steer":
             outcome, reason = await agent.steer(payload.text, getattr(payload, "images", None) or None)
             if outcome == "injected":
-                await self._ack(message, STEERED)
+                await self._event(agent, message, STEERED)
                 return
             if outcome == "promptRequired":
                 # the turn ended between the busy check and the steer: this is a fresh prompt
@@ -352,7 +420,13 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             log.warning("steer not accepted chat=%s outcome=%s reason=%s; queueing", chat_id,
                         outcome, reason or "-")
         depth = self.enqueue(chat_id, "prompt", payload)
-        await self._ack(message, queued_text(depth))
+        await self._event(agent, message, queued_text(depth))
+
+    async def _event(self, agent: engine.ChatAgent, message: Any, text: str) -> None:
+        """Where an ordinary message went (steered, queued, held). A quiet chat only ever sees
+        the answer, so there it is not said."""
+        if agent.verbose:
+            await self._ack(message, text)
 
     async def _ack(self, message: Any, text: str) -> None:
         """A reply quoting the message itself, so it is clear which message went where.
@@ -778,9 +852,9 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         if not self._authorized(update):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
-        agent.verbose = not agent.verbose
+        agent.set_display("verbose", not agent.verbose)
         await self.announce(update.effective_chat.id,
-                           f"tool trace: {'on' if agent.verbose else 'off'}")
+                           f"activity (trace, todo list, notices): {'on' if agent.verbose else 'off'} · this chat")
 
     async def cmd_reasoning(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Show or hide the agent's thinking.
@@ -795,11 +869,9 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         wanted = (ctx.args[0].lower() if ctx.args else "").strip()
         if wanted in {"on", "off", "1", "0", "true", "false", "yes", "no"}:
             value = wanted in {"on", "1", "true", "yes"}
-            save_override("stream", "show_reasoning", value, self.config.overrides_path)
-            agent.reasoning = value
-            self.config.data.setdefault("stream", {})["show_reasoning"] = value
+            agent.set_display("reasoning", value)
             return await self.announce(update.effective_chat.id,
-                                       f"reasoning: {'on' if value else 'off'}")
+                                       f"reasoning: {'on' if value else 'off'} · this chat")
         await self.announce(
             update.effective_chat.id,
             f"reasoning: {'on' if agent.reasoning else 'off'} · `/reasoning on` or `off`")
@@ -880,12 +952,37 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         else:
             await update.effective_message.reply_text("no process running")
 
+    async def on_added(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """The bot was added to a group or a channel, or removed from one.
+
+        A chat that is not listed yet cannot ask the bot anything, /whoami included, so its id
+        reaches the owner here instead: in a private message, never in the chat itself.
+        """
+        change = update.my_chat_member
+        if change is None or change.chat.type == Chat.PRIVATE:
+            return
+        chat = change.chat
+        joined = change.new_chat_member.status in {"member", "administrator"}
+        listed = str(chat.id) in self.audience.chats
+        log.info("bot %s %s %s %r (listed: %s)", "added to" if joined else "removed from",
+                 chat.type, chat.id, chat.title, listed)
+        home = self._home_chat()
+        if home is None or home < 0 or not joined:
+            return
+        mode = self.audience.mode(str(chat.id))
+        note = (f"listed · mode {mode}" if listed else
+                f"not listed, so it is ignored · add it: ompwire gateway start "
+                f"{self.config.get('gateway', 'name', 'telegram')} --groups {chat.id}")
+        await self.announce(home, card(f"➕ added to a {chat.type}", chat.title or "",
+                                       [("id", chat.id)], note))
+
     async def cmd_whoami(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         chat = update.effective_chat
-        await update.effective_message.reply_text(
-            f"user {user.id if user else '?'} · chat {chat.id} · allowed={sorted(self.allowed)}"
-        )
+        line = f"user {user.id if user else '-'} · chat {chat.id} ({chat.type})"
+        if chat.type != Chat.PRIVATE:
+            line += f" · mode {self.audience.mode(str(chat.id))}"
+        await update.effective_message.reply_text(line)
 
     async def cmd_help(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -1103,26 +1200,33 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         app.add_handler(CommandHandler("help", self.cmd_help))
         app.add_handler(CommandHandler("start", self.cmd_help))
         app.add_handler(CallbackQueryHandler(self.on_callback))
+        app.add_handler(ChatMemberHandler(self.on_added, ChatMemberHandler.MY_CHAT_MEMBER))
         app.add_error_handler(self.on_error)
         # Registered commands stop at their CommandHandler; what is left reaches on_command,
         # which forwards it to the agent, and on_text takes plain prose.
-        app.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, self.on_command))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text))
-        app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, self.on_photo))
+        # a new message or a new channel post; an edit would run the same prompt a second time
+        new = filters.UpdateType.MESSAGE | filters.UpdateType.CHANNEL_POST
+        app.add_handler(MessageHandler(new & filters.TEXT & filters.COMMAND, self.on_command))
+        app.add_handler(MessageHandler(new & filters.TEXT & ~filters.COMMAND, self.on_text))
+        app.add_handler(MessageHandler(new & (filters.PHOTO | filters.Document.IMAGE),
+                                       self.on_photo))
         # any other document: PDF, zip, csv, text. The image filter above owns the rest.
-        app.add_handler(MessageHandler(filters.Document.ALL & ~filters.Document.IMAGE,
+        app.add_handler(MessageHandler(new & filters.Document.ALL & ~filters.Document.IMAGE,
                                        self.on_document))
         app.add_handler(MessageHandler(filters.ALL, self.log_update), group=-1)
 
         await app.initialize()
         await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in _unique_commands()])
         me = await app.bot.get_me()
-        log.info("ompwire online as @%s (allowed users: %s)", me.username, sorted(self.allowed))
+        self.username, self.bot_id = str(me.username or ""), int(me.id)
+        log.info("ompwire online as @%s (allowed users: %s, chats: %s)", me.username,
+                 sorted(self.allowed), sorted(self.audience.chats) or "none")
         await self.startup_banner(str(me.username))
         await app.start()
         # Kept, not dropped: a message sent during the few seconds of a restart is still a
         # message the person expects an answer to.
-        await app.updater.start_polling(drop_pending_updates=False)
+        await app.updater.start_polling(drop_pending_updates=False,
+                                        allowed_updates=Update.ALL_TYPES)
         await self.resume_interrupted()
 
         stop = asyncio.Event()
@@ -1161,10 +1265,12 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             except ValueError:
                 continue
             agent = self.agent_for(chat_id)
-            if not enabled or key in exhausted_keys or chat_id not in self.allowed:
+            # a person on the allow list, or a group or channel the gateway still listens in
+            known = chat_id in self.allowed or str(chat_id) in self.audience.chats
+            if not enabled or key in exhausted_keys or not known:
                 agent.store.end_turn(key)
                 log.warning("interrupted turn dropped chat=%s resumes=%s", chat_id, resumes)
-                if chat_id in self.allowed:
+                if known:
                     await self.send_md(chat_id, "a turn was interrupted by a gateway restart and "
                                                 "was not resumed; send it again if you still need it")
                 continue
@@ -1250,8 +1356,9 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             log.warning("shutdown notice send failed: %s", exc)
 
 
-def chat_agent(config: Config, chat_id: int, key: str, app: Application) -> engine.ChatAgent:
-    return engine.ChatAgent(config, key, TelegramSurface(app, chat_id))
+def chat_agent(config: Config, chat_id: int, key: str, app: Application, *,
+               shared: bool = False) -> engine.ChatAgent:
+    return engine.ChatAgent(config, key, TelegramSurface(app, chat_id), shared=shared)
 
 
 class _TextOnly:

@@ -514,40 +514,85 @@ def _start_link(args: argparse.Namespace, gateways, service, gateway, is_new: bo
     return number
 
 
-def _start_groups(args: argparse.Namespace, gateway, is_new: bool) -> tuple[list[str], str]:
-    """The groups a WhatsApp gateway listens in, and when it answers there.
+def _start_groups(args: argparse.Namespace, gateway, is_new: bool
+                  ) -> tuple[list[str], str, dict[str, str]]:
+    """The groups (and, on Telegram, channels) a gateway listens in, and when it answers there.
 
-    Flags win. Otherwise a new gateway, or one with no groups yet, is shown the groups its
-    number is in to pick from; an existing one keeps what it has. Without a terminal nothing is
-    asked: groups are optional, so a script gets none rather than a failed start.
+    `--groups` wins: ids separated by commas, each optionally `id:mode` for its own mode.
+    Otherwise a new gateway, or one with none yet, is asked: WhatsApp lists the groups its
+    number is in, Telegram takes ids (the bot sends one to its owner when it is added to a chat).
+    An existing gateway keeps what it has. Without a terminal nothing is asked.
     """
-    from .gateways import GROUP_MODES
+    from .gateways import GROUP_MODES, chat_id
 
     groups = list(gateway.groups)
+    modes = dict(gateway.group_modes)
     given = getattr(args, "groups", None)
     mode = (getattr(args, "group_mode", "") or gateway.group_mode or "mention").lower()
     if given is not None:
-        groups = [group.strip() for group in given.split(",") if group.strip()]
-        groups = [group if "@" in group else f"{group}@g.us" for group in groups]
+        groups, modes = _parse_groups(given, gateway.kind)
     elif not args.yes and (is_new or not groups) and sys.stdin.isatty():
-        from . import service
+        if gateway.kind == "whatsapp":
+            from . import service
 
-        if service.state(gateway.name) == "active":
-            # one linked device, one connection: reading its groups would knock the gateway off
-            service.stop(gateway.name, disable=False)
-        groups = _pick_groups(gateway, groups)
+            if service.state(gateway.name) == "active":
+                # one linked device, one connection: reading its groups would knock it off
+                service.stop(gateway.name, disable=False)
+            groups = _pick_groups(gateway, groups)
+        else:
+            groups, modes = _ask_telegram_chats(groups)
         if groups and not getattr(args, "group_mode", ""):
-            print("\nin those groups, when should it answer an allowed member?")
-            labels = ["mention: only an @mention of the bot or a reply to it",
-                      "all: every message",
+            print("\nin those chats, when should it answer?")
+            labels = ["mention: an @mention of the bot or a reply to it (groups)",
+                      "all: every message from an allowed member, every channel post",
                       "read: never, it only reads"]
-            picked = _choose("group mode", labels, default=GROUP_MODES.index(mode) + 1
+            picked = _choose("mode", labels, default=GROUP_MODES.index(mode) + 1
                              if mode in GROUP_MODES else 1)
             mode = GROUP_MODES[picked] if picked is not None else "mention"
     if mode not in GROUP_MODES:
         print(f"warn unknown group mode {mode!r}; using mention")
         mode = "mention"
-    return groups, mode
+    groups = [group for group in map(chat_id, groups) if group]
+    return groups, mode, {chat: value for chat, value in modes.items() if chat in groups}
+
+
+def _parse_groups(given: str, kind: str) -> tuple[list[str], dict[str, str]]:
+    """`-1001,-1002:all` or `1203...@g.us:read`: the chats, and the ones with a mode of their own."""
+    from .gateways import GROUP_MODES, chat_id
+
+    groups: list[str] = []
+    modes: dict[str, str] = {}
+    for part in (piece.strip() for piece in given.split(",")):
+        if not part:
+            continue
+        head, _, tail = part.rpartition(":")
+        chat, own = (head, tail) if head and tail.lower() in GROUP_MODES else (part, "")
+        if kind == "whatsapp" and "@" not in chat:
+            chat = f"{chat}@g.us"
+        chat = chat_id(chat)
+        if not chat:
+            continue
+        groups.append(chat)
+        if own:
+            modes[chat] = own.lower()
+    return groups, modes
+
+
+def _ask_telegram_chats(current: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Telegram has no call that lists a bot's chats, so the ids are typed in."""
+    print("\ngroups and channels (optional): the bot answers only in chats listed here.\n"
+          "  1. Add the bot to the group or channel. Once it runs, it sends you that chat's id\n"
+          "     (a negative number, -100...). /whoami in a listed chat shows it too.\n"
+          "  2. In a group, to see an @mention of it, make the bot an admin, or turn privacy\n"
+          "     mode off in @BotFather (/setprivacy) and add it again. A reply to the bot and\n"
+          "     /command@the_bot reach it either way.\n"
+          "  3. In a channel the bot must be an admin. A channel has no sender: anyone who can\n"
+          "     post there can talk to the agent, so list only channels you control.")
+    answer = input("chat ids (comma separated, id:mode for its own mode, blank = "
+                   f"{'keep' if current else 'none'}): ").strip()
+    if not answer:
+        return current, {}
+    return _parse_groups(answer, "telegram")
 
 
 def _pick_groups(gateway, current: list[str]) -> list[str]:
@@ -709,8 +754,7 @@ def _gateway_start_steps(args: argparse.Namespace, gateways, service) -> int:
         if credential is None:
             return 1
     allowed = _start_allowed(args, gateway, spec)
-    groups, group_mode = (_start_groups(args, gateway, is_new) if kind == "whatsapp"
-                          else ([], "mention"))
+    groups, group_mode, group_modes = _start_groups(args, gateway, is_new)
     settings = _start_settings(args, gateway, is_new)
 
     changed_credential = kind != "whatsapp" and credential != ("" if is_new else gateways.token(gateway))
@@ -721,7 +765,8 @@ def _gateway_start_steps(args: argparse.Namespace, gateways, service) -> int:
     # home is where schedules report; it follows the allow list only when that list changed
     home = gateway.home if allowed == gateway.allowed else (allowed[0] if allowed else None)
     updated = gateways.Gateway(name=name, kind=kind, enabled=gateway.enabled, allowed=allowed,
-                               home=home, groups=groups, group_mode=group_mode, settings=settings)
+                               home=home, groups=groups, group_mode=group_mode,
+                               group_modes=group_modes, settings=settings)
     gateways.save([updated if item.name == name else item for item in items]
                   + ([updated] if is_new else []))
     if changed_credential:
@@ -732,8 +777,8 @@ def _gateway_start_steps(args: argparse.Namespace, gateways, service) -> int:
         print(f"ok   allowed {spec.user_ids}: {', '.join(allowed)}")
     else:
         print("warn no allowed users: nobody can talk to this gateway yet")
-    if kind == "whatsapp":
-        print(f"ok   groups: {', '.join(groups) or 'none'} · mode {group_mode}")
+    own = "".join(f" ({chat}: {mode})" for chat, mode in group_modes.items())
+    print(f"ok   groups and channels: {', '.join(groups) or 'none'} · mode {group_mode}{own}")
     own = ", ".join(f"{key}={value}" for values in settings.values() for key, value in values.items())
     print(f"ok   settings: {own or 'shared config.toml'} · state in {gateways.state_dir(name)}")
 

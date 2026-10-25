@@ -105,6 +105,8 @@ useful contribution right now.
 ompwire runs your agent, with your credentials, on your machine. That shapes it:
 
 - one allow list per bot; strangers get no reply at all
+- groups and channels only when listed, each with its own mode (`mention`, `all`, `read`),
+  and quiet there: the answer, not the tool trace
 - no inbound port: gateways reach out to their platform; one that needs a port has to say so
   in SECURITY.md first
 - the bot token never reaches the agent process, and logs mask it; a WhatsApp link stays in

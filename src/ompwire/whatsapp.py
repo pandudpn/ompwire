@@ -34,6 +34,7 @@ from . import schedules as schedule_lib
 from .acp import AcpError
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
+from .audience import GROUP, PRIVATE, Audience
 from .config import Config, approval_policy, save_override
 from .engine import RESUME_PROMPT, mcp_label, resolve_mcp_servers
 from .format import now_wib, tokens, wib_time
@@ -108,10 +109,8 @@ class Transport:
         self.config = config
         self.started_at = time.time()
         self.name = str(config.get("gateway", "name", "whatsapp") or "whatsapp")
-        self.allowed = {user for user in map(user_id, config.get("gateway", "allowed_users") or [])
-                        if user}
-        self.groups = {str(group).strip() for group in config.get("gateway", "groups") or []}
-        self.group_mode = str(config.get("gateway", "group_mode", "mention") or "mention")
+        self.audience = Audience.from_config(config)
+        self.allowed = self.audience.allowed
         self.home = user_id(config.get("gateway", "home_channel")) or next(iter(sorted(self.allowed)), "")
         self.session = session_path(self.name)
         self.client: Any = None
@@ -230,7 +229,8 @@ class Transport:
     def agent_for(self, chat: str) -> engine.ChatAgent:
         agent = self.agents.get(chat)
         if agent is None:
-            agent = engine.ChatAgent(self.config, f"{KEY_PREFIX}{chat}", WhatsAppSurface(self, chat))
+            agent = engine.ChatAgent(self.config, f"{KEY_PREFIX}{chat}", WhatsAppSurface(self, chat),
+                                     shared=chat.endswith(f"@{GROUP_SERVER}"))
             self.agents[chat] = agent
         return agent
 
@@ -314,21 +314,6 @@ class Transport:
             return True
         return bool(context.participant) and user_part(context.participant) in self.me
 
-    def admit(self, chat: str, sender: str, group: bool, message: Any) -> str:
-        """"" to take the message, otherwise why it is dropped (for the log)."""
-        if sender not in self.allowed:
-            return "sender not allowed"
-        if not group:
-            return ""
-        if chat not in self.groups:
-            return "group not listed"
-        mode = self.group_mode
-        if mode == "read":
-            return "group mode is read"
-        if mode == "mention" and not self.addressed(message):
-            return "not addressed"
-        return ""
-
     async def on_message(self, _client: Any, event: Any) -> None:
         source = event.Info.MessageSource
         if source.IsFromMe:
@@ -336,7 +321,9 @@ class Transport:
         message = event.Message
         chat = self._chat(source)
         sender = self._sender(source)
-        reason = self.admit(chat, sender, bool(source.IsGroup), message)
+        reason = self.audience.admit(chat=chat, kind=GROUP if source.IsGroup else PRIVATE,
+                                     sender=sender, addressed=bool(source.IsGroup)
+                                     and self.addressed(message))
         if reason:
             log.info("message dropped chat=%s sender=%s: %s", chat, sender or "?", reason)
             return
@@ -493,7 +480,7 @@ class Transport:
             held = self.held.setdefault(chat, [])
             held.append(incoming)
             log.info("held while a question is open chat=%s position=%s", chat, len(held))
-            await self.reply(incoming, held_text(len(held)))
+            await self._event(agent, incoming, held_text(len(held)))
             return
         await self._route(chat, agent, incoming)
 
@@ -511,7 +498,7 @@ class Transport:
         if str(self.config.get("whatsapp", "busy_message", "steer")) == "steer":
             outcome, reason = await agent.steer(incoming.prompt, incoming.images or None)
             if outcome == "injected":
-                await self.reply(incoming, STEERED)
+                await self._event(agent, incoming, STEERED)
                 return
             if outcome == "promptRequired":
                 self.enqueue(chat, "prompt", incoming)
@@ -519,7 +506,13 @@ class Transport:
             log.warning("steer not accepted chat=%s outcome=%s reason=%s; queueing", chat,
                         outcome, reason or "-")
         depth = self.enqueue(chat, "prompt", incoming)
-        await self.reply(incoming, queued_text(depth))
+        await self._event(agent, incoming, queued_text(depth))
+
+    async def _event(self, agent: engine.ChatAgent, incoming: Incoming, text: str) -> None:
+        """Where an ordinary message went (steered, queued, held). A quiet chat only ever sees
+        the answer, so there it is not said."""
+        if agent.verbose:
+            await self.reply(incoming, text)
 
     # ------------------------------------------------------------ commands
     def session_card(self, agent: engine.ChatAgent, title: str, note: str = "") -> str:
@@ -755,16 +748,14 @@ class Transport:
         await self.send_text(chat, f"⚙️ approval {previous} → *{value}* · saved")
 
     async def cmd_verbose(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
-        agent.verbose = not agent.verbose
-        await self.send_text(incoming.chat, f"tool trace: {'on' if agent.verbose else 'off'}")
+        agent.set_display("verbose", not agent.verbose)
+        await self.send_text(incoming.chat,
+                             f"activity (trace, todo list, notices): {'on' if agent.verbose else 'off'} · this chat")
 
     async def cmd_reasoning(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
         wanted = (args[0].lower() if args else "").strip()
         if wanted in {"on", "off"}:
-            value = wanted == "on"
-            save_override("stream", "show_reasoning", value, self.config.overrides_path)
-            agent.reasoning = value
-            self.config.data.setdefault("stream", {})["show_reasoning"] = value
+            agent.set_display("reasoning", wanted == "on")
         await self.send_text(incoming.chat, f"reasoning: {'on' if agent.reasoning else 'off'}"
                                             + ("" if wanted else " · /reasoning on|off"))
 
@@ -813,7 +804,7 @@ class Transport:
 
     async def cmd_whoami(self, incoming: Incoming, _agent: engine.ChatAgent, _args: list[str]) -> None:
         await self.reply(incoming, f"you {incoming.sender or '?'} · chat {incoming.chat} · "
-                                   f"group mode {self.group_mode if incoming.group else '-'}")
+                                   f"mode {self.audience.mode(incoming.chat) if incoming.group else '-'}")
 
     async def cmd_schedule(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
         action = args[0].lower() if args else "list"
@@ -856,8 +847,8 @@ class Transport:
         device = await client.get_me()
         self.me = {part for part in (device.JID.User, device.LID.User) if part}
         log.info("whatsapp connected as %s (allowed: %s, groups: %s, mode: %s)",
-                 device.JID.User, sorted(self.allowed), sorted(self.groups) or "none",
-                 self.group_mode)
+                 device.JID.User, sorted(self.allowed), sorted(self.audience.chats) or "none",
+                 self.audience.default_mode)
         self._connected.set()
 
     async def on_logged_out(self, _client: Any, _event: Any) -> None:
@@ -939,7 +930,8 @@ class Transport:
         rows += [("approval", approval_policy(self.config)),
                  ("mcp", mcp_label(servers)),
                  ("users", ", ".join(sorted(self.allowed)) or "none"),
-                 ("groups", f"{len(self.groups)} · mode {self.group_mode}" if self.groups else "none"),
+                 ("groups", f"{len(self.audience.chats)} · mode {self.audience.default_mode}"
+                  if self.audience.chats else "none"),
                  ("clock", now_wib())]
         await self.send_text(chat, card("🟢 ompwire", f"{__version__} · whatsapp {self.name}", rows,
                                         "send /help for commands"))

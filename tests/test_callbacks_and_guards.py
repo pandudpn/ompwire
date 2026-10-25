@@ -68,7 +68,7 @@ def _update(query=None, text=""):
 
     message = types.SimpleNamespace(text=text, reply_text=reply_text)
     update = types.SimpleNamespace(effective_user=types.SimpleNamespace(id=7),
-                                   effective_chat=types.SimpleNamespace(id=7),
+                                   effective_chat=types.SimpleNamespace(id=7, type="private"),
                                    effective_message=message, callback_query=query)
     return update, replies
 

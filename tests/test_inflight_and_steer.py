@@ -213,13 +213,13 @@ def test_schedule_lists_without_crashing(tmp_path, monkeypatch):
             return await super().send_message(chat_id, text, **kw)
 
     monkeypatch.setattr(telegram.schedule_lib, "load", lambda: {})
+    config.data["gateway"] = {"name": "telegram", "allowed_users": [7]}
     update = types.SimpleNamespace(effective_user=types.SimpleNamespace(id=7),
-                                   effective_chat=types.SimpleNamespace(id=7),
-                                   effective_message=None)
+                                   effective_chat=types.SimpleNamespace(id=7, type="private"),
+                                   effective_message=None, callback_query=None)
 
     async def go():
         transport = telegram.Transport(config)
-        transport.allowed = {7}
         transport.app = types.SimpleNamespace(bot=SchedBot())
         await transport.cmd_schedule(update, types.SimpleNamespace(args=[]))
 

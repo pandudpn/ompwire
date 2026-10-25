@@ -97,11 +97,8 @@ ompwire gateway start --platform whatsapp --allowed 6281234567890 \
 - **Allowed numbers** are phone numbers with the country code, digits only. Only they get an
   answer, in a direct chat and in a group. Anyone else gets nothing back, not even "not
   allowed".
-- **Groups** are opt-in: list the group ids (`…@g.us`; `/whoami` in the group shows it). In a
-  listed group the bot answers allowed members only, and `--group-mode` decides when:
-  `mention` (default) answers an @mention of the bot or a reply to one of its messages, `all`
-  answers every message, `read` answers nothing. One agent session serves the whole group, and
-  each prompt says who asked.
+- **Groups** are opt-in: list the group ids (`…@g.us`), which `gateway start` offers to pick
+  from. The modes are the same as on Telegram, see [Groups and channels](#groups-and-channels).
 - **No buttons.** A question, an approval or `/model` arrives as a numbered list: reply with the
   number. A question also takes your own words, or `0` to skip.
 - **Photos and files** work as on Telegram: a photo goes to the agent as an image, a document
@@ -114,6 +111,38 @@ ompwire gateway start --platform whatsapp --allowed 6281234567890 \
 - **Schedules** reporting to a WhatsApp gateway are sent by that gateway while it runs: one
   number holds one connection, so the timer leaves the report in the gateway's outbox. A
   schedule whose gateway is down fails with that reason.
+
+### Groups and channels
+
+A gateway answers in a group or a Telegram channel only when that chat is listed. Unlisted
+chats, and people not on the allow list, get no reply at all; the journal says why
+(`update dropped … group not listed`).
+
+```bash
+# Telegram: group and channel ids are negative; id:mode gives one chat its own mode
+ompwire gateway start work --groups -1001234567890,-1009876543210:all --group-mode mention
+```
+
+| Mode | In a group | In a channel |
+| --- | --- | --- |
+| `mention` (default) | an @mention of the bot, a reply to one of its messages, or `/command@the_bot`, from an allowed member | nothing (a post cannot mention a bot) |
+| `all` | every message from an allowed member | every post |
+| `read` | nothing | nothing |
+
+- **Finding the id.** Add the bot to the group or channel while the gateway runs: it sends
+  the chat's id to you in a private message (or to `home_channel`). Telegram has no call that
+  lists a bot's chats. In a listed chat `/whoami@the_bot` shows the id and mode.
+- **Telegram privacy mode.** By default a bot in a group sees only replies to it and
+  `/command@the_bot`. For a plain @mention, or for `all`, make the bot an admin, or run
+  `/setprivacy` in @BotFather, pick the bot, choose Disable, then remove and re-add it.
+- **Channels** need the bot as an admin. A post has no sender, so listing a channel trusts
+  everyone who can post in it; list only channels you control.
+- **One session per chat.** Everyone in a group shares it, and each prompt starts with who
+  asked (`[Pandu] …`) with the bot's own @mention taken out. An edited message is not run
+  again.
+- **Quiet by default.** A group or channel gets the answer and nothing else: no tool trace,
+  todo list, reasoning, usage line, context warning or "queued" reply. `/verbose` in that chat
+  toggles the activity back on, for that chat only; private chats stay verbose.
 
 ## In a chat app
 
@@ -132,8 +161,8 @@ The terminal has its own smaller set, described under [Terminal](#terminal).
 | `/compaction [10-95\|off\|on]` | show or set OMP's auto-compaction threshold |
 | `/queue <text>`, `/steer <text>` | queue a turn, or add to the running one |
 | `/stop`, `/kill` | cancel the turn, or stop this chat's agent process |
-| `/approve`, `/verbose`, `/yolo` | approval policy, tool trace, approvals off for this chat |
-| `/reasoning [on\|off]` | show the agent's thinking above the answer |
+| `/approve`, `/verbose`, `/yolo` | approval policy, activity in this chat (trace, todo list, notices), approvals off for this chat |
+| `/reasoning [on\|off]` | show the agent's thinking above the answer, in this chat |
 | `/skills [query]`, `/commands` | what the agent can do |
 | `/schedule [run\|rm <name>]` | list scheduled turns, run one now, remove one |
 | `/login` | sign in to a model provider |
@@ -330,6 +359,8 @@ reports without a handshake.
 | `gateway start` says the credential is rejected | Telegram: revoked in @BotFather; run `gateway start` again and give the new one |
 | `409 Conflict` in the journal | Telegram: a second process polls the same token |
 | WhatsApp bot silent for one person | their number is not on the allow list, or (in a group) the group is not listed or the mode is `mention` and nobody mentioned the bot; the journal says which (`message dropped … sender not allowed`) |
+| Telegram bot silent in a group | the group is not listed, the mode is `mention` and the message neither mentions nor replies to the bot, or privacy mode keeps plain messages from reaching it (see [Groups and channels](#groups-and-channels)); the journal says which (`update dropped … not addressed`) |
+| A group gets only the answer | groups and channels are quiet by default; `/verbose` in that chat turns the activity on |
 | `whatsapp asked for a new QR` in the journal | the phone logged the device out; `gateway start <name> --relink` |
 | `start` says systemd --user is unavailable | no user manager (container, CI) |
 | An answer stops mid-turn | `journalctl --user -u ompwire-<name> -f` |

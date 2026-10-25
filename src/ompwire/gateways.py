@@ -156,16 +156,24 @@ class Gateway:
     # numbers (digits, country code first). Kept as text so neither platform's id is mangled.
     allowed: list[str] = field(default_factory=list)
     home: str | None = None
-    # WhatsApp only: the groups it listens in, and how it answers there
+    # the groups (and Telegram channels) it listens in, and how it answers there
     groups: list[str] = field(default_factory=list)
     group_mode: str = "mention"
+    # a mode for one group or channel, over group_mode: {"-1001234": "all"}
+    group_modes: dict[str, str] = field(default_factory=dict)
     # this gateway's own settings, layered over config.toml: {"agent": {"model": ...}, ...}
     settings: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # every constructor (a parsed file, `gateway start`, a test) ends up with the same shape
         self.allowed = [user for user in map(user_id, self.allowed) if user]
-        self.home = user_id(self.home) or None
+        self.home = chat_id(self.home) or None
+        self.groups = [group for group in map(chat_id, self.groups) if group]
+        self.group_modes = {chat_id(key): str(value).lower() for key, value in self.group_modes.items()
+                            if chat_id(key) and str(value).lower() in GROUP_MODES}
+
+    def mode_for(self, chat: str) -> str:
+        return self.group_modes.get(chat_id(chat), self.group_mode)
 
     @property
     def implemented(self) -> bool:
@@ -209,25 +217,34 @@ def user_id(value: Any) -> str:
     return re.sub(r"\D", "", str(value or ""))
 
 
+def chat_id(value: Any) -> str:
+    """A chat a gateway sends to or listens in: a person, a Telegram group or channel (a
+    negative id, -100...), or a WhatsApp group (...@g.us). The sign and the server are kept."""
+    text = str(value or "").strip()
+    if "@" in text:
+        return text
+    digits = user_id(text)
+    return f"-{digits}" if digits and text.startswith("-") else digits
+
+
 def _parse(data: dict[str, Any]) -> list[Gateway]:
     found: list[Gateway] = []
     for name, raw in (data.get("gateway") or {}).items():
         if not isinstance(raw, dict):
             continue
-        allowed = [user for user in (user_id(value) for value in raw.get("allowed_users") or [])
-                   if user]
-        home = user_id(raw.get("home_channel"))
         mode = str(raw.get("group_mode") or "mention").lower()
         settings = {section: dict(raw[section]) for section in OWN_SECTIONS
                     if isinstance(raw.get(section), dict) and raw[section]}
+        modes = raw.get("group_modes") if isinstance(raw.get("group_modes"), dict) else {}
         found.append(Gateway(
             name=str(name),
             kind=str(raw.get("type") or raw.get("kind") or "telegram").lower(),
             enabled=bool(raw.get("enabled", True)),
-            allowed=allowed,
-            home=home or None,
-            groups=[str(group).strip() for group in raw.get("groups") or [] if str(group).strip()],
+            allowed=list(raw.get("allowed_users") or []),
+            home=raw.get("home_channel"),
+            groups=list(raw.get("groups") or []),
             group_mode=mode if mode in GROUP_MODES else "mention",
+            group_modes=dict(modes),
             settings=settings,
         ))
     return sorted(found, key=lambda gw: gw.name)
@@ -267,10 +284,13 @@ def render(items: list[Gateway]) -> str:
         # numbers stay numbers in the file, so a hand-edited v0.14 file keeps its shape
         lines.append("allowed_users = [" + ", ".join(item.allowed) + "]")
         if item.home:
-            lines.append(f"home_channel = {item.home}")
-        if item.kind == "whatsapp":
-            lines.append("groups = [" + ", ".join(_toml_value(group) for group in item.groups) + "]")
-            lines.append(f'group_mode = "{item.group_mode}"')
+            lines.append(f"home_channel = {_toml_value(item.home) if '@' in item.home else item.home}")
+        lines.append("groups = [" + ", ".join(_toml_value(group) for group in item.groups) + "]")
+        lines.append(f'group_mode = "{item.group_mode}"')
+        if item.group_modes:
+            lines.append("group_modes = { " + ", ".join(
+                f"{_toml_value(chat)} = {_toml_value(mode)}"
+                for chat, mode in sorted(item.group_modes.items())) + " }")
         lines.append("")
         for section in OWN_SECTIONS:
             values = item.settings.get(section) or {}
@@ -661,5 +681,6 @@ def apply(config: Any, gateway: Gateway) -> Any:
         "home_channel": gateway.home,
         "groups": list(gateway.groups),
         "group_mode": gateway.group_mode,
+        "group_modes": dict(gateway.group_modes),
     }
     return config

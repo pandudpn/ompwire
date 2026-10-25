@@ -20,8 +20,9 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | Layer | Owns | When it fails |
 | --- | --- | --- |
 | Engine (`engine.py`) | the turn itself: ACP session lifecycle, update drain, pacing, permissions, schedules, files. Speaks `Surface`, never a platform | a turn fails: recorded, the next gateway start resumes it |
-| Transport (`telegram.py`, `tg_*.py`) | Telegram routing and buttons: handlers, `TelegramSurface` (posting, cards, approvals), `TelegramDelivery`, pickers, per-chat prefs, the `tg:` key prefix | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
-| Transport (`whatsapp.py`, `wa_*.py`) | WhatsApp: the linked device (neonize), who may talk (allowed numbers, listed groups, group mode), numbered answers in place of buttons, `WhatsAppSurface`, the outbox for scheduled reports, the `wa:` key prefix | WhatsApp ends the link (logged out, new QR asked): the gateway stops and says to relink; a send fails: logged as a WARNING, the turn goes on |
+| Transport (`telegram.py`, `tg_*.py`) | Telegram routing and buttons: handlers, `TelegramSurface` (posting, cards, approvals), `TelegramDelivery`, pickers, per-chat prefs, what addresses the bot in a group, the `tg:` key prefix | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
+| Transport (`whatsapp.py`, `wa_*.py`) | WhatsApp: the linked device (neonize), what addresses the bot in a group, numbered answers in place of buttons, `WhatsAppSurface`, the outbox for scheduled reports, the `wa:` key prefix | WhatsApp ends the link (logged out, new QR asked): the gateway stops and says to relink; a send fails: logged as a WARNING, the turn goes on |
+| Audience (`audience.py`) | who is answered where, for every platform: allowed people, listed groups and channels, each chat's mode (`mention`, `all`, `read`) | a chat or person it does not know: dropped without a reply, the reason in the journal |
 | `sessions.db` (`store.py`) | chat key to session id, prefs, approval override, turns a restart left unfinished (read per key prefix) | unreadable: a new agent session, the chat key is kept |
 | ACP client (`acp.py`) | stdio framing, request ids, timeouts | the subprocess dies mid-turn: respawn, then `session/load` on the same id |
 | Agent (`omp`) | loop, tools, MCP, compaction, skills, memory, prompt | provider or tool error: reported to the chat as the agent's own text |
@@ -35,10 +36,11 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | File | What it is |
 | --- | --- |
 | `engine.py` | the platform-neutral agent engine: ChatAgent, the turn renderer, the `Surface` contract, `ToolTrace`, `FloodWait`, resume planning |
-| `telegram.py` | the Telegram transport: polling, routing (steer, queue, held questions), commands, callbacks, banners |
+| `telegram.py` | the Telegram transport: polling, routing (steer, queue, held questions), commands, callbacks, banners, group and channel addressing |
 | `tg_surface.py` | how one Telegram chat shows a turn: `TelegramSurface`, `TelegramDelivery`, the steered/queued/held acks |
 | `tg_pickers.py`, `tg_login.py`, `tg_skills.py` | mixins of the transport: the model/mode/thinking pickers, provider login, `/skills` |
-| `whatsapp.py` | the WhatsApp transport: who may talk (numbers, groups, group mode), routing, numbered answers, commands, banners |
+| `whatsapp.py` | the WhatsApp transport: routing, group addressing, numbered answers, commands, banners |
+| `audience.py` | `Audience`: the one admission rule (private, group, channel) both transports ask before anything runs |
 | `wa_surface.py` | how one WhatsApp chat shows a turn: `WhatsAppSurface`, cards and tool traces in WhatsApp markup, numbered lists |
 | `wa_client.py` | the link: session file, QR or pairing-code linking, the linked number, markdown to WhatsApp markup |
 | `wa_outbox.py` | `WhatsAppDelivery`: a scheduled report written for the running gateway to send |
@@ -289,6 +291,17 @@ deprecation cycle.
 
 ## Sharp edges found while building it
 
+- **A group is read by more than the person who asked.** The tool trace carries paths, command
+  output and file contents. An agent started for a group or channel (`shared`) begins quiet:
+  the answer only, no trace, checklist, reasoning, usage line or notices; `/verbose` and
+  `/reasoning` are prefs of that chat, never the gateway's.
+- **python-telegram-bot's message filters also match edits.** `filters.TEXT` is true for
+  `edited_message` and `edited_channel_post`, so fixing a typo ran the prompt a second time.
+  Every message handler is limited to `UpdateType.MESSAGE | UpdateType.CHANNEL_POST`.
+- **A Telegram bot cannot list its chats.** The only way to learn a group's id is an update
+  from it, and an unlisted group's updates are dropped. `my_chat_member` (the bot added to a
+  chat) is the one update that tells the owner the id; polling asks for it with
+  `allowed_updates=Update.ALL_TYPES`, since it is not in Telegram's default set.
 - **`session/load` replays the transcript.** A resumed session re-emits earlier assistant
   messages as `session/update` frames, so a frontend with its update handler still attached
   dumps every old answer into the chat. `ChatAgent.ensure` mutes updates while loading.

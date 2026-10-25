@@ -107,14 +107,16 @@ def _transport(tmp_path, agent):
     transport.workers = {}
     transport.stopping = False
     transport.allowed = {1}
+    transport.audience = telegram.Audience(allowed={"1"})
     return transport
 
 
 def _update(text, user_id=1):
     return types.SimpleNamespace(
         effective_message=_Message(text),
-        effective_chat=types.SimpleNamespace(id=7),
+        effective_chat=types.SimpleNamespace(id=7, type="private"),
         effective_user=types.SimpleNamespace(id=user_id),
+        callback_query=None,
     )
 
 
@@ -410,7 +412,7 @@ def test_usage_card_shows_session_totals_without_the_reset_footer(tmp_path):
             msg.replies.append(body)
 
         msg.reply_text = reply_text
-        update = types.SimpleNamespace(effective_chat=types.SimpleNamespace(id=7),
+        update = types.SimpleNamespace(effective_chat=types.SimpleNamespace(id=7, type="private"),
                                        effective_user=types.SimpleNamespace(id=1),
                                        effective_message=msg)
         transport._authorized = lambda _u: True

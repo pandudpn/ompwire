@@ -73,6 +73,15 @@ class TestDefinitions:
         assert item.allowed == ["628122227"]  # a typed number matches what WhatsApp reports
         assert (item.groups, item.group_mode) == (["120363@g.us"], "all")
 
+    def test_a_telegram_gateway_keeps_its_signed_chats_and_their_own_modes(self, sandbox):
+        """A Telegram group or channel id is negative; stripping the sign named another chat."""
+        gateways.save([gateways.Gateway(name="tg", allowed=[7], home="-1001234",
+                                        groups=["-1001234", "-1005678"], group_mode="mention",
+                                        group_modes={"-1005678": "all"})])
+        item = gateways.get("tg")
+        assert (item.home, item.groups) == ("-1001234", ["-1001234", "-1005678"])
+        assert (item.mode_for("-1001234"), item.mode_for("-1005678")) == ("mention", "all")
+
     def test_an_unknown_group_mode_falls_back_to_mention(self, sandbox):
         (sandbox / "gateways").mkdir()
         (sandbox / "gateways" / "wa").mkdir()

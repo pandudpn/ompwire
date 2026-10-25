@@ -140,6 +140,12 @@ def _option_name(options: dict[str, dict[str, Any]], config_id: str, value: str)
     return f"`{value}`"
 
 
+def _pref(prefs: dict[str, str], name: str, default: bool) -> bool:
+    """A per-chat on/off choice; the default applies until the chat sets it."""
+    value = prefs.get(name)
+    return default if value is None else value == "on"
+
+
 def _chunks(text: str, limit: int) -> list[str]:
     out: list[str] = []
     while text:
@@ -302,10 +308,13 @@ class Surface(abc.ABC):
 class ChatAgent:
     """One chat's ACP agent: subprocess, session id, queue and counters."""
 
-    def __init__(self, config: Config, key: str, surface: Surface) -> None:
+    def __init__(self, config: Config, key: str, surface: Surface, *, shared: bool = False) -> None:
         self.config = config
         self.key = key
         self.surface = surface
+        # a group or a channel: other people read it, so the trace and the reasoning stay out of
+        # it unless that chat asks for them with /verbose and /reasoning
+        self.shared = shared
         self.label = surface.label
         self.store = SessionStore(config.get("session", "store"))
         self.client: AcpClient | None = None
@@ -317,7 +326,9 @@ class ChatAgent:
         kept = stored.cwd if stored is not None and stored.cwd else ""
         # a directory removed since then would make every turn fail to start; fall back
         self.cwd = kept if kept and os.path.isdir(os.path.expanduser(kept)) else configured
-        self.reasoning = bool(config.get("stream", "show_reasoning", False))
+        prefs = self.store.prefs(key)
+        self.reasoning = _pref(prefs, "reasoning",
+                               not shared and bool(config.get("stream", "show_reasoning", False)))
         # the todo list last shown; omp repeats it as a reminder, and a repeat is not news
         self._last_plan: list[PlanItem] = []
         # the bot that receives a scheduled result defaults to the bot being talked to
@@ -330,7 +341,8 @@ class ChatAgent:
         self.last_used = time.time()
         self.busy = False
         self._user_cancel = False
-        self.verbose = bool(config.get("stream", "show_tool_calls", True))
+        self.verbose = _pref(prefs, "verbose",
+                             not shared and bool(config.get("stream", "show_tool_calls", True)))
         # yolo survives /new: it is stored per chat, like model/mode/thinking.
         # With no stored choice the config decides, so setup can ship yolo on.
         stored_yolo = self.store.prefs(key).get("yolo")
@@ -561,7 +573,9 @@ class ChatAgent:
 
     async def _context_notice(self, text: str) -> None:
         """A notice outside a turn: surface.notice goes straight to the platform, so it is
-        safe to call while ask() is not running."""
+        safe to call while ask() is not running. A quiet chat gets the answer and nothing else."""
+        if not self.verbose:
+            return
         try:
             await self.surface.notice(text)
         except Exception:
@@ -588,6 +602,8 @@ class ChatAgent:
             log.info("option changed by omp %s %s: %s -> %s", self.label, config_id, old, new)
             text = (f"⚙️ omp switched {config_id}: {_option_name(previous, config_id, old)}"
                     f" → {_option_name(updated, config_id, new)}")
+            if not self.verbose:
+                continue
             if self._turn_notice is not None:
                 # mid-turn the chat is still receiving this turn's messages; a notice sent
                 # straight to the platform would land above traces still waiting to go out
@@ -932,7 +948,7 @@ class ChatAgent:
                     state["dropped"] += taken
                 else:
                     state["dropped"] = 0
-            if state["dropped"]:
+            if state["dropped"] and self.verbose:
                 await post(dropped_line(), kind="notice")
 
         def flush_thinking() -> None:
@@ -1003,7 +1019,8 @@ class ChatAgent:
                 return
             held_todo.clear()  # the checklist stands in for the todo call that changed it
             self._last_plan = items
-            enqueue("plan", self.surface.plan(items), essential=True)
+            if self.verbose:
+                enqueue("plan", self.surface.plan(items), essential=True)
 
         async def finish() -> None:
             """End of turn: whatever is still buffered, then the markers in the whole answer."""
@@ -1164,7 +1181,7 @@ class ChatAgent:
                  self.label, result.stop_reason, state["tools"],
                  usage.get("inputTokens"), usage.get("outputTokens"),
                  usage.get("cachedReadTokens"), time.time() - started)
-        if self.config.get("stream", "show_usage", True):
+        if self.verbose and self.config.get("stream", "show_usage", True):
             try:
                 await self.surface.notice(
                     f"{result.stop_reason} · in {tokens(usage.get('inputTokens'))} "
@@ -1220,6 +1237,15 @@ class ChatAgent:
     async def shutdown(self) -> None:
         await self.stop_process()
         self.store.close()
+
+    def set_display(self, name: str, on: bool) -> None:
+        """Turn the tool trace (`verbose`) or the reasoning on or off for this chat only.
+
+        Stored per chat key, so it survives /new and a restart, and one group asking for the
+        trace does not turn it on in every other chat.
+        """
+        setattr(self, name, on)
+        self.store.set_pref(self.key, name, "on" if on else "off")
 
     async def new_session(self) -> str:
         self.forget_turn()

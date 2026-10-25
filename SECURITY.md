@@ -26,10 +26,16 @@ are the ones implemented today.
 
 **Who can talk to the agent**
 - Every update is dropped unless the sender's user id is in the gateway's `allowed_users`
-  (a Telegram user id, a WhatsApp phone number). Strangers get no reply, not a refusal.
-- WhatsApp groups: only listed groups are read, only allowed numbers in them are answered, and
-  `group_mode` limits it further (`mention` by default). Being in a group with the bot gives a
-  stranger nothing.
+  (a Telegram user id, a WhatsApp phone number). Strangers get no reply, not a refusal; the
+  reason goes to the journal only.
+- Groups (Telegram and WhatsApp): only listed groups are read, only allowed members in them
+  are answered, and the group's mode limits it further (`mention` by default, `read` never
+  answers). Being in a group with the bot gives a stranger nothing.
+- Telegram channels are the one exception to the allow list: a post has no sender, so a
+  listed channel in mode `all` runs every post, and anyone who can post there drives the
+  agent. List only channels whose admins you trust as much as an allowed user.
+- Groups and channels are quiet by default: other members see the answer, not the tool
+  trace (which can hold paths, command output and file contents) unless `/verbose` turns it on.
 - No inbound network. The Telegram gateway uses long polling and the WhatsApp gateway an
   outgoing websocket: no port, no webhook secret, nothing listening. A future gateway that
   needs a webhook is a change to this model and has to be documented here.
@@ -74,7 +80,8 @@ are the ones implemented today.
 
 - A token, chat id or other secret written to a log, unit file, error message or crash trace.
 - An allow-list bypass: any path where an update from a user not in `allowed_users` reaches the
-  agent, including a WhatsApp group that is not listed or a member who is not allowed.
+  agent, including a group or channel that is not listed, a member who is not allowed, or a
+  group message in `mention` mode that did not address the bot.
 - A message the bot sends that mentions (tags) someone the agent did not name.
 - An approval bypass: a command the read-only check lets through that can write, delete or
   run code.

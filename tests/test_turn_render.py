@@ -565,3 +565,17 @@ def test_an_option_switch_mid_turn_lands_in_order_with_its_name(rendered, monkey
     switch = [i for i, body in enumerate(messages) if "omp switched model" in body]
     assert switch and order and order[0] < switch[0], messages
     assert "Model One" in messages[switch[0]] and "Model Two" in messages[switch[0]]
+
+
+def test_a_quiet_chat_gets_the_answer_and_nothing_else(rendered):
+    """A group runs quiet: no trace, checklist, reasoning or usage line, only what was asked for."""
+    messages = rendered([
+        thought("mari saya cek"),
+        kinded_call("t1", "think", "Planning", {"op": "init"}),
+        tool_progress("t1", "", status="completed"),
+        plan(("cek server", "in_progress")),
+        tool_call("c1", "Running ls"),
+        tool_progress("c1", "ok", status="completed"),
+        message("server aman"),
+    ], verbose=False)
+    assert messages == ["server aman"], messages
