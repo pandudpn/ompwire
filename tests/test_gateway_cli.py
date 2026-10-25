@@ -413,3 +413,79 @@ def test_a_rerun_with_everything_known_prints_no_how_to(sandbox, monkeypatch, ca
     assert cli.main(["gateway", "start", "telegram", "--yes"]) == 0
     out = capsys.readouterr().out
     assert "/newbot" not in out and "@userinfobot" not in out
+
+
+# ------------------------------------------------------------------ per-gateway isolation
+def test_two_gateways_get_their_own_settings_and_state(sandbox, monkeypatch, tmp_path):
+    from ompwire import config as config_module
+
+    state = tmp_path / "state-root"
+    monkeypatch.setattr(config_module, "default_state_dir", lambda: state)
+    (sandbox / "config.toml").write_text('[agent]\nmodel = "shared/model"\ncwd = "/shared"\n')
+    monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(sandbox))
+    gateways.add("telegram", allowed=[1])
+    work = gateways.Gateway(name="work", allowed=[2],
+                            settings={"agent": {"model": "work/model", "cwd": "/work"}})
+    gateways.save(gateways.load() + [work])
+
+    shared = gateways.config_for(gateways.get("telegram"))
+    own = gateways.config_for(gateways.get("work"))
+
+    assert shared.get("agent", "model") == "shared/model"  # telegram follows config.toml
+    assert (own.get("agent", "model"), own.get("agent", "cwd")) == ("work/model", "/work")
+    assert own.get("agent", "thinking") == shared.get("agent", "thinking")  # rest is shared
+    # never the same session store or chat overrides, so /new or /reasoning stays in one bot
+    assert shared.get("session", "store") != own.get("session", "store")
+    assert own.get("session", "store") == str(state / "gateways" / "work" / "sessions.db")
+    assert shared.overrides_path != own.overrides_path
+
+
+def test_a_chat_toggle_in_one_gateway_does_not_reach_another(sandbox, monkeypatch, tmp_path):
+    from ompwire import config as config_module
+
+    state = tmp_path / "state-root"
+    monkeypatch.setattr(config_module, "default_state_dir", lambda: state)
+    monkeypatch.setattr(config_module, "OVERRIDES_PATH", state / "overrides.json")
+    monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(sandbox))
+    gateways.save([gateways.Gateway(name="telegram", allowed=[1]),
+                   gateways.Gateway(name="work", allowed=[2])])
+
+    work = gateways.config_for(gateways.get("work"))
+    config_module.save_override("stream", "show_reasoning", True, work.overrides_path)
+
+    assert gateways.config_for(gateways.get("work")).get("stream", "show_reasoning") is True
+    assert gateways.config_for(gateways.get("telegram")).get("stream", "show_reasoning") is False
+
+
+def test_settings_survive_a_save_and_reload(sandbox):
+    item = gateways.Gateway(name="work", allowed=[2],
+                            settings={"agent": {"model": "a/b", "cwd": "/w"},
+                                      "stream": {"show_reasoning": True}})
+    gateways.save([item])
+    assert gateways.load()[0].settings == item.settings
+
+
+def test_a_new_profile_can_set_its_own_model_and_cwd(sandbox, monkeypatch):
+    _identifies(monkeypatch)
+    Units(monkeypatch, sandbox)
+    gateways.add("telegram", allowed=[42])
+    gateways.set_token(gateways.Gateway(name="telegram"), "111:first")
+    _answers(monkeypatch, "1", "2", "work", "77", "2", "other/model", "/srv/work", "",
+             secrets=["222:second"])
+
+    assert cli.main(["gateway", "start"]) == 0
+
+    work = gateways.get("work")
+    assert work.settings == {"agent": {"model": "other/model", "cwd": "/srv/work"}}
+    assert gateways.get("telegram").settings == {}
+
+
+def test_scripted_start_sets_own_settings_with_flags(sandbox, monkeypatch):
+    _identifies(monkeypatch)
+    Units(monkeypatch, sandbox)
+    monkeypatch.setattr("sys.stdin", io.StringIO("123:abcdef\n"))
+
+    assert cli.main(["gateway", "start", "work", "--platform", "telegram", "--token-stdin",
+                     "--allowed", "5", "--model", "x/y", "--approval", "yolo", "--yes"]) == 0
+
+    assert gateways.get("work").settings == {"agent": {"model": "x/y", "approval_mode": "yolo"}}

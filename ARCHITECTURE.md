@@ -214,12 +214,13 @@ against a fake stream rather than the live model.
 | `~/.config/ompwire/config.toml` | agent settings |
 | `~/.config/ompwire/gateways.toml` | gateway definitions |
 | `~/.config/ompwire/.env` | one credential per gateway, mode `0600` |
-| `~/.local/state/ompwire/sessions.db` | chat key to session id, per-chat prefs (model, mode, thinking, yolo, `context_size`), unfinished turns |
-| `~/.local/state/ompwire/overrides.json` | approval overrides set from chat |
+| `~/.local/state/ompwire/sessions.db` | the `telegram` gateway's chat key to session id, per-chat prefs (model, mode, thinking, yolo, `context_size`), unfinished turns |
+| `~/.local/state/ompwire/overrides.json` | the `telegram` gateway's toggles set from chat |
+| `~/.local/state/ompwire/gateways/<name>/` | the same three (sessions.db, overrides.json, log) for every other gateway |
 | `~/.local/state/ompwire/files/<chat id>/` | documents sent from the chat, for the agent to read |
 | `~/.config/ompwire/schedules.toml` | the schedules, one row each (no daemon state) |
 | `~/.local/state/ompwire/serve-<gateway>.lock` | flock, one process per gateway |
-| `~/.local/state/ompwire/ompwire.log` | rotating log, redacted |
+| `~/.local/state/ompwire/ompwire.log` | the `telegram` gateway's rotating log (and the CLI's), redacted |
 
 `~/.omp` is the agent's own store: sessions, provider credentials, MCP config. ompwire touches it
 in three places, and uninstall never does:
@@ -307,6 +308,12 @@ deprecation cycle.
   `session/new` with `Internal error / undefined is not an object`. Dict-shaped config is
   converted automatically, and a failure falls back to a session without MCP servers rather than
   blocking the chat.
+- **Gateways share the agent, not the state.** Session keys are `tg:<chat id>`, and the same
+  person talking to two bots has the same chat id in both. With one shared `sessions.db` the two
+  bots resumed each other's session, and `/new` in one reset the other. `gateways.config_for()`
+  gives each gateway its own store, overrides and log under `state/gateways/<name>/`, and layers
+  its `[gateway.<name>.<section>]` settings over `config.toml`. The keys stay as they are; the
+  file is what separates them. `telegram` keeps the original paths, so no live store moves.
 - **One poller per token.** Two processes polling the same bot token make Telegram answer
   `409 Conflict` and drop updates. The per-gateway flock and the unit model both exist because
   of this.

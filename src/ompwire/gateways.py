@@ -89,6 +89,11 @@ class GatewayError(RuntimeError):
     """A gateway definition that cannot be used, with the reason in the message."""
 
 
+# The config sections a gateway may set for itself. Everything else (acp, mcp, logging) is the
+# machine's, shared by every gateway; the agent binary and ~/.omp are always shared.
+OWN_SECTIONS = ("agent", "stream", "approval", "files", "session")
+
+
 @dataclass
 class Gateway:
     name: str
@@ -96,6 +101,8 @@ class Gateway:
     enabled: bool = True
     allowed: list[int] = field(default_factory=list)
     home: int | None = None
+    # this gateway's own settings, layered over config.toml: {"agent": {"model": ...}, ...}
+    settings: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def implemented(self) -> bool:
@@ -131,12 +138,15 @@ def _parse(data: dict[str, Any]) -> list[Gateway]:
             except (TypeError, ValueError):
                 continue
         home = raw.get("home_channel")
+        settings = {section: dict(raw[section]) for section in OWN_SECTIONS
+                    if isinstance(raw.get(section), dict) and raw[section]}
         found.append(Gateway(
             name=str(name),
             kind=str(raw.get("type") or raw.get("kind") or "telegram").lower(),
             enabled=bool(raw.get("enabled", True)),
             allowed=allowed,
             home=int(home) if str(home or "").strip().isdigit() else None,
+            settings=settings,
         ))
     return sorted(found, key=lambda gw: gw.name)
 
@@ -193,7 +203,55 @@ def render(items: list[Gateway]) -> str:
         if item.home:
             lines.append(f"home_channel = {item.home}")
         lines.append("")
+        for section in OWN_SECTIONS:
+            values = item.settings.get(section) or {}
+            if not values:
+                continue
+            lines.append(f"[gateway.{item.name}.{section}]")
+            lines.extend(f"{key} = {_toml_value(value)}" for key, value in values.items())
+            lines.append("")
     return "\n".join(lines)
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
+
+
+def state_dir(name: str) -> Path:
+    """Where one gateway keeps its own runtime state: sessions, chat overrides, log.
+
+    Each gateway owns a directory so two bots never share a session, a /reasoning toggle or a
+    log line. The first gateway, `telegram`, keeps the paths it has always used: moving a live
+    install's sessions.db would cost the conversations in it.
+    """
+    from .config import default_state_dir
+
+    base = default_state_dir()
+    return base if name == "telegram" else base / "gateways" / name
+
+
+def config_for(gateway: Gateway, explicit: Any = None) -> Any:
+    """The full config one gateway runs with: shared config.toml, then its own settings, then its
+    own chat overrides, with its own session store and log."""
+    from .config import load_config
+
+    home = state_dir(gateway.name)
+    layer = {section: dict(values) for section, values in gateway.settings.items()}
+    if gateway.name != "telegram":
+        layer.setdefault("session", {}).setdefault("store", str(home / "sessions.db"))
+    config = load_config(explicit, layer=layer, overrides_path=home / "overrides.json")
+    if gateway.name != "telegram":
+        shared_log = str(config.get("logging", "file", "") or "")
+        if shared_log:
+            config.data.setdefault("logging", {})["file"] = str(home / Path(shared_log).name)
+    return apply(config, gateway)
 
 
 def save(items: list[Gateway], path: Path | None = None) -> Path:

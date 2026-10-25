@@ -1211,7 +1211,7 @@ class Transport:
             log.info("approval.policy unchanged (%s) chat=%s", value, chat_id)
             return "unchanged"
         self.config.data.setdefault("approval", {})["policy"] = value
-        path = save_override("approval", "policy", value)
+        path = save_override("approval", "policy", value, self.config.overrides_path)
         log.info("config change approval.policy %s -> %s (persisted to %s)", previous, value, path)
         body = self.approval_card(value, f"saved · {previous} → {value} · persisted")
         if anchor is not None:
@@ -1244,9 +1244,7 @@ class Transport:
         wanted = (ctx.args[0].lower() if ctx.args else "").strip()
         if wanted in {"on", "off", "1", "0", "true", "false", "yes", "no"}:
             value = wanted in {"on", "1", "true", "yes"}
-            from .config import save_override
-
-            save_override("stream", "show_reasoning", value)
+            save_override("stream", "show_reasoning", value, self.config.overrides_path)
             agent.reasoning = value
             self.config.data.setdefault("stream", {})["show_reasoning"] = value
             return await self.announce(update.effective_chat.id,

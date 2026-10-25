@@ -127,6 +127,8 @@ def run(name: str) -> int:
     config = load_config()
     try:
         target = _target(item)
+        # a schedule runs with the settings of the gateway it reports to (its model, its cwd)
+        config = gateways.config_for(gateways.get(item.gateway))
     except (schedules.ScheduleError, gateways.GatewayError) as exc:
         log.error("schedule %s: %s", name, exc)
         schedules.mark(name, f"failed: {exc}")

@@ -86,7 +86,8 @@ def _run_gateway(config_path: str | None, name: str, force: bool) -> int:
     if agent_path(command) is None:
         print(f"FAIL agent not found: {command}. Run `ompwire setup` first.", file=sys.stderr)
         return 1
-    gateways.apply(config, gateway)
+    # this gateway's own config: its settings over config.toml, its own sessions, overrides, log
+    config = gateways.config_for(gateway, config_path)
     if not str(config.get("telegram", "bot_token", "") or ""):
         print(f"FAIL no credential for gateway {gateway.name!r}. "
               f"Run `ompwire gateway start {gateway.name}` or set {gateway.token_var()}.",
@@ -520,6 +521,40 @@ def _start_allowed(args: argparse.Namespace, gateway, spec) -> list[int]:
     return [int(part) for part in answer.replace(" ", "").split(",") if part.isdigit()]
 
 
+# Settings a gateway is asked about on creation, as (section, key, question). Anything else can
+# still be set by hand in its [gateway.<name>.<section>] table in gateways.toml.
+_OWN_QUESTIONS = (
+    ("agent", "model", "model (provider/id)"),
+    ("agent", "cwd", "working directory"),
+    ("agent", "approval_mode", "approval mode (write, yolo)"),
+)
+
+
+def _start_settings(args: argparse.Namespace, gateway, is_new: bool) -> dict[str, dict]:
+    """This gateway's own settings over config.toml. Flags set them; a new profile is asked
+    whether to use the shared config; an existing one keeps what it has."""
+    settings = {section: dict(values) for section, values in gateway.settings.items()}
+    flags = {("agent", "model"): getattr(args, "model", ""),
+             ("agent", "cwd"): getattr(args, "cwd", ""),
+             ("agent", "approval_mode"): getattr(args, "approval", "")}
+    for (section, key), value in flags.items():
+        if value:
+            settings.setdefault(section, {})[key] = value
+    if not is_new or args.yes or any(flags.values()):
+        return settings
+    shared = load_config()
+    print("\nthis gateway can share config.toml with the others, or use its own model, working "
+          "directory and approval mode. Sessions, chat toggles and the log are its own either way.")
+    if _choose("settings", ["share config.toml", "set its own"]) != 1:
+        return settings
+    for section, key, question in _OWN_QUESTIONS:
+        current = str(shared.get(section, key, "") or "")
+        answer = input(f"{question} [{current or 'agent default'}]: ").strip()
+        if answer:
+            settings.setdefault(section, {})[key] = answer
+    return settings
+
+
 def _gateway_start(args: argparse.Namespace, gateways, service) -> int:
     """One command for the first start, a token reset and a plain restart.
 
@@ -566,6 +601,7 @@ def _gateway_start_steps(args: argparse.Namespace, gateways, service) -> int:
     if credential is None:
         return 1
     allowed = _start_allowed(args, gateway, spec)
+    settings = _start_settings(args, gateway, is_new)
 
     changed_credential = credential != ("" if is_new else gateways.token(gateway))
     if not is_new and changed_credential and service.state(name) == "active":
@@ -575,7 +611,7 @@ def _gateway_start_steps(args: argparse.Namespace, gateways, service) -> int:
     # home is where schedules report; it follows the allow list only when that list changed
     home = gateway.home if allowed == gateway.allowed else (allowed[0] if allowed else None)
     updated = gateways.Gateway(name=name, kind=kind, enabled=gateway.enabled, allowed=allowed,
-                               home=home)
+                               home=home, settings=settings)
     gateways.save([updated if item.name == name else item for item in items]
                   + ([updated] if is_new else []))
     if changed_credential:
@@ -586,6 +622,8 @@ def _gateway_start_steps(args: argparse.Namespace, gateways, service) -> int:
         print(f"ok   allowed users: {', '.join(str(user) for user in allowed)}")
     else:
         print("warn no allowed users: nobody can talk to this gateway yet")
+    own = ", ".join(f"{key}={value}" for values in settings.values() for key, value in values.items())
+    print(f"ok   settings: {own or 'shared config.toml'} · state in {gateways.state_dir(name)}")
 
     if args.no_start:
         print(f"--   not started (--no-start); `ompwire gateway start {name}` starts it")
@@ -943,6 +981,10 @@ def build_parser() -> argparse.ArgumentParser:
     gw.add_argument("--token", default="", help="start: the credential itself (prefer --token-stdin)")
     gw.add_argument("--token-stdin", action="store_true",
                     help="start: read the credential from stdin")
+    gw.add_argument("--model", default="", help="start: this gateway's own model")
+    gw.add_argument("--cwd", default="", help="start: this gateway's own working directory")
+    gw.add_argument("--approval", default="", choices=["", "write", "yolo"],
+                    help="start: this gateway's own approval mode")
     gw.add_argument("--no-start", action="store_true",
                     help="start: save the gateway and credential, do not start it")
     gw.add_argument("--force", action="store_true",

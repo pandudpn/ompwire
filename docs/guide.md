@@ -205,14 +205,42 @@ request is allowed instead of hanging. Run one-shot prompts only where that is a
 
 | Path | Holds |
 | --- | --- |
-| `~/.config/ompwire/config.toml` | agent settings |
-| `~/.config/ompwire/gateways.toml` | one block per gateway: platform, allow list, home channel |
+| `~/.config/ompwire/config.toml` | settings every gateway shares unless it sets its own |
+| `~/.config/ompwire/gateways.toml` | one block per gateway: platform, allow list, home channel, and its own settings |
 | `~/.config/ompwire/.env` | one credential per gateway (the bot token for Telegram), mode `0600` |
 
-Precedence: defaults, then `config.toml`, then environment variables. Sections: `[acp]`,
+Precedence: defaults, then `config.toml`, then the gateway's own settings, then toggles set from
+its chat, then environment variables. Sections: `[acp]`,
 `[agent]`, `[session]`, `[stream]`, `[approval]`, `[files]`, `[logging]`, `[mcp]`,
 and one per platform (`[telegram]`). `ompwire config` prints the merged result with secrets masked.
 `OMPWIRE_CONFIG_DIR` points everything at another directory.
+
+### One gateway, its own settings
+
+Every gateway shares the agent itself: the `omp` binary, its provider logins, skills, MCP
+servers and memory in `~/.omp`. What it does not share:
+
+- **Sessions.** Each gateway has its own session store, so the same person talking to two bots
+  has two separate conversations, and `/new` in one leaves the other alone.
+- **Chat toggles.** `/approve` and `/reasoning` persist to that gateway's own overrides.
+- **The log.** Each gateway writes its own.
+- **Settings, if you want.** A gateway can set its own `[agent]`, `[stream]`, `[approval]`,
+  `[files]` or `[session]` values over `config.toml`. `gateway start` asks when it creates a
+  profile, or pass `--model`, `--cwd` and `--approval`. By hand:
+
+```toml
+[gateway.work]
+type = "telegram"
+allowed_users = [42]
+
+[gateway.work.agent]
+model = "anthropic/claude-sonnet"
+cwd = "~/work"
+```
+
+State lives in `~/.local/state/ompwire/gateways/<name>/`. The first gateway, `telegram`, keeps
+the paths it has always had (`~/.local/state/ompwire/`), so an existing install keeps its
+conversations. Scheduled turns run with the settings of the gateway they report to.
 
 `ompwire setup` can be run again: every prompt is pre-filled with what is on disk.
 

@@ -137,6 +137,8 @@ class Config:
     data: dict[str, dict[str, Any]]
     path: Path | None = None
     warnings: list[str] = field(default_factory=list)
+    # where /approve and /reasoning persist; a gateway has its own, the CLI uses the shared one
+    overrides_path: Path | None = None
 
     def section(self, name: str) -> dict[str, Any]:
         return self.data.get(name, {})
@@ -252,7 +254,11 @@ def _load_env_files(env: dict[str, str]) -> None:
             continue
 
 
-def load_config(explicit: str | Path | None = None, env: dict[str, str] | None = None) -> Config:
+def load_config(explicit: str | Path | None = None, env: dict[str, str] | None = None, *,
+                layer: dict[str, Any] | None = None,
+                overrides_path: Path | None = None) -> Config:
+    """Defaults, then config.toml, then `layer` (one gateway's own settings), then the runtime
+    overrides set from a chat, then the environment."""
     env = dict(os.environ if env is None else env)
     _load_env_files(env)
     path = find_config_path(explicit, env)
@@ -271,7 +277,10 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
     # Order matters: a runtime toggle (/yolo, /approval, /model) is a decision made after the file
     # was written, so it must beat the file. Only the environment outranks it.
     merged = _deep_merge(DEFAULTS, file_data)
-    merged = _deep_merge(merged, load_overrides())
+    if layer:
+        merged = _deep_merge(merged, layer)
+    overrides_path = (overrides_path or OVERRIDES_PATH).expanduser()
+    merged = _deep_merge(merged, load_overrides(overrides_path))
 
     for env_name, (section, key) in ENV_OVERRIDES.items():
         if env_name in env and env[env_name] != "":
@@ -286,7 +295,7 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
         merged["agent"]["cwd"] = str(Path(merged["agent"]["cwd"]).expanduser())
     merged["session"]["store"] = str(Path(merged["session"]["store"]).expanduser())
 
-    return Config(data=merged, path=path, warnings=warnings)
+    return Config(data=merged, path=path, warnings=warnings, overrides_path=overrides_path)
 
 
 def approval_policy(config: Config) -> str:
