@@ -6,6 +6,9 @@ contact_links:
   - name: Architecture
     url: https://github.com/pandudpn/ompwire/blob/main/ARCHITECTURE.md
     about: Why the transport is this small, and which layer owns what.
+  - name: Rules
+    url: https://github.com/pandudpn/ompwire/blob/main/RULES.md
+    about: How to change this repo, verify it, and keep tests off the real machine.
   - name: Security
     url: https://github.com/pandudpn/ompwire/blob/main/SECURITY.md
     about: A leaked bot token or anything else that should not be a public issue.
