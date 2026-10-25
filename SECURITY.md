@@ -48,10 +48,12 @@ implemented today.
   talks to. No telemetry.
 
 **Secrets**
-- Bot tokens live in `~/.config/ompwire/.env` (mode `0600`), loaded by systemd through
-  `EnvironmentFile`. They are never written into the unit, the config or the repo.
-- The agent process starts without the harness's secrets: `child_env()` removes the bot token
-  and memory API keys before spawning `omp`, schedules included.
+- Each gateway's token lives in its own `~/.config/ompwire/gateways/<name>/.env` (mode `0600`),
+  loaded by that gateway's unit through `EnvironmentFile`. A gateway's process never holds
+  another gateway's token, and tokens are never written into a unit, the config or the repo.
+- The agent process starts without the harness's secrets: `child_env()` removes every bot token
+  (`TELEGRAM_BOT_TOKEN`, every `OMPWIRE_GATEWAY_*_TOKEN`) and memory API keys before spawning
+  `omp`, schedules included.
 - Logs mask token-shaped strings before they are written; `ompwire scrub-logs` cleans older
   files.
 - ompwire holds no provider keys. OMP authenticates itself.

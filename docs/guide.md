@@ -206,8 +206,14 @@ request is allowed instead of hanging. Run one-shot prompts only where that is a
 | Path | Holds |
 | --- | --- |
 | `~/.config/ompwire/config.toml` | settings every gateway shares unless it sets its own |
-| `~/.config/ompwire/gateways.toml` | one block per gateway: platform, allow list, home channel, and its own settings |
-| `~/.config/ompwire/.env` | one credential per gateway (the bot token for Telegram), mode `0600` |
+| `~/.config/ompwire/schedules.toml` | the scheduled turns |
+| `~/.config/ompwire/gateways/<name>/gateway.toml` | one gateway: platform, allow list, home channel, its own settings |
+| `~/.config/ompwire/gateways/<name>/.env` | that gateway's credential only (the bot token for Telegram), mode `0600` |
+| `~/.local/state/ompwire/gateways/<name>/` | that gateway's sessions, chat toggles, log and lock |
+| `~/.local/state/ompwire/cli/` | `ompwire chat`'s sessions |
+
+One gateway is two directories, so `gateway remove` with the full delete leaves nothing of it
+behind.
 
 Precedence: defaults, then `config.toml`, then the gateway's own settings, then toggles set from
 its chat, then environment variables. Sections: `[acp]`,
@@ -229,6 +235,7 @@ servers and memory in `~/.omp`. What it does not share:
   profile, or pass `--model`, `--cwd` and `--approval`. By hand:
 
 ```toml
+# ~/.config/ompwire/gateways/work/gateway.toml
 [gateway.work]
 type = "telegram"
 allowed_users = [42]
@@ -238,9 +245,13 @@ model = "anthropic/claude-sonnet"
 cwd = "~/work"
 ```
 
-State lives in `~/.local/state/ompwire/gateways/<name>/`. The first gateway, `telegram`, keeps
-the paths it has always had (`~/.local/state/ompwire/`), so an existing install keeps its
-conversations. Scheduled turns run with the settings of the gateway they report to.
+Scheduled turns run with the settings of the gateway they report to.
+
+An install from before this layout (one `gateways.toml`, one `.env`, the first gateway's state at
+the root of `~/.local/state/ompwire/`) is moved the first time each gateway starts: definitions
+and credentials at once, and a gateway's sessions only while it is not running, so no
+conversation or unfinished turn is lost. The old `gateways.toml` is kept as
+`gateways.toml.migrated`.
 
 `ompwire setup` can be run again: every prompt is pre-filled with what is on disk.
 

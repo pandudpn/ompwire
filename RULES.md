@@ -29,8 +29,8 @@ is shaped this way; this file says what to do and what not to do.
 ## Tests never touch the machine
 
 `tests/conftest.py` points every writable path at a temporary directory: systemd units,
-`gateways.toml`, `overrides.json`, locks, `sessions.db`, OMP's transcript directory and
-OMP's `config.yml`. A test run once disabled a real unit, and a subagent once wiped live state.
+the config directory, the whole state directory (`default_state_dir`, so every gateway's
+sessions, overrides, log and lock), OMP's transcript directory and OMP's `config.yml`. A test run once disabled a real unit, and a subagent once wiped live state.
 
 - A new code path that reads or writes outside the repo is added to that fixture in the same
   change.

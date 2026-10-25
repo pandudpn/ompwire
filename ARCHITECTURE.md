@@ -211,16 +211,16 @@ against a fake stream rather than the live model.
 
 | Path | Holds |
 | --- | --- |
-| `~/.config/ompwire/config.toml` | agent settings |
-| `~/.config/ompwire/gateways.toml` | gateway definitions |
-| `~/.config/ompwire/.env` | one credential per gateway, mode `0600` |
-| `~/.local/state/ompwire/sessions.db` | the `telegram` gateway's chat key to session id, per-chat prefs (model, mode, thinking, yolo, `context_size`), unfinished turns |
-| `~/.local/state/ompwire/overrides.json` | the `telegram` gateway's toggles set from chat |
-| `~/.local/state/ompwire/gateways/<name>/` | the same three (sessions.db, overrides.json, log) for every other gateway |
-| `~/.local/state/ompwire/files/<chat id>/` | documents sent from the chat, for the agent to read |
+| `~/.config/ompwire/config.toml` | settings every gateway shares |
 | `~/.config/ompwire/schedules.toml` | the schedules, one row each (no daemon state) |
-| `~/.local/state/ompwire/serve-<gateway>.lock` | flock, one process per gateway |
-| `~/.local/state/ompwire/ompwire.log` | the `telegram` gateway's rotating log (and the CLI's), redacted |
+| `~/.config/ompwire/gateways/<name>/gateway.toml` | one gateway's definition and its own settings |
+| `~/.config/ompwire/gateways/<name>/.env` | that gateway's credential, mode `0600`, the unit's `EnvironmentFile` |
+| `~/.local/state/ompwire/gateways/<name>/sessions.db` | chat key to session id, per-chat prefs (model, mode, thinking, yolo, `context_size`), unfinished turns |
+| `~/.local/state/ompwire/gateways/<name>/overrides.json` | toggles set from that gateway's chat |
+| `~/.local/state/ompwire/gateways/<name>/ompwire.log` | rotating log, redacted |
+| `~/.local/state/ompwire/gateways/<name>/serve.lock` | flock, one process per gateway |
+| `~/.local/state/ompwire/cli/sessions.db` | `ompwire chat`'s sessions, keyed `cli:<cwd>` |
+| `~/.local/state/ompwire/files/<chat id>/` | documents sent from the chat, for the agent to read |
 
 `~/.omp` is the agent's own store: sessions, provider credentials, MCP config. ompwire touches it
 in three places, and uninstall never does:
@@ -313,7 +313,14 @@ deprecation cycle.
   bots resumed each other's session, and `/new` in one reset the other. `gateways.config_for()`
   gives each gateway its own store, overrides and log under `state/gateways/<name>/`, and layers
   its `[gateway.<name>.<section>]` settings over `config.toml`. The keys stay as they are; the
-  file is what separates them. `telegram` keeps the original paths, so no live store moves.
+  file is what separates them.
+- **A shared .env handed every bot's token to every agent.** Each unit loaded the one `.env`, so
+  an agent with a shell could print another bot's token from its environment. Each gateway now
+  has its own `.env`, and `child_env()` strips every `OMPWIRE_GATEWAY_*_TOKEN` as well.
+- **Moving a live store is a restart, not a copy.** `gateways.migrate(state_for=name)` runs in
+  `gateway _run` before the lock is taken, so the files move while no process has them open, and
+  never while the old lock is held. The unfinished-turn row moves with `sessions.db`, which is how
+  the turn that triggered the restart was resumed on the new layout.
 - **One poller per token.** Two processes polling the same bot token make Telegram answer
   `409 Conflict` and drop updates. The per-gateway flock and the unit model both exist because
   of this.
@@ -322,12 +329,13 @@ deprecation cycle.
 
 ```
 ompwire gateway start [NAME] -> platform, profile, credential (verified first), allow list
-                               gateways.toml + .env (stop first if the credential changes)
+                               gateways/NAME/{gateway.toml,.env} (stop first if the credential changes)
                                ~/.config/systemd/user/ompwire-NAME.service
                                daemon-reload, enable --now (or restart if already active)
                                ExecStart: ompwire gateway _run NAME
 ompwire gateway stop NAME    -> stop, disable
-ompwire gateway remove NAME  -> stop, delete unit, delete definition
+ompwire gateway remove NAME  -> stop, delete unit, definition and credential;
+                               full delete also removes state/gateways/NAME/
 ```
 
 `_run` is the foreground entry point systemd supervises. It is deliberately absent from
