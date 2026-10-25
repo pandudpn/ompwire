@@ -197,7 +197,8 @@ class Surface(abc.ABC):
     limit: int
     # A surface without a rate limit (a terminal) can take the answer as it is written instead
     # of one message per segment. The engine then calls stream() with each piece of text and
-    # does not post the segment again.
+    # does not post the segment again. A surface that sets it must implement both stream() and
+    # end_stream().
     streams: bool = False
 
     async def stream(self, delta: str) -> None:

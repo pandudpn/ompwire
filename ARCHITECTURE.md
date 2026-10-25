@@ -50,7 +50,9 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `mcp_hub.py` | ~150 | `servers.yaml` to `session/new` `mcpServers` |
 | `login.py` | ~135 | provider login on a pty, driven from chat |
 | `store.py` | ~170 | sqlite: chat key to session id, per-chat prefs, unfinished turns per transport prefix |
-| `format.py` | ~44 | neutral helpers: `uptime`, WIB clock, the tool-trace clip |
+| `format.py` | ~80 | neutral helpers: `uptime`, WIB clock, token counts (`58.6k`), the tool-trace clip |
+| `omp_sessions.py` | ~120 | session totals and compactions, read incrementally from omp's transcript JSONL |
+| `omp_config.py` | ~130 | omp's `compaction:` block in `config.yml`, edited in place |
 | `tg_html.py` | ~112 | Telegram HTML: cards, grids, tool blocks, help and run cards |
 | `lock.py` | ~100 | one flock per gateway |
 | `logs.py` | ~62 | redaction filter |
@@ -82,8 +84,11 @@ Line counts move. If a number here is wrong, the file is right and this table is
    what the agent offered, plus a persisted override so the same tool is not asked twice.
 7. Every action lands in a rotating log with token-shaped strings redacted before the handler
    sees them.
-8. If the agent ends with `<<options: a | b>>`, the marker is stripped and turned into buttons.
-   The chosen text is sent back as an ordinary message.
+8. If the agent ends with `<<options: a | b>>`, the marker is stripped and turned into buttons,
+   plus ✏️ Other answer and ⏭️ Skip. While the question is open, other typed messages are held
+   (`⏸️ held #n`) and run after it is answered or skipped; after Other answer, the next message
+   is the answer. The buttons are removed once the question is settled, so a late tap sends
+   nothing.
 
 ## Attachments
 
@@ -177,7 +182,7 @@ decision behind it:
 | `agent_message_chunk` | the answer, buffered and posted as a new message at the next tool call or the end of the turn |
 | `agent_thought_chunk` | the reasoning, shown only with `/reasoning on`, kept to its tail |
 | `tool_call`, `tool_call_update` | one message per call, posted when it completes or fails, when `stream.show_tool_calls` is on |
-| `usage_update` | fills `agent.context`, drives the ⚠️ warning at `stream.compaction_warn` and the 🗜️ drop notice after a compaction; never enters the turn queue |
+| `usage_update` | fills `agent.context` and drives the ⚠️ warning at `stream.compaction_warn`; a report under 5% of the last good one is held, since omp can anchor it on a few hundred tokens after `session/load`; never enters the turn queue |
 | `session_info_update` | read for accounting, never rendered |
 | `available_commands_update` | fills `/commands` |
 | `config_option_update`, `current_mode_update` | kept so the pickers show current values |
@@ -263,7 +268,14 @@ deprecation cycle.
   `injected` (the running turn reads it, verified on omp 18.12.6), `promptRequired` (nothing was
   running) or `failed`. A message sent while a turn runs is steered by default
   (`[telegram] busy_message = "queue"` restores the FIFO); anything not injected falls back to
-  the queue, and `/queue` always queues.
+  the queue, and `/queue` always queues. The message gets a reply saying which: `↪️ steered` or
+  `📥 queued #n`.
+- **Compaction is read from omp's transcript, not inferred from usage.** No compaction event
+  crosses ACP in omp 18.12.6 (`auto_compaction_*` reach RPC mode only; asked upstream in
+  can1357/oh-my-pi#16969). omp writes a `compaction` entry with `tokensBefore`/`tokensAfter` to
+  the session JSONL, so after each turn a new entry gets one `🗜️` notice. Entries present when
+  the process starts are not announced, and a `/compact` turn stays quiet because omp reports
+  it itself. `/usage` sums the same file, so its totals survive restarts and `/resume`.
 - **A permission answer must not block the reader.** The reply to `session/request_permission`
   can take minutes; it is answered on its own thread so a steer sent during an approval returns.
 - **A turn cut by a restart is resumed, per transport.** `ask()` writes an `inflight` row before
