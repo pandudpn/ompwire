@@ -114,12 +114,12 @@ def test_the_answer_is_sent(rendered):
 
 def test_reasoning_is_hidden_until_it_is_asked_for(rendered):
     messages = rendered([thought("mari saya hitung"), message("42")], reasoning=False)
-    assert not any("💭" in body for body in messages)
+    assert not any("🧠" in body for body in messages)
 
 
 def test_reasoning_is_rendered_when_it_is_on(rendered):
     messages = rendered([thought("mari saya hitung dulu"), message("42")], reasoning=True)
-    thinking = [body for body in messages if "💭" in body]
+    thinking = [body for body in messages if "🧠" in body]
     assert thinking, messages
     assert "mari saya hitung" in thinking[0]
 
@@ -136,7 +136,7 @@ def test_a_subagent_is_named_in_the_trace(rendered):
 def test_a_long_reasoning_stream_is_cut_to_its_tail(rendered):
     long = "x" * (telegram.REASONING_CHARS + 500) + "EKOR"
     messages = rendered([thought(long), message("selesai")], reasoning=True)
-    thinking = [body for body in messages if "💭" in body][-1]
+    thinking = [body for body in messages if "🧠" in body][-1]
     assert "EKOR" in thinking
     assert len(thinking) < len(long)
 

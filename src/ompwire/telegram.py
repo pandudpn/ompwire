@@ -724,7 +724,10 @@ class ChatAgent:
                 return
             if len(shown) > REASONING_CHARS:
                 shown = "…\n" + shown[-REASONING_CHARS:]
-            enqueue("thinking", f"💭 <i>thinking</i>\n<blockquote expandable>{esc(shown)}</blockquote>",
+            # prose, so not a code block: monospace reads badly on a phone and a <pre> cannot
+            # collapse. An expandable quote stays one line until tapped.
+            enqueue("thinking",
+                    f"🧠 <i>reasoning</i>\n<blockquote expandable>{esc(shown)}</blockquote>",
                     html=True, essential=False)
 
         def flush_segment() -> None:
