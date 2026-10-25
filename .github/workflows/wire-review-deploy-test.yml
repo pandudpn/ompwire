@@ -1,0 +1,21 @@
+name: wire-review deploy test
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: Target environment
+        required: true
+      app:
+        description: App to deploy
+        required: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "env=$ENV_NAME app=$APP"
+          if [ "$APP" = "fail" ]; then echo "simulating failure"; exit 1; fi
+          sleep 20
+        env:
+          ENV_NAME: ${{ github.event.inputs.env }}
+          APP: ${{ github.event.inputs.app }}
