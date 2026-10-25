@@ -45,6 +45,8 @@ class TerminalSurface(engine.Surface):
 
     label = "cli"
     limit = 100_000  # no rate limit here; the cap only stops one runaway trace
+    # no rate limit and no message timestamps: the answer is printed as the agent writes it
+    streams = True
 
     def __init__(self, config: Config) -> None:
         self.show_reasoning = bool(config.get("stream", "show_reasoning", False))
@@ -84,6 +86,14 @@ class TerminalSurface(engine.Surface):
         print(body, flush=True)
         # None means "not delivered" to the engine; a printed line was delivered
         return True
+
+    async def stream(self, delta: str) -> None:
+        sys.stdout.write(delta)
+        sys.stdout.flush()
+
+    async def end_stream(self) -> None:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
     @contextlib.asynccontextmanager
     async def typing(self):
@@ -207,6 +217,8 @@ async def _chat(agent: engine.ChatAgent, surface: TerminalSurface,
 
 def run_chat(config: Config, key: str, query: str | None = None, cwd: str | None = None) -> int:
     surface = TerminalSurface(config)
+    # Telegram's one-message-a-second pacing has nothing to protect in a terminal
+    config.data.setdefault("stream", {})["min_gap"] = 0.0
 
     async def go() -> int:
         agent = engine.ChatAgent(config, key, surface)

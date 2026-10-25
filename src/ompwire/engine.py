@@ -187,6 +187,18 @@ class Surface(abc.ABC):
 
     label: str
     limit: int
+    # A surface without a rate limit (a terminal) can take the answer as it is written instead
+    # of one message per segment. The engine then calls stream() with each piece of text and
+    # does not post the segment again.
+    streams: bool = False
+
+    async def stream(self, delta: str) -> None:
+        """Show a piece of answer text as it arrives; only called when `streams` is set."""
+        raise NotImplementedError
+
+    async def end_stream(self) -> None:
+        """The streamed text stops here: a tool call or the end of the turn follows."""
+        raise NotImplementedError
 
     @abc.abstractmethod
     async def post(self, body: str, *, kind: str) -> Any | None:
@@ -603,10 +615,30 @@ class ChatAgent:
         outbox: list[dict[str, Any]] = []
         wake = asyncio.Event()
         min_gap = float(self.config.get("stream", "min_gap", 1.0))
+        streams = bool(getattr(self.surface, "streams", False))
+        # streaming: how much of the current segment has already been shown, measured on the
+        # cleaned text, so a marker is held back until it closes and then never shown
+        shown_len = [0]
 
         def enqueue(kind: str, body: str, *, essential: bool) -> None:
             outbox.append({"kind": kind, "body": body, "essential": essential})
             wake.set()
+
+        def clean(text: str, *, final: bool) -> str:
+            text = strip_agent_noise(text)
+            text = hide_file_partial(hide_partial(text, final=final), final=final)
+            return schedule_lib.hide_partial(text, final=final)
+
+        def stream_delta(*, final: bool) -> None:
+            """Queue the part of the segment that is safe to show and has not been shown yet."""
+            visible = clean("".join(segment), final=final)
+            # a marker may still be open: hold back from its `<<` until it is complete
+            cut = visible.rfind("<<")
+            if not final and cut != -1 and ">>" not in visible[cut:]:
+                visible = visible[:cut]
+            if len(visible) > shown_len[0]:
+                enqueue("delta", visible[shown_len[0]:], essential=True)
+                shown_len[0] = len(visible)
 
         async def post(body: str, *, kind: str) -> Any | None:
             """One new message. A flood window is waited out for the answer, not for a trace."""
@@ -640,6 +672,14 @@ class ChatAgent:
                         break
                     wake.clear()
                     await wake.wait()
+                    continue
+                if outbox[0]["kind"] == "delta":
+                    # a terminal has no rate limit and no message boundary to wait for
+                    await self.surface.stream(outbox.pop(0)["body"])
+                    continue
+                if outbox[0]["kind"] == "end_stream":
+                    outbox.pop(0)
+                    await self.surface.end_stream()
                     continue
                 if outbox[0]["kind"] != "trace":
                     item = outbox.pop(0)
@@ -676,10 +716,15 @@ class ChatAgent:
             enqueue("reasoning", self.surface.reasoning(shown), essential=False)
 
         def flush_segment() -> None:
-            text = strip_agent_noise("".join(segment))
+            if streams:
+                if segment:
+                    stream_delta(final=True)
+                    enqueue("end_stream", "", essential=True)
+                segment.clear()
+                shown_len[0] = 0
+                return
+            text = clean("".join(segment), final=True)
             segment.clear()
-            text = hide_file_partial(hide_partial(text, final=True), final=True)
-            text = schedule_lib.hide_partial(text, final=True)
             if not text.strip():
                 return
             for part in _chunks(text, 3600):
@@ -725,6 +770,8 @@ class ChatAgent:
                     flush_thinking()
                     segment.append(update.text)
                     answer.append(update.text)
+                    if streams:
+                        stream_delta(final=False)
                 elif update.kind in {"tool_call", "tool_call_update"}:
                     raw = update.raw
                     call_id = str(raw.get("toolCallId") or f"anon{len(trace)}")

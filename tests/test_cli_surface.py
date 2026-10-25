@@ -100,3 +100,31 @@ def test_a_numbered_answer_is_sent_as_the_option_text(monkeypatch, capsys):
     prompts = run_turns(turns, repl)
     assert prompts == ["halo", "mysql"]
     assert "2. mysql" in capsys.readouterr().out
+
+
+def test_the_answer_is_streamed_as_it_arrives_and_markers_never_show(capsys):
+    """A terminal has no rate limit: text is printed piece by piece, not per segment."""
+    written: list[str] = []
+    turns = [[
+        message("satu "), message("dua "),
+        tool_done("t1", "ls", "ls", "x"),
+        message("tiga <<options: a | "), message("b>> empat"),
+    ]]
+
+    async def turn(agent, surface):
+        original = surface.stream
+
+        async def spy(delta):
+            written.append(delta)
+            await original(delta)
+
+        surface.stream = spy
+        await agent.ask("halo")
+
+    run_turns(turns, turn)
+    out = capsys.readouterr().out
+    assert len(written) >= 3  # pieces, not one block per segment
+    assert written[0].strip() == "satu"  # trailing space waits for the next word
+    assert out.index("satu dua") < out.index("[tool] execute") < out.index("tiga")
+    assert "<<" not in out and "options:" not in out  # a marker is held back, then removed
+    assert "empat" in out

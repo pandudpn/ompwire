@@ -43,7 +43,7 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `config.py` | ~250 | layered config: defaults, `config.toml`, environment, redaction of dumps |
 | `service.py` | ~235 | systemd unit rendering, start, stop, remove, state |
 | `catalog.py` | ~230 | model, mode, thinking, provider and skill lists read from the agent |
-| `cli.py` | ~220 | `ompwire chat`: `TerminalSurface` and the REPL, both on the engine |
+| `cli.py` | ~240 | `ompwire chat`: `TerminalSurface` and the REPL, both on the engine. A terminal has no rate limit, so its surface sets `streams` and prints the answer as it is written (markers held back until they close); Telegram posts one message per segment |
 | `uninstall.py` | ~225 | what to remove, and what to leave alone |
 | `mdrender.py` | ~210 | markdown to Telegram HTML |
 | `status.py` | ~175 | one screen of current state, no handshake |
