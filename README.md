@@ -21,10 +21,11 @@ unit, and the terminal needs neither. Adding a platform does not change how a tu
 | --- | --- | --- |
 | Telegram | implemented | `ompwire gateway add telegram` |
 | Terminal | implemented | `ompwire chat` |
-| WhatsApp | planned; `gateway add whatsapp` refuses and writes nothing | |
-| Discord | planned | |
+| WhatsApp | defined, not implemented: `gateway add whatsapp` refuses and writes nothing | — |
 
-CONTRIBUTING.md lists what a new platform implements.
+The terminal is a streaming REPL with the core commands; the full command set is the Telegram
+gateway's. [Adding a transport](CONTRIBUTING.md#adding-a-transport) lists what a new platform
+implements.
 
 It is built for one person on their own machine. The only state ompwire keeps is a SQLite file
 that maps a chat to a session id. There is no server, no web UI and no second agent loop.
@@ -120,8 +121,9 @@ implemented yet, so nothing half-configured is ever written.
 
 ## In a chat app
 
-The commands and behaviour below are the Telegram gateway's. Another chat platform follows the
-same rules; the terminal has its own smaller set, described under [Terminal](#terminal).
+The commands and behaviour below are the Telegram gateway's. A future chat platform would
+follow the same rules; the terminal has its own smaller set, described under
+[Terminal](#terminal).
 
 | Command | What it does |
 | --- | --- |

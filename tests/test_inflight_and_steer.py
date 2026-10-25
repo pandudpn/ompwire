@@ -143,12 +143,14 @@ class Msg:
         self.images = []
         self.reactions: list[str] = []
         self.replies: list[str] = []
+        self.quoted: list[bool] = []
 
     async def set_reaction(self, emoji):
         self.reactions.append(emoji)
 
-    async def reply_text(self, text):
+    async def reply_text(self, text, do_quote=None, **_kw):
         self.replies.append(text)
+        self.quoted.append(do_quote is True)
 
 
 def test_a_message_sent_mid_turn_steers_it(tmp_path):
@@ -159,6 +161,7 @@ def test_a_message_sent_mid_turn_steers_it(tmp_path):
     assert queued == []
     assert msg.reactions == []
     assert msg.replies and msg.replies[0].startswith("↪️ steered")
+    assert msg.quoted == [True]  # a quoted reply, not a new row under it
 
 
 def test_a_steer_the_agent_declines_falls_back_to_the_queue(tmp_path):
@@ -166,6 +169,7 @@ def test_a_steer_the_agent_declines_falls_back_to_the_queue(tmp_path):
     queued = _submit(_config(tmp_path), Client(steer_outcome="failed"), True, msg)
     assert queued == ["later"]
     assert msg.replies == ["📥 queued #1 · runs after the current turn"]
+    assert msg.quoted == [True]
 
 
 def test_a_turn_that_ended_before_the_steer_becomes_a_prompt(tmp_path):

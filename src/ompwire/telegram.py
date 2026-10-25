@@ -397,9 +397,12 @@ class Transport:
         await self._ack(message, queued_text(depth))
 
     async def _ack(self, message: Any, text: str) -> None:
-        """A reply to the message itself, so it is clear which message went where."""
+        """A reply quoting the message itself, so it is clear which message went where.
+
+        python-telegram-bot only quotes by default in groups; in a private chat reply_text
+        posts a plain new message, so the quote is asked for explicitly."""
         try:
-            await message.reply_text(text)
+            await message.reply_text(text, do_quote=True)
         except TelegramError as exc:
             log.warning("ack failed: %s", exc)
 
@@ -553,8 +556,7 @@ class Transport:
         payload = _TextOnly("/compact", update.effective_message)
         if agent.busy:
             depth = self.enqueue(chat_id, "prompt", payload)
-            await update.effective_message.reply_text(
-                f"queued (position {depth}). the running turn finishes first.")
+            await self._ack(update.effective_message, queued_text(depth))
             return
         log.info("compact requested chat=%s", chat_id)
         await self.submit(chat_id, payload, update.effective_message)
@@ -935,7 +937,7 @@ class Transport:
         depth = self.enqueue(chat_id, "prompt", payload)
         log.info("context report requested chat=%s busy=%s queue=%s", chat_id, agent.busy, depth)
         if agent.busy:
-            await update.effective_message.reply_text(f"queued (position {depth})")
+            await self._ack(update.effective_message, queued_text(depth))
 
     async def cmd_sessions(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
