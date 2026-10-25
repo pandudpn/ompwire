@@ -17,7 +17,7 @@ import re
 import shlex
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
 
@@ -128,6 +128,16 @@ def tool_name(kind: str, raw_input: dict[str, Any], named: str = "") -> str:
     if raw_input.get("tasks"):
         return "task"
     return _KIND_TOOL.get(kind, kind or "tool")
+
+
+def _option_name(options: dict[str, dict[str, Any]], config_id: str, value: str) -> str:
+    """The readable name of one option value, with its id when the two differ."""
+    for entry in (options.get(config_id) or {}).get("options") or []:
+        if isinstance(entry, dict) and str(entry.get("value")) == value:
+            name = str(entry.get("name") or "")
+            if name and name != value:
+                return f"{name} (`{value}`)"
+    return f"`{value}`"
 
 
 def _chunks(text: str, limit: int) -> list[str]:
@@ -334,6 +344,8 @@ class ChatAgent:
         # values ompwire itself asked for; omp echoes them as config_option_update, which must
         # not be reported back as a change made from omp's side
         self._asked: set[tuple[str, str]] = set()
+        # set while a turn runs: posts a notice in order with the turn's own messages
+        self._turn_notice: Callable[[str], None] | None = None
         self.info: dict[str, Any] = {}
         self.agent_version = ""
         self.advertised_commands: list[str] = []
@@ -499,13 +511,10 @@ class ChatAgent:
             return
         if update.kind == "session_info_update":
             return
-        if update.kind == "config_option_update":
-            options = update.raw.get("configOptions") or []
-            self._loop.call_soon_threadsafe(self._on_options, options)
-            return
-        if update.kind == "current_mode_update":
-            mode = str(update.raw.get("currentModeId") or "")
-            self._loop.call_soon_threadsafe(self._on_mode, mode)
+        if update.kind in {"config_option_update", "current_mode_update"} and not self.busy:
+            # between turns nothing reads the turn queue; mid-turn they take it, so a notice
+            # lands after the messages that came before it
+            self._loop.call_soon_threadsafe(self._on_option_update, update)
             return
         if update.kind == "usage_update":
             raw = update.raw
@@ -571,12 +580,26 @@ class ChatAgent:
         for config_id in self.WATCHED_OPTIONS:
             old = str((self.options.get(config_id) or {}).get("currentValue") or "")
             new = str((updated.get(config_id) or {}).get("currentValue") or "")
+            # an empty `old` is the first report of a session, not a change
             if old and new and old != new and (config_id, new) not in self._asked:
                 changes.append((config_id, old, new))
-        self.options = updated
+        previous, self.options = self.options, updated
         for config_id, old, new in changes:
             log.info("option changed by omp %s %s: %s -> %s", self.label, config_id, old, new)
-            self._loop.create_task(self._context_notice(f"⚙️ omp switched {config_id}: `{old}` → `{new}`"))
+            text = (f"⚙️ omp switched {config_id}: {_option_name(previous, config_id, old)}"
+                    f" → {_option_name(updated, config_id, new)}")
+            if self._turn_notice is not None:
+                # mid-turn the chat is still receiving this turn's messages; a notice sent
+                # straight to the platform would land above traces still waiting to go out
+                self._turn_notice(text)
+            else:
+                self._loop.create_task(self._context_notice(text))
+
+    def _on_option_update(self, update: AcpUpdate) -> None:
+        if update.kind == "config_option_update":
+            self._on_options(update.raw.get("configOptions") or [])
+        else:
+            self._on_mode(str(update.raw.get("currentModeId") or ""))
 
     def _on_mode(self, mode: str) -> None:
         """current_mode_update carries only the id; fold it into `options` like the full update."""
@@ -990,6 +1013,8 @@ class ChatAgent:
                 if call_id not in posted:
                     post_tool(call_id)
             release_todo()
+            # from here a notice goes straight to the platform: this outbox is no longer read
+            self._turn_notice = None
             state["closed"] = True
             wake.set()
             await sender_task  # the buttons and files come after the last message, in order
@@ -1023,6 +1048,10 @@ class ChatAgent:
                     answer.append(update.text)
                     if streams:
                         stream_delta(final=False)
+                elif update.kind in {"config_option_update", "current_mode_update"}:
+                    flush_thinking()
+                    flush_segment()
+                    self._on_option_update(update)
                 elif update.kind == "plan":
                     flush_thinking()
                     flush_segment()
@@ -1086,6 +1115,8 @@ class ChatAgent:
 
         sender_task = asyncio.create_task(sender())
         drain_task = asyncio.create_task(drain())
+        # markdown, like surface.notice between turns
+        self._turn_notice = lambda body: enqueue("text", body, essential=True)
         try:
             async with self.surface.typing():
                 result = await asyncio.to_thread(
@@ -1113,6 +1144,7 @@ class ChatAgent:
         except BaseException:
             # a cancelled turn (gateway shutdown) never reaches finish(); do not leave the sender
             sender_task.cancel()
+            self._turn_notice = None
             raise
         self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
         await drain_task

@@ -536,3 +536,32 @@ def test_a_todo_call_that_changes_nothing_keeps_its_trace(rendered):
     ])
     assert sum(body.startswith("📋 <b>Todo</b>") for body in messages) == 1
     assert any(body.startswith("📋 <code>todo</code>") for body in messages), messages
+
+
+def test_an_option_switch_mid_turn_lands_in_order_with_its_name(rendered, monkeypatch):
+    """A notice sent straight to the platform jumped ahead of traces still waiting to go out."""
+    from ompwire import engine as engine_mod
+
+    def options(model):
+        return [{"id": "model", "currentValue": model, "options": [
+            {"value": "a/one", "name": "Model One"}, {"value": "a/two", "name": "Model Two"}]},
+            {"id": "mode", "currentValue": "default", "options": []}]
+
+    original = engine_mod.ChatAgent.ask
+
+    async def ask(self, *args, **kwargs):
+        self.options = {opt["id"]: opt for opt in options("a/one")}
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(engine_mod.ChatAgent, "ask", ask)
+    messages = rendered([
+        kinded_call("t1", "execute", "ls", {"command": "ls"}),
+        tool_progress("t1", "", status="completed"),
+        Update(kind="config_option_update", session_id="s",
+               raw={"sessionUpdate": "config_option_update", "configOptions": options("a/two")}),
+        message("selesai"),
+    ])
+    order = [i for i, body in enumerate(messages) if "<code>ls</code>" in body or "$ ls" in body]
+    switch = [i for i, body in enumerate(messages) if "omp switched model" in body]
+    assert switch and order and order[0] < switch[0], messages
+    assert "Model One" in messages[switch[0]] and "Model Two" in messages[switch[0]]
