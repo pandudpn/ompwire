@@ -28,6 +28,7 @@ from .acp import Update as AcpUpdate
 from .attachments import extract as extract_files
 from .attachments import hide_partial as hide_file_partial
 from .config import Config, approval_policy
+from .format import humanize_token_report, tokens
 from .mcp_hub import hub_servers, normalize
 from .mcp_hub import merge_entry as merge_mcp_entry
 from .mdrender import strip_agent_noise
@@ -151,17 +152,10 @@ def mcp_label(names: Iterable[str]) -> str:
 
 
 def context_line(used: int, size: int) -> str:
-    """One readable row for /status and /usage, e.g. "124k / 1.0M (12%)"."""
-    def short(n: int) -> str:
-        if n >= 1_000_000:
-            value, unit = n / 1_000_000, "M"
-        else:
-            value, unit = n / 1_000, "k"
-        text = f"{value:.1f}".rstrip("0").rstrip(".")
-        return f"{text}{unit}"
+    """One readable row for /status and /usage, e.g. "124k / 1M (12%)"."""
     if size <= 0:
         return "unknown"
-    return f"{short(used)} / {short(size)} ({used * 100 // size}%)"
+    return f"{tokens(used)} / {tokens(size)} ({used * 100 // size}%)"
 
 
 # Choices that belong to the chat, not to one ACP session: /new must not reset them.
@@ -446,8 +440,7 @@ class ChatAgent:
         if fell and not self._suppress_drop_notice:
             self._loop.call_soon_threadsafe(
                 lambda: asyncio.create_task(self._context_notice(
-                    f"🗜️ context compacted · {context_line(prev, size).split(' / ')[0]} → "
-                    f"{context_line(used, size).split(' / ')[0]}")))
+                    f"🗜️ context compacted · {tokens(prev)} → {tokens(used)}")))
         self._suppress_drop_notice = False
 
     def _warning_text(self, used: int, size: int) -> str:
@@ -713,7 +706,7 @@ class ChatAgent:
             wake.set()
 
         def clean(text: str, *, final: bool) -> str:
-            text = strip_agent_noise(text)
+            text = humanize_token_report(strip_agent_noise(text))
             text = hide_file_partial(hide_partial(text, final=final), final=final)
             return schedule_lib.hide_partial(text, final=final)
 
@@ -971,8 +964,9 @@ class ChatAgent:
         if self.config.get("stream", "show_usage", True):
             try:
                 await self.surface.notice(
-                    f"{result.stop_reason} · in {usage.get('inputTokens', '?')} "
-                    f"out {usage.get('outputTokens', '?')} cached {usage.get('cachedReadTokens', 0)}"
+                    f"{result.stop_reason} · in {tokens(usage.get('inputTokens'))} "
+                    f"out {tokens(usage.get('outputTokens'))} "
+                    f"cached {tokens(usage.get('cachedReadTokens', 0))}"
                 )
             except Exception:
                 pass

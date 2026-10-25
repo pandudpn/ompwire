@@ -5,6 +5,7 @@ Telegram HTML helpers live in `tg_html.py`; nothing here knows a platform.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 
 WIB = timezone(timedelta(hours=7))
@@ -27,6 +28,33 @@ def uptime(seconds: float) -> str:
 
 def now_wib() -> str:
     return datetime.now(WIB).strftime("%H:%M:%S WIB")
+
+
+def tokens(count: object) -> str:
+    """A token count a person can read at a glance: 940, 58.6k, 1.05M."""
+    try:
+        n = int(count)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "?"
+    if abs(n) < 1_000:
+        return str(n)
+    if abs(n) < 1_000_000:
+        value, unit = n / 1_000, "k"
+    else:
+        value, unit = n / 1_000_000, "M"
+    digits = 2 if abs(value) < 10 else 1
+    text = f"{value:.{digits}f}".rstrip("0").rstrip(".")
+    return f"{text}{unit}"
+
+
+# omp reports a compaction as "Tokens: 94611 -> 58555 (saved 36056)"; raw counts of that size
+# are not readable in a chat, so they are rewritten with the same units as everything else.
+_RAW_TOKENS = re.compile(r"Tokens: (\d+) -> (\d+) \(saved (\d+)\)")
+
+
+def humanize_token_report(text: str) -> str:
+    return _RAW_TOKENS.sub(
+        lambda m: f"Tokens: {tokens(m[1])} → {tokens(m[2])} (saved {tokens(m[3])})", text)
 
 
 

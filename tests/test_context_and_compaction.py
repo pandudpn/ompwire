@@ -124,6 +124,16 @@ def test_usage_update_updates_context_and_skips_the_turn_queue(tmp_path):
     assert agent._updates.empty()
 
 
+def test_token_counts_read_like_a_person_wrote_them():
+    from ompwire.format import humanize_token_report, tokens
+
+    assert [tokens(n) for n in (0, 940, 1_234, 58_555, 94_611, 1_048_576, None)] == \
+        ["0", "940", "1.23k", "58.6k", "94.6k", "1.05M", "?"]
+    assert humanize_token_report(
+        "Compaction complete. Tokens: 94611 -> 58555 (saved 36056).") == \
+        "Compaction complete. Tokens: 94.6k → 58.6k (saved 36.1k)."
+
+
 def test_context_line_formats_k_m_and_percent():
     assert engine.context_line(124_000, 1_000_000) == "124k / 1M (12%)"
     assert engine.context_line(0, 0) == "unknown"
@@ -365,7 +375,7 @@ def test_cli_context_prints_the_line(tmp_path, monkeypatch, capsys):
 
     assert asyncio.run(go()) == 0
     out = capsys.readouterr().out
-    assert "74.9k / 1M (7%)" in out
+    assert "74.9k / 1.05M (7%)" in out
 
 
 def test_a_new_agent_process_does_not_report_a_compaction(tmp_path):

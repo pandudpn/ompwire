@@ -26,7 +26,7 @@ from . import attachments, delivery, gateways, schedules
 from .acp import AcpClient, AcpError
 from .config import PROTOCOL_HINT, load_config
 from .engine import child_env
-from .format import now_wib
+from .format import now_wib, tokens
 
 log = logging.getLogger("ompwire.schedule")
 
@@ -73,8 +73,8 @@ def _meta(item: schedules.Schedule, run: dict[str, Any]) -> list[tuple[str, str]
         rows.append(("used", detail))
     usage = run.get("usage") or {}
     if usage.get("inputTokens") or usage.get("outputTokens"):
-        rows.append(("token", f"{int(usage.get('inputTokens') or 0):,} in · "
-                              f"{int(usage.get('outputTokens') or 0):,} out"))
+        rows.append(("token", f"{tokens(usage.get('inputTokens') or 0)} in · "
+                              f"{tokens(usage.get('outputTokens') or 0)} out"))
     rows.append(("sent to", f"{item.gateway} · {'ephemeral' if item.ephemeral else 'session'}"))
     return rows
 

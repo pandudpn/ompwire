@@ -58,7 +58,7 @@ from .engine import (
     mcp_label,
     resolve_mcp_servers,
 )
-from .format import now_wib
+from .format import now_wib, tokens
 from .format import uptime as fmt_uptime
 from .login import LoginSession
 from .mdrender import split_blocks, strip_html, to_html, to_plain
@@ -464,9 +464,9 @@ class Transport:
         usage = agent.usage
         rows = [
             ("turns", usage["turns"]),
-            ("input", f"{usage['input']:,}"),
-            ("output", f"{usage['output']:,}"),
-            ("cached", f"{usage['cached']:,}"),
+            ("input", tokens(usage["input"])),
+            ("output", tokens(usage["output"])),
+            ("cached", tokens(usage["cached"])),
             ("tools", agent.tools_used),
             ("context", engine.context_line(agent.context["used"], agent.context["size"]))
             if agent.context["size"] > 0 else ("context", "unknown"),
