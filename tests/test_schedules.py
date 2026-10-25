@@ -149,8 +149,8 @@ def test_a_marker_without_a_prompt_is_ignored():
 
 
 def test_a_half_written_marker_is_hidden_while_streaming():
-    assert schedules.hide_partial("ok <<schedule: 0 7 *", final=False) == "ok"
-    assert schedules.hide_partial("ok <<schedule: 0 7 * * * | x>>", final=True) == "ok"
+    assert schedules.hide_partial("ok\n<<schedule: 0 7 *", final=False) == "ok"
+    assert schedules.hide_partial("ok\n<<schedule: 0 7 * * * | x>>", final=True) == "ok"
 
 
 @pytest.mark.parametrize(("name", "expected"), [

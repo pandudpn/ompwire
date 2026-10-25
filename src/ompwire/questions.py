@@ -14,16 +14,22 @@ from __future__ import annotations
 
 import re
 
-OPTIONS_RE = re.compile(r"<<\s*options?\s*:(?P<body>.+?)>>", re.IGNORECASE | re.DOTALL)
-PARTIAL_RE = re.compile(r"<<\s*options?\s*:.*$", re.IGNORECASE | re.DOTALL)
+# A marker counts only when it opens its own line, as the protocol hint asks. Text that merely
+# mentions one (`<<options: …>>` inside an explanation) used to become a single "…" button and
+# swallowed the real marker further down.
+OPTIONS_RE = re.compile(r"^[ \t]*<<\s*options?\s*:(?P<body>.+?)>>[ \t]*$",
+                        re.IGNORECASE | re.DOTALL | re.MULTILINE)
+PARTIAL_RE = re.compile(r"^[ \t]*<<\s*options?\s*:(?:(?!>>).)*\Z",
+                        re.IGNORECASE | re.DOTALL | re.MULTILINE)
 MAX_OPTIONS = 6
 
 
 def extract(text: str) -> tuple[str, list[str]]:
     """Return (message without the marker, options in order)."""
-    match = OPTIONS_RE.search(text)
-    if not match:
+    matches = list(OPTIONS_RE.finditer(text))
+    if not matches:
         return text, []
+    match = matches[-1]  # the question is asked at the end of the turn
     options = [part.strip() for part in re.split(r"\||\n", match.group("body")) if part.strip()]
     cleaned = (text[: match.start()] + text[match.end():]).strip()
     deduped: list[str] = []
@@ -37,4 +43,4 @@ def hide_partial(text: str, final: bool) -> str:
     """Streaming: don't show half a marker while the model is still writing it."""
     if final:
         return extract(text)[0]
-    return PARTIAL_RE.sub("", text).rstrip()
+    return PARTIAL_RE.sub("", OPTIONS_RE.sub("", text)).rstrip()

@@ -456,8 +456,11 @@ def next_elapse(name: str) -> str:
 # schedule is a promise to run an agent later, and a model that misreads "every morning" as every
 # minute would be discovered when the machine fills up, not when it happens. One button fixes that.
 
-MARKER_RE = re.compile(r"<<\s*schedule\s*:\s*(?P<body>[^>]+?)\s*>>", re.IGNORECASE | re.DOTALL)
-PARTIAL_RE = re.compile(r"<<\s*schedule\s*:.*$", re.IGNORECASE | re.DOTALL)
+# own line only: explaining the marker in prose must not propose a timer
+MARKER_RE = re.compile(r"^[ \t]*<<\s*schedule\s*:\s*(?P<body>[^>\n]+?)\s*>>[ \t]*$",
+                       re.IGNORECASE | re.MULTILINE)
+PARTIAL_RE = re.compile(r"^[ \t]*<<\s*schedule\s*:(?:(?!>>).)*\Z",
+                        re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
 
 @dataclass
@@ -502,7 +505,7 @@ def extract(text: str) -> tuple[str, list[Proposal]]:
 def hide_partial(text: str, final: bool) -> str:
     if final:
         return MARKER_RE.sub("", text).strip()
-    return PARTIAL_RE.sub("", text).rstrip()
+    return PARTIAL_RE.sub("", MARKER_RE.sub("", text)).rstrip()
 
 
 DAYS = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")

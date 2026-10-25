@@ -21,8 +21,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-FILE_RE = re.compile(r"<<\s*files?\s*:\s*(?P<body>[^>]+?)\s*>>", re.IGNORECASE | re.DOTALL)
-PARTIAL_RE = re.compile(r"<<\s*files?\s*:.*$", re.IGNORECASE | re.DOTALL)
+# own line only, like every marker: a path mentioned inside a sentence is not a request to send it
+FILE_RE = re.compile(r"^[ \t]*<<\s*files?\s*:\s*(?P<body>[^>\n]+?)\s*>>[ \t]*$",
+                     re.IGNORECASE | re.MULTILINE)
+PARTIAL_RE = re.compile(r"^[ \t]*<<\s*files?\s*:(?:(?!>>).)*\Z",
+                        re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
 MAX_FILES = 5                  # per turn, so one reply cannot turn into a dump
 PHOTO_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -102,7 +105,7 @@ def hide_partial(text: str, final: bool) -> str:
     """Streaming: a half-written marker must not flash in the message."""
     if final:
         return FILE_RE.sub("", text).strip()
-    return PARTIAL_RE.sub("", text).rstrip()
+    return PARTIAL_RE.sub("", FILE_RE.sub("", text)).rstrip()
 
 
 def safe_name(name: str, fallback: str = "file") -> str:

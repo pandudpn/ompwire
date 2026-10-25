@@ -46,9 +46,22 @@ valkey
         assert text == "question"
 
     def test_text_around_the_marker_is_kept_and_stripped(self):
-        text, options = extract("before <<options: yes | no>> after")
-        assert text == "before  after"
+        text, options = extract("before\n<<options: yes | no>>\nafter")
+        assert text == "before\n\nafter"
         assert options == ["yes", "no"]
+
+    def test_a_marker_mentioned_inside_a_sentence_is_not_a_question(self):
+        """An answer that explains the marker produced one "…" button and lost the real one."""
+        text, options = extract(
+            "- a marker like `<<options: …>>` is held back\n\n"
+            "Pick one:\n<<options: Discord | WhatsApp | stop>>")
+        assert options == ["Discord", "WhatsApp", "stop"]
+        assert "`<<options: …>>`" in text  # the explanation keeps its example
+
+    def test_only_a_mention_is_no_question_at_all(self):
+        text, options = extract("write `<<options: a | b>>` on its own line")
+        assert options == []
+        assert text == "write `<<options: a | b>>` on its own line"
 
 
 class TestHidePartial:
@@ -59,6 +72,10 @@ class TestHidePartial:
     def test_a_complete_marker_is_replaced_by_nothing_while_streaming(self):
         assert hide_partial("""Choose
 <<options: a | b>>""", final=False) == "Choose"
+
+    def test_a_mentioned_marker_is_shown_while_streaming(self):
+        assert hide_partial("use `<<options: a | b>>` like this", final=False) == \
+            "use `<<options: a | b>>` like this"
 
     def test_final_text_drops_the_marker(self):
         assert hide_partial("""Choose

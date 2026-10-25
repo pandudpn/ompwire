@@ -89,13 +89,25 @@ def test_an_image_is_sent_as_a_photo_and_a_big_one_as_a_document(workspace, monk
 
 
 def test_a_half_written_marker_is_hidden_while_streaming():
-    assert attachments.hide_partial("working <<file: /tmp/rep", final=False) == "working"
-    assert attachments.hide_partial("working <<file: /tmp/report.pdf>>", final=False) == "working"
+    assert attachments.hide_partial("working\n<<file: /tmp/rep", final=False) == "working"
+    assert attachments.hide_partial("working\n<<file: /tmp/report.pdf>>", final=False) == "working"
 
 
 def test_the_final_pass_strips_every_marker():
-    text = "a <<file: /tmp/x>> b <<file: /tmp/y>>"
-    assert attachments.hide_partial(text, final=True) == "a  b"
+    text = "a\n<<file: /tmp/x>>\nb\n<<file: /tmp/y>>"
+    assert attachments.hide_partial(text, final=True) == "a\n\nb"
+
+
+def test_a_path_mentioned_in_a_sentence_is_not_sent(tmp_path):
+    """Explaining the marker must not upload the file it names."""
+    workspace = tmp_path / "w"
+    workspace.mkdir()
+    report = workspace / "report.pdf"
+    report.write_bytes(b"x")
+    clean, files, rejected = attachments.extract(
+        f"kirim pakai `<<file: {report}>>` di baris sendiri", root=workspace)
+    assert files == [] and rejected == []
+    assert str(report) in clean
 
 
 @pytest.mark.parametrize(("given", "expected"), [

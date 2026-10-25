@@ -108,7 +108,7 @@ def test_the_answer_is_streamed_as_it_arrives_and_markers_never_show(capsys):
     turns = [[
         message("satu "), message("dua "),
         tool_done("t1", "ls", "ls", "x"),
-        message("tiga <<options: a | "), message("b>> empat"),
+        message("tiga\n<<options: a | "), message("b>>\nempat"),
     ]]
 
     async def turn(agent, surface):

@@ -139,7 +139,7 @@ def test_options_marker_is_extracted_and_hidden():
     assert options == ["postgres", "mysql", "sqlite"]
 
     assert extract("no marker here") == ("no marker here", [])
-    assert hide_partial("pick one <<options: a | b", final=False) == "pick one"
+    assert hide_partial("pick one\n<<options: a | b", final=False) == "pick one"
     assert hide_partial("done", final=True) == "done"
 
 
@@ -147,9 +147,9 @@ def test_options_are_deduped_and_capped():
     from ompwire.questions import extract
 
     many = " | ".join(f"o{i}" for i in range(12))
-    _, options = extract(f"q <<options: {many}>>")
+    _, options = extract(f"q\n<<options: {many}>>")
     assert len(options) == 6
-    _, deduped = extract("q <<options: a | a | b>>")
+    _, deduped = extract("q\n<<options: a | a | b>>")
     assert deduped == ["a", "b"]
 
 
