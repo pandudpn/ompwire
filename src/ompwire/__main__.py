@@ -533,9 +533,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="start: who may talk to it, comma separated (Telegram user ids, "
                          "WhatsApp phone numbers)")
     gw.add_argument("--groups", default=None,
-                    help="start, whatsapp: comma separated group ids it listens in")
+                    help="start: groups and Telegram channels it listens in, comma separated; "
+                         "id:mode gives one its own mode (\"\" lists none)")
     gw.add_argument("--group-mode", default="", choices=["", "mention", "all", "read"],
-                    help="start, whatsapp: in a group, answer an @mention or reply (mention), "
+                    help="start: in those chats, answer an @mention or reply (mention), "
                          "every message (all), or nothing (read)")
     gw.add_argument("--relink", action="store_true",
                     help="start, whatsapp: link a new device even when one is linked")
