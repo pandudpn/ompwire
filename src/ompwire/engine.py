@@ -12,7 +12,9 @@ import abc
 import asyncio
 import contextlib
 import logging
+import os
 import re
+import shlex
 import time
 import uuid
 from collections.abc import Iterable
@@ -45,6 +47,42 @@ RESUME_PROMPT = (
     "what is already done, do not repeat finished steps, and finish the request.\n\n"
     "Original request:\n{prompt}"
 )
+HARNESS_SECRETS = ("TELEGRAM_BOT_TOKEN", "HONCHO_API_KEY", "OMPWIRE_HONCHO_API_KEY")
+
+
+def child_env() -> dict[str, str]:
+    """The agent inherits the environment without the credentials this harness runs on."""
+    env = dict(os.environ)
+    for name in HARNESS_SECRETS:
+        env.pop(name, None)
+    return env
+
+
+def _acp_args(config: Config) -> list[str]:
+    """`[acp] args`, accepting the one-string form the environment override produces."""
+    raw = config.get("acp", "args") or ["--mode", "acp"]
+    if isinstance(raw, str):
+        return shlex.split(raw)
+    return [str(part) for part in raw]
+
+
+def resume_plan(store_path: str, prefix: str) -> tuple[list[tuple[str, str, int]],
+                                                       list[tuple[str, str, int]]]:
+    """Interrupted turns of one transport, split into (resume, drop).
+
+    A transport owns its keys by prefix, so a gateway never picks up another one's turn. A
+    turn already resumed RESUME_LIMIT times died with the gateway that many times: it is
+    dropped instead of looping.
+    """
+    store = SessionStore(store_path)
+    try:
+        rows = store.interrupted(prefix)
+    finally:
+        store.close()
+    resume = [row for row in rows if row[2] < RESUME_LIMIT]
+    drop = [row for row in rows if row[2] >= RESUME_LIMIT]
+    return resume, drop
+
 
 WAITING_RE = re.compile(r"^(waiting for|menunggu)\b", re.IGNORECASE)
 
@@ -235,7 +273,7 @@ class ChatAgent:
 
     # ------------------------------------------------------------------ setup
     def _build_client(self, yolo: bool = False) -> AcpClient:
-        args = list(self.config.get("acp", "args") or ["--mode", "acp"])
+        args = _acp_args(self.config)
         approval = "yolo" if (yolo or self.yolo) else str(self.config.get("agent", "approval_mode", ""))
         hint = str(self.config.get("agent", "append_system_prompt", "") or "").strip()
         from .config import PROTOCOL_HINT
@@ -250,6 +288,7 @@ class ChatAgent:
             command=str(self.config.get("acp", "command", "omp")),
             args=args,
             cwd=self.cwd,
+            env=child_env(),
             on_update=self._on_update,
             on_permission=self._on_permission,
             startup_timeout=float(self.config.get("acp", "startup_timeout", 60.0)),

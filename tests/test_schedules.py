@@ -227,9 +227,8 @@ def test_a_stepped_hour_range_is_refused_with_direction_not_a_traceback():
 def test_a_scheduled_result_is_delivered_as_a_card(monkeypatch):
     """The delivery path only runs at the scheduled hour; a broken card should fail here first."""
     import asyncio
-    import types
 
-    from ompwire import schedule_run
+    from ompwire import gateways, schedule_run, telegram
 
     sent: list[tuple[int, str]] = []
 
@@ -240,8 +239,8 @@ def test_a_scheduled_result_is_delivered_as_a_card(monkeypatch):
         async def send_message(self, chat_id, text, **_kw):
             sent.append((chat_id, text))
 
-    monkeypatch.setattr("telegram.Bot", FakeBot)
-    gateway = types.SimpleNamespace(allowed=[42], name="telegram")
+    monkeypatch.setattr(telegram, "Bot", FakeBot)
+    gateway = gateways.Gateway(name="telegram", kind="telegram", allowed=[42])
     monkeypatch.setattr(schedule_run.gateways, "get", lambda _name: gateway)
     monkeypatch.setattr(schedule_run.gateways, "token", lambda _gw: "t")
     item = schedules.Schedule(name="pagi", cron="0 7 * * *", prompt="ringkas", gateway="telegram")
@@ -251,3 +250,11 @@ def test_a_scheduled_result_is_delivered_as_a_card(monkeypatch):
     chat, body = sent[0]
     assert chat == 42
     assert "pagi" in body and "<b>selesai</b>" in body
+
+
+def test_a_gateway_kind_without_a_delivery_is_refused():
+    from ompwire import delivery, gateways
+
+    gateway = gateways.Gateway(name="wa", kind="whatsapp", allowed=[1])
+    with pytest.raises(gateways.GatewayError, match="no delivery exists"):
+        delivery.for_gateway(gateway)

@@ -20,10 +20,11 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | Layer | Owns | When it fails |
 | --- | --- | --- |
 | Engine (`engine.py`) | the turn itself: ACP session lifecycle, update drain, pacing, permissions, schedules, files. Speaks `Surface`, never a platform | a turn fails: recorded, the next gateway start resumes it |
-| Transport (`telegram.py`) | Telegram routing and buttons: handlers, `TelegramSurface` (posting, cards, approvals), pickers, per-chat prefs | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
-| `sessions.db` (`store.py`) | chat key to session id, prefs, approval override | unreadable: a new agent session, the chat key is kept |
+| Transport (`telegram.py`) | Telegram routing and buttons: handlers, `TelegramSurface` (posting, cards, approvals), `TelegramDelivery`, pickers, per-chat prefs, the `tg:` key prefix | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
+| `sessions.db` (`store.py`) | chat key to session id, prefs, approval override, turns a restart left unfinished (read per key prefix) | unreadable: a new agent session, the chat key is kept |
 | ACP client (`acp.py`) | stdio framing, request ids, timeouts | the subprocess dies mid-turn: respawn, then `session/load` on the same id |
 | Agent (`omp`) | loop, tools, MCP, compaction, skills, memory, prompt | provider or tool error: reported to the chat as the agent's own text |
+| Delivery (`delivery.py`) | how a scheduled run's report reaches a person: one `Delivery` per gateway kind, resolved from the gateway stored on the schedule | no implementation for that kind: the report fails, and the schedule status carries the reason |
 | Catalogs (`catalog.py`) | model, mode, thinking, provider, skill lists | the agent will not answer a probe: an empty list, and the command says so instead of inventing options |
 | Gateways (`gateways.py`) | one bot definition: platform, allow list, credential | unreadable file: refuse to start rather than guess |
 | Service (`service.py`) | the systemd unit per gateway | no `systemd --user`: `start` refuses, nothing is left unsupervised |
@@ -32,8 +33,8 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 
 | File | Lines | What it is |
 | --- | --- | --- |
-| `engine.py` | ~870 | the platform-neutral agent engine: ChatAgent, the turn renderer, the `Surface` contract, `ToolTrace`, `FloodWait` |
-| `telegram.py` | ~1720 | the Telegram transport: handlers, pickers, `TelegramSurface`, buttons, banners |
+| `engine.py` | ~910 | the platform-neutral agent engine: ChatAgent, the turn renderer, the `Surface` contract, `ToolTrace`, `FloodWait`, resume planning |
+| `telegram.py` | ~1770 | the Telegram transport: handlers, pickers, `TelegramSurface`, `TelegramDelivery`, buttons, banners |
 | `__main__.py` | ~650 | the CLI: one function per command, `argparse` wiring |
 | `setup.py` | ~580 | the wizard, `.env` writing token normalisation, `bot_identity` verification |
 | `update.py` | ~370 | install mode detection, update, restart of running gateways |
@@ -42,13 +43,13 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `config.py` | ~250 | layered config: defaults, `config.toml`, environment, redaction of dumps |
 | `service.py` | ~235 | systemd unit rendering, start, stop, remove, state |
 | `catalog.py` | ~230 | model, mode, thinking, provider and skill lists read from the agent |
-| `cli.py` | ~225 | `ompwire chat`, the terminal surface |
+| `cli.py` | ~220 | `ompwire chat`: `TerminalSurface` and the REPL, both on the engine |
 | `uninstall.py` | ~225 | what to remove, and what to leave alone |
 | `mdrender.py` | ~210 | markdown to Telegram HTML |
 | `status.py` | ~175 | one screen of current state, no handshake |
 | `mcp_hub.py` | ~150 | `servers.yaml` to `session/new` `mcpServers` |
 | `login.py` | ~135 | provider login on a pty, driven from chat |
-| `store.py` | ~127 | sqlite: chat key to session id |
+| `store.py` | ~170 | sqlite: chat key to session id, per-chat prefs, unfinished turns per transport prefix |
 | `format.py` | ~44 | neutral helpers: `uptime`, WIB clock, the tool-trace clip |
 | `tg_html.py` | ~112 | Telegram HTML: cards, grids, tool blocks, help and run cards |
 | `lock.py` | ~100 | one flock per gateway |
@@ -56,7 +57,8 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `questions.py` | ~40 | the `<<options: a \| b>>` marker turned into buttons |
 | `attachments.py` | ~150 | the `<<file: path>>` marker, its guard rails, and incoming documents |
 | `schedules.py` | ~330 | cron to `OnCalendar`, the units, and the `<<schedule: ...>>` proposal |
-| `schedule_run.py` | ~180 | one unattended turn: build, run, deliver, record, exit |
+| `schedule_run.py` | ~200 | one unattended turn: build, run, deliver, record, exit |
+| `delivery.py` | ~45 | the `Delivery` a scheduled run needs, one implementation per gateway kind |
 
 Line counts move. If a number here is wrong, the file is right and this table is stale.
 
@@ -129,17 +131,21 @@ nobody is watching.
 - `Environment=PATH=` on the unit. A user unit does not inherit the shell's PATH, and without this
   the timer fires, the process starts, and the turn dies hours later in a journal nobody reads.
 
-The run report is a card rather than a line of text: `format.run_card` takes the schedule in words
+The run report is a card rather than a line of text: `tg_html.run_card` takes the schedule in words
 (`schedules.describe`), the outcome as a badge, a grid of what the run cost (model, thinking,
 duration, tools, tokens) and the answer converted by the same markdown renderer the chat uses. The
 first version printed a `schedule · name` line above raw text, which read like a log tail; a run
 that happens while nobody is watching has to be worth reading in the morning. Failures use the same
 card with the reason, because a scheduled run that dies silently is worse than one that reports.
 
-Delivery goes straight to the Bot API with the destination gateway's token, so a result still
-arrives when that gateway's poller is stopped. Only the token has to be valid. The destination is
-stored on the schedule rather than chosen at run time: an unattended turn that picks its own
-destination is a mistake nobody is watching for.
+Delivery is per gateway kind: `schedule_run` resolves the gateway stored on the schedule, asks
+`delivery.for_gateway` for that kind's `Delivery`, and hands over neutral fields (title, the
+schedule in words, outcome, rows, answer markdown, error, footer, files, skipped files).
+`TelegramDelivery` is the only implementation; it sends straight to the Bot API with the
+gateway's token, so a result still arrives when that gateway's poller is stopped. Only the token
+has to be valid. The destination (the gateway's first allowed user) comes from the schedule
+rather than being chosen at run time: an unattended turn that picks its own destination is a
+mistake nobody is watching for.
 
 The marker is a proposal. `<<schedule: 0 7 * * * | prompt>>` reaches the chat as a confirmation
 card, because a model that misreads "every morning" as every minute would otherwise be discovered
@@ -242,7 +248,7 @@ deprecation cycle.
 
 - **`session/load` replays the transcript.** A resumed session re-emits earlier assistant
   messages as `session/update` frames, so a frontend with its update handler still attached
-  dumps every old answer into the chat. `ChatSession.open` mutes updates while loading.
+  dumps every old answer into the chat. `ChatAgent.ensure` mutes updates while loading.
 - **Permissions are option ids, not booleans.** `session/request_permission` returns options
   with a `kind` (`allow_once`, `reject_once`, ...) and the reply is
   `{outcome: {outcome: "selected", optionId}}`. Always pick from what the agent offered.
@@ -259,12 +265,15 @@ deprecation cycle.
   the queue, and `/queue` always queues.
 - **A permission answer must not block the reader.** The reply to `session/request_permission`
   can take minutes; it is answered on its own thread so a steer sent during an approval returns.
-- **A turn cut by a restart is resumed.** `ask()` writes an `inflight` row before the prompt and
-  deletes it when the turn ends, unless it ended `cancelled` without `/stop`, `/kill` or `/new`:
-  that is systemd signalling the agent along with the gateway. On start, each row becomes a
-  prompt that tells the agent to check its session history and finish (at most `RESUME_LIMIT`
-  tries). Polling also starts with `drop_pending_updates=False`, so a message sent during the
-  restart window is answered instead of discarded.
+- **A turn cut by a restart is resumed, per transport.** `ask()` writes an `inflight` row before
+  the prompt and deletes it when the turn ends, unless it ended `cancelled` without `/stop`,
+  `/kill` or `/new`: that is systemd signalling the agent along with the gateway. A transport
+  owns its store keys by prefix (`telegram.KEY_PREFIX = "tg:"`, the CLI uses `cli:<cwd>`), and
+  `engine.resume_plan` returns only the rows under that prefix, split into worth-resuming and
+  exhausted. Each resumed row becomes a prompt that tells the agent to check its session history
+  and finish (at most `RESUME_LIMIT` tries). Polling also starts with
+  `drop_pending_updates=False`, so a message sent during the restart window is answered instead
+  of discarded.
 - **Keep the process warm.** Each turn carries a large baseline of input tokens (the agent's own
   prompt), mostly cache-served on later turns. Spawning per message throws that away.
 - **`mcpServers` needs `env` as a list.** An entry whose `env` is an object, or missing, fails

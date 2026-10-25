@@ -65,7 +65,7 @@ def _agent(config, client):
 def _pending(config):
     store = SessionStore(config.get("session", "store"))
     try:
-        return store.interrupted()
+        return store.interrupted(telegram.KEY_PREFIX)
     finally:
         store.close()
 

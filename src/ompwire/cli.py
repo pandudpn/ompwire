@@ -1,226 +1,228 @@
-"""Interactive/one-shot chat against a single ACP session."""
+"""Interactive/one-shot chat in the terminal, through the engine.
+
+The terminal is just another `engine.Surface`: the agent process, its session, approvals, the
+drain and the pacing live in `ChatAgent`, so this and the chat transports cannot drift apart.
+What is left here is what a terminal does with a turn: print it.
+"""
 
 from __future__ import annotations
 
-import os
-import shlex
+import asyncio
+import contextlib
 import sys
-from dataclasses import dataclass
+from typing import Any
 
-from .acp import AcpClient, AcpError, Update, pick_permission_option
+from . import engine
+from .acp import AcpError
 from .config import Config
-from .store import SessionStore
+
+OUTPUT_LINES = 3  # a tool's output here is a hint that it worked, not the report
+HELP = "/new  fresh session · /stop  cancel turn · /model <id> · /mode <default|plan> · /exit"
 
 
-def _env_for_child() -> dict[str, str]:
-    """Pass the current environment but drop our own secrets from the child."""
-    env = dict(os.environ)
-    for name in ("TELEGRAM_BOT_TOKEN", "HONCHO_API_KEY", "OMPWIRE_HONCHO_API_KEY"):
-        env.pop(name, None)
-    return env
+def _dim(text: str) -> str:
+    """ANSI dim, only where a terminal is actually looking at it."""
+    return f"\033[2m{text}\033[0m" if sys.stdout.isatty() else text
 
 
-def _acp_args(config: Config) -> list[str]:
-    raw = config.get("acp", "args", ["--mode", "acp"])
-    if isinstance(raw, str):
-        return shlex.split(raw)
-    return [str(part) for part in (raw or [])]
+def _index_of(labels: list[str], words: tuple[str, ...]) -> int | None:
+    return next((index for index, label in enumerate(labels)
+                 if any(word in label.lower() for word in words)), None)
 
 
-@dataclass
-class Printer:
-    show_tool_calls: bool = True
-    show_usage: bool = True
-    stream: bool = True
-    started: bool = False
-
-    def on_update(self, update: Update) -> None:
-        if update.kind == "agent_message_chunk" and update.text:
-            if self.stream:
-                sys.stdout.write(update.text)
-                sys.stdout.flush()
-            self.started = True
-        elif update.kind == "tool_call" and self.show_tool_calls:
-            title = update.tool_title or "tool"
-            sys.stdout.write(f"\n  [tool] {title}\n" if self.started else f"  [tool] {title}\n")
-            sys.stdout.flush()
-
-    def end_turn(self) -> None:
-        if self.started:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+def _picked(choice: str, labels: list[str]) -> int | None:
+    """A typed number; empty means the first option, anything else is a refusal."""
+    choice = choice.strip() or "1"
+    if choice.isdigit():
+        index = int(choice) - 1
+        if 0 <= index < len(labels):
+            return index
+    return _index_of(labels, ("deny", "reject"))
 
 
-class ChatSession:
-    def __init__(self, config: Config, key: str, cwd: str | None = None) -> None:
-        self.config = config
-        self.key = key
-        self.cwd = cwd or config.get("agent", "cwd") or os.path.expanduser("~")
-        self.store = SessionStore(config.get("session", "store"))
-        self.printer = Printer(
-            show_tool_calls=bool(config.get("stream", "show_tool_calls", True)),
-            show_usage=bool(config.get("stream", "show_usage", True)),
-            stream=bool(config.get("stream", "enabled", True)),
-        )
-        self.client = AcpClient(
-            command=str(config.get("acp", "command", "omp")),
-            args=_acp_args(config),
-            cwd=self.cwd,
-            env=_env_for_child(),
-            on_update=self.printer.on_update,
-            on_permission=self.ask_permission,
-            startup_timeout=float(config.get("acp", "startup_timeout", 60.0)),
-        )
-        self.session_id: str = ""
-        self.mcp_servers: list[dict] = list(config.get("mcp", "servers", []) or [])
-        self.info: dict = {}
+class TerminalSurface(engine.Surface):
+    """What the terminal shows of a turn: answer text, one line per tool, a file path."""
 
-    # ------------------------------------------------------------- lifecycle
-    def open(self) -> None:
-        self.client.start()
-        self.info = self.client.initialize()
-        agent = (self.info.get("agentInfo") or {}).get("name", "?")
-        version = (self.info.get("agentInfo") or {}).get("version", "?")
-        record = self.store.get(self.key)
-        resumed = False
-        # session/load REPLAYS the existing transcript as session/update
-        # notifications. Left unhandled, a resumed chat would dump every prior
-        # assistant message into the room, so updates are muted while loading.
-        previous_callback = self.client.on_update
-        self.client.on_update = None
-        try:
-            if record is not None:
-                try:
-                    result = self.client.load_session(record.session_id, self.cwd, self.mcp_servers)
-                    self.session_id = record.session_id
-                    resumed = True
-                except AcpError:
-                    result = self.client.new_session(self.cwd, self.mcp_servers)
-                    self.session_id = str(result.get("sessionId") or "")
-            else:
-                result = self.client.new_session(self.cwd, self.mcp_servers)
-                self.session_id = str(result.get("sessionId") or "")
-        finally:
-            self.client.on_update = previous_callback
-        if not self.session_id:
-            raise AcpError("agent did not return a sessionId")
-        self.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
-        self.store.put(
-            self.key,
-            self.session_id,
-            self.cwd,
-            model=str(self.config.get("agent", "model", "")),
-            mode=str(self.config.get("agent", "mode", "")),
-        )
-        self._apply_preferences()
-        state = "resumed" if resumed else "new"
-        print(f"ompwire · {agent} {version} · session {state} {self.session_id[:8]} · cwd {self.cwd}")
+    label = "cli"
+    limit = 100_000  # no rate limit here; the cap only stops one runaway trace
 
-    def _apply_preferences(self) -> None:
-        model = str(self.config.get("agent", "model", "") or "")
-        mode = str(self.config.get("agent", "mode", "") or "")
-        for config_id, value in (("model", model), ("mode", mode)):
-            if not value:
-                continue
-            try:
-                self.client.set_config_option(self.session_id, config_id, value)
-            except AcpError as exc:
-                print(f"warn: could not set {config_id}={value}: {exc}")
+    def __init__(self, config: Config) -> None:
+        self.show_reasoning = bool(config.get("stream", "show_reasoning", False))
+        # set by run_chat once the agent exists: an approval answer goes to the engine
+        self.agent: engine.ChatAgent | None = None
+        self.offered: list[str] = []
 
-    def ask_permission(self, params: dict) -> str | None:
-        policy = str(self.config.get("agent", "permission_policy", "ask"))
-        if policy in {"allow", "deny"}:
-            return pick_permission_option(params, policy)
+    # --------------------------------------------------------------- rendering
+    def trace(self, t: engine.ToolTrace) -> str:
+        detail = t.command or t.title
+        head = f"[tool] {t.kind}" + (f" · {detail}" if detail else "")
+        if t.status:
+            head += f" · {t.status}"
+        output = t.output.strip().splitlines()
+        if output:
+            head += "\n" + "\n".join(f"    {line}" for line in output[:OUTPUT_LINES])
+            if len(output) > OUTPUT_LINES:
+                head += f"\n    … +{len(output) - OUTPUT_LINES} line(s)"
+        return head
+
+    def reasoning(self, text: str) -> str:
+        return _dim(f"… reasoning\n{text}")
+
+    def dropped(self, count: int) -> str:
+        return f"… {count} tool call(s) not shown"
+
+    def join(self, blocks: list[str]) -> str:
+        return "\n".join(blocks)
+
+    # ----------------------------------------------------------------- posting
+    async def post(self, body: str, *, kind: str) -> Any | None:
+        if not body:
+            return None
+        if kind == "reasoning" and not self.show_reasoning:
+            return None
+        # the answer arrives as markdown and is printed as written: the terminal is the renderer
+        print(body, flush=True)
+        # None means "not delivered" to the engine; a printed line was delivered
+        return True
+
+    @contextlib.asynccontextmanager
+    async def typing(self):
+        yield
+
+    # ---------------------------------------------------------------- buttons
+    async def offer_options(self, options: list[str]) -> None:
+        """Number the answers and remember them: the next line typed is the answer."""
+        self.offered = list(options)
+        for index, option in enumerate(options, 1):
+            print(f"{index}. {option}")
+        print("answer with a number, or type your own reply", flush=True)
+
+    def pick_option(self, line: str) -> str | None:
+        """The option a numbered line stands for; the offer is spent either way."""
+        offered, self.offered = self.offered, []
+        stripped = line.strip()
+        if not stripped.isdigit():
+            return None
+        index = int(stripped) - 1
+        return offered[index] if 0 <= index < len(offered) else None
+
+    async def ask_permission(self, token: str, kind: str, detail: str,
+                             labels: list[str]) -> Any:
         if not sys.stdin.isatty():
             # one-shot runs cannot answer a prompt; approve rather than hang
-            return pick_permission_option(params, "allow")
-        options = params.get("options") or []
-        title = params.get("title") or (params.get("toolCall") or {}).get("title") or "tool call"
-        print(f"\npermission requested: {title}")
-        for index, option in enumerate(options, 1):
-            print(f"  {index}. {option.get('name') or option.get('kind')}")
+            allow = _index_of(labels, ("allow",))
+            refuse = _index_of(labels, ("deny", "reject"))
+            await self._answer(token, allow if allow is not None else refuse)
+            return token
+        lines = [f"\napproval needed · {kind}"]
+        if detail:
+            lines.append(detail)
+        lines += [f"  {index}. {label}" for index, label in enumerate(labels, 1)]
         try:
-            choice = input("choose [1]: ").strip() or "1"
-            return options[int(choice) - 1].get("optionId")
-        except (EOFError, ValueError, IndexError):
-            return None
+            choice = await asyncio.to_thread(input, "\n".join(lines) + "\nchoose [1]: ")
+        except (EOFError, KeyboardInterrupt):
+            # nobody is there to decide: refuse, the way a closed stdin always did
+            await self._answer(token, _index_of(labels, ("deny", "reject")))
+            return token
+        await self._answer(token, _picked(choice, labels))
+        return token
 
-    # ------------------------------------------------------------------ turn
-    def ask(self, text: str) -> str:
-        result = self.client.prompt(
-            self.session_id,
-            text,
-            timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
-        )
-        self.printer.end_turn()
-        self.store.touch(self.key)
-        if self.printer.show_usage and result.usage:
-            usage = result.usage
-            print(
-                f"  [turn] {result.stop_reason} · in {usage.get('inputTokens', '?')}"
-                f" out {usage.get('outputTokens', '?')} cached {usage.get('cachedReadTokens', 0)}"
-            )
-        return result.text
+    async def _answer(self, token: str, index: int | None) -> None:
+        """Hand the choice to the engine, which records it and rewrites the prompt."""
+        if index is None or self.agent is None:
+            return
+        label = await self.agent.answer_permission(token, index)
+        if label:
+            print(f"approval · {label}", flush=True)
 
-    def reset(self) -> None:
-        self.client.close(self.session_id)
-        self.store.clear(self.key)
-        self.client = AcpClient(
-            command=str(self.config.get("acp", "command", "omp")),
-            args=_acp_args(self.config),
-            cwd=self.cwd,
-            env=_env_for_child(),
-            on_update=self.printer.on_update,
-            on_permission=self.ask_permission,
-        )
-        self.open()
+    async def settle_permission(self, handle: Any, kind: str, detail: str, outcome: str,
+                                expired: bool) -> None:
+        print(f"approval expired · {kind}" if expired else f"approval · {outcome}", flush=True)
 
-    def close(self) -> None:
-        self.client.close(self.session_id)
-        self.store.close()
+    # ------------------------------------------------------------------ files
+    async def send_file(self, path, as_photo: bool) -> None:
+        print(f"[file] {path}", flush=True)
+
+    async def offer_schedule(self, name: str, expression: str, gateway: str,
+                             prompt: str) -> None:
+        print(f"schedule proposed · {name} · {expression} → {gateway}\n"
+              "a schedule is created from a chat transport; nothing is scheduled from here",
+              flush=True)
+
+    async def notice(self, text: str) -> Any | None:
+        print(text, flush=True)
+        return None
 
 
-def run_chat(config: Config, key: str, query: str | None = None, cwd: str | None = None) -> int:
-    session = ChatSession(config, key=key, cwd=cwd)
-    session.open()
+async def _repl(agent: engine.ChatAgent, surface: TerminalSurface) -> int:
+    while True:
+        try:
+            line = (await asyncio.to_thread(input, "\n> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line:
+            continue
+        # the offer a turn made is spent by the next line, whatever that line turns out to be
+        answer = surface.pick_option(line)
+        if line in {"/exit", "/quit"}:
+            return 0
+        if line == "/new":
+            session_id = await agent.new_session()
+            print(f"new session {session_id[:8]}", flush=True)
+            continue
+        if line == "/stop":
+            print("cancel sent" if await agent.cancel() else "nothing running", flush=True)
+            continue
+        if line == "/help":
+            print(HELP)
+            continue
+        if line.startswith("/model ") or line.startswith("/mode "):
+            config_id, value = line[1:].split(maxsplit=1)
+            try:
+                await agent.ensure()
+                await asyncio.to_thread(agent.client.set_config_option, agent.session_id,
+                                        config_id, value)
+            except AcpError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+            continue
+        text = answer or line
+        try:
+            await agent.ask(text)
+        except AcpError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+
+
+async def _chat(agent: engine.ChatAgent, surface: TerminalSurface,
+                query: str | None) -> int:
     if query:
         try:
-            session.ask(query)
+            await agent.ask(query)
         except AcpError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        finally:
-            session.close()
         return 0
+    return await _repl(agent, surface)
 
-    try:
-        while True:
-            try:
-                line = input("\n> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-            if not line:
-                continue
-            if line in {"/exit", "/quit"}:
-                break
-            if line == "/new":
-                session.reset()
-                continue
-            if line == "/help":
-                print("/new  fresh session · /stop  cancel turn · /model <id> · /mode <default|plan> · /exit")
-                continue
-            if line.startswith("/model ") or line.startswith("/mode "):
-                key, value = line[1:].split(maxsplit=1)
-                try:
-                    session.client.set_config_option(session.session_id, key, value)
-                except AcpError as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                continue
-            try:
-                session.ask(line)
-            except AcpError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-    finally:
-        session.close()
-    return 0
+
+def run_chat(config: Config, key: str, query: str | None = None, cwd: str | None = None) -> int:
+    surface = TerminalSurface(config)
+
+    async def go() -> int:
+        agent = engine.ChatAgent(config, key, surface)
+        surface.agent = agent
+        if cwd:
+            agent.cwd = cwd
+        # the terminal does not resume a cut turn: a row left by a crashed CLI is dropped here,
+        # and Telegram's resume only ever looks at its own prefix
+        agent.store.end_turn(key)
+        try:
+            await agent.ensure()
+            info = agent.info.get("agentInfo") or {}
+            print(f"ompwire · {info.get('name', 'omp')} {agent.agent_version or '?'} · "
+                  f"session {agent.session_id[:8]} · cwd {agent.cwd}")
+            return await _chat(agent, surface, query)
+        finally:
+            await agent.shutdown()
+
+    return asyncio.run(go())

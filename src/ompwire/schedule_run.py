@@ -4,8 +4,9 @@ This is what the timer's `oneshot` unit calls. It builds the agent, runs exactly
 the result to the gateway the schedule names, records what happened, and returns. There is no loop
 and no daemon: when this function returns, nothing of ompwire is still running.
 
-Sending goes straight to the Bot API with the target gateway's token, so a result still arrives
-when that gateway's poller is stopped. Only the token has to be valid.
+Sending goes through the target gateway kind's `Delivery`, which talks to the platform directly
+with that gateway's credential, so a result still arrives when its poller is stopped. Only the
+credential has to be valid.
 
 Nobody is watching, so the defaults are the cautious ones: no session is persisted, a tool that
 would need approval is denied rather than waited on, and the turn is bounded by the schedule's
@@ -21,16 +22,13 @@ import sys
 import time
 from typing import Any
 
-from . import attachments, gateways, schedules
+from . import attachments, delivery, gateways, schedules
 from .acp import AcpClient, AcpError
 from .config import PROTOCOL_HINT, load_config
+from .engine import child_env
 from .format import now_wib
-from .mdrender import to_html
-from .tg_html import run_card, run_status
 
 log = logging.getLogger("ompwire.schedule")
-
-MAX_MESSAGE = 4000  # Telegram allows 4096; leave room for the prefix
 
 
 class Interrupted(Exception):
@@ -54,27 +52,10 @@ def _client(item: schedules.Schedule, config: Any) -> AcpClient:
         command=str(config.get("acp", "command", "omp")),
         args=args,
         cwd=str(Path(cwd).expanduser()),
+        # an unattended turn is the last place the bot token should be readable from a tool
+        env=child_env(),
         startup_timeout=float(config.get("acp", "startup_timeout", 60.0)),
     )
-
-
-def _chunks(text: str, limit: int = MAX_MESSAGE) -> list[str]:
-    """Telegram rejects long messages, so a report is split on line boundaries."""
-    parts: list[str] = []
-    current = ""
-    for line in text.splitlines(keepends=True):
-        if len(current) + len(line) > limit:
-            if current:
-                parts.append(current)
-            while len(line) > limit:  # a single very long line still has to be cut
-                parts.append(line[:limit])
-                line = line[limit:]
-            current = line
-        else:
-            current += line
-    if current:
-        parts.append(current)
-    return parts or [""]
 
 
 def _meta(item: schedules.Schedule, run: dict[str, Any]) -> list[tuple[str, str]]:
@@ -100,50 +81,31 @@ def _meta(item: schedules.Schedule, run: dict[str, Any]) -> list[tuple[str, str]
 
 async def _deliver(item: schedules.Schedule, text: str, files: list[attachments.Outgoing],
                    rejected: list[str], run: dict[str, Any] | None = None) -> int:
-    from telegram import Bot
-
-    token = gateways.token(gateways.get(item.gateway))
-    bot = Bot(token)
     run = run or {}
-    body = text.strip() or "(the agent returned no text)"
-    when = f"{schedules.describe(item)} · {item.timezone}"
-    if run.get("ok", True):
-        status = run_status(True, "done")
-    else:
-        status = run_status(False, str(run.get("word") or "failed"))
-    footer = f"{now_wib()} · {run.get('duration', 0.0):.1f}s · {item.name}"
-    if run.get("error"):
-        card_body = f"<pre>{run['error'][:400]}</pre>"
-    else:
-        card_body = to_html(body)
-    card = run_card(item.name, when, status, _meta(item, run), card_body, footer)
-
-    chat = _chat_id(item)
-    chunks = _chunks(card, limit=MAX_MESSAGE)
-    sent = 0
-    for chunk in chunks:
-        await bot.send_message(chat_id=chat, text=chunk, parse_mode="HTML",
-                               disable_web_page_preview=True)
-        sent += 1
-    for outgoing in files:
-        with outgoing.path.open("rb") as handle:
-            if outgoing.as_photo:
-                await bot.send_photo(chat_id=chat, photo=handle)
-            else:
-                await bot.send_document(chat_id=chat, document=handle)
-        sent += 1
-    if rejected:
-        await bot.send_message(chat_id=chat, text="skipped: " + " · ".join(rejected[:4]))
-    return sent
+    ok = bool(run.get("ok", True))
+    return await delivery.for_gateway(gateways.get(item.gateway)).deliver(
+        _target(item),
+        title=item.name,
+        when=f"{schedules.describe(item)} · {item.timezone}",
+        ok=ok,
+        word="done" if ok else str(run.get("word") or "failed"),
+        rows=_meta(item, run),
+        body_markdown=text.strip() or "(the agent returned no text)",
+        error=str(run.get("error") or ""),
+        footer=f"{now_wib()} · {run.get('duration', 0.0):.1f}s · {item.name}",
+        files=files,
+        rejected=rejected,
+    )
 
 
-def _chat_id(item: schedules.Schedule) -> int:
+def _target(item: schedules.Schedule) -> str:
+    """Where the report goes: the gateway's first allowed user, as the transport spells it."""
     gateway = gateways.get(item.gateway)
     allowed = list(gateway.allowed or [])
     if not allowed:
         raise schedules.ScheduleError(
             f"gateway '{item.gateway}' has no allowed users, so there is nowhere to send the result")
-    return int(allowed[0])
+    return str(allowed[0])
 
 
 def _collector(run: dict[str, Any]):
@@ -164,12 +126,12 @@ def run(name: str) -> int:
     item = schedules.get(name)
     config = load_config()
     try:
-        chat = _chat_id(item)
+        target = _target(item)
     except (schedules.ScheduleError, gateways.GatewayError) as exc:
         log.error("schedule %s: %s", name, exc)
         schedules.mark(name, f"failed: {exc}")
         return 2
-    log.info("schedule %s: start (gateway=%s chat=%s approval=%s)", name, item.gateway, chat,
+    log.info("schedule %s: start (gateway=%s target=%s approval=%s)", name, item.gateway, target,
              item.approval)
     client = _client(item, config)
     run_meta: dict[str, Any] = {"ok": True}

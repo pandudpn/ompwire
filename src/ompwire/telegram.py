@@ -21,6 +21,7 @@ import os
 import pathlib
 import signal
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ from typing import Any
 # returns from v23. _retry_window already takes either, so opt in rather than log noise.
 os.environ.setdefault("PTB_TIMEDELTA", "true")
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Bot, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
@@ -43,14 +44,14 @@ from telegram.ext import (
 from . import __version__, engine
 from . import schedules as schedule_lib
 from .acp import AcpError
-from .attachments import incoming_summary, safe_name
+from .attachments import Outgoing, incoming_summary, safe_name
 from .attachments import save as save_incoming
 from .catalog import credential_snapshot, list_providers, list_skills, skill_body
 from .config import Config, approval_policy, save_override
+from .delivery import Delivery
 from .engine import (
     PERMISSION_TIMEOUT,
     PREF_KEYS,
-    RESUME_LIMIT,
     RESUME_PROMPT,
     FloodWait,
     ToolTrace,
@@ -61,13 +62,14 @@ from .format import now_wib
 from .format import uptime as fmt_uptime
 from .login import LoginSession
 from .mdrender import split_blocks, strip_html, to_html, to_plain
-from .store import SessionStore
-from .tg_html import card, change, esc, help_sections, tool_block
+from .tg_html import card, change, esc, help_sections, run_card, run_status, tool_block
 
 log = logging.getLogger("ompwire.telegram")
 
 TELEGRAM_LIMIT = 4000  # leave headroom under the 4096 hard cap
 IDLE_CHECK_INTERVAL = 60.0
+# This transport owns the store keys under this prefix: sessions, prefs and inflight rows.
+KEY_PREFIX = "tg:"
 
 COMMANDS: list[tuple[str, str]] = [
     ("new", "start a fresh session"),
@@ -108,6 +110,25 @@ def paginate(items: list, page: int, per_page: int) -> tuple[list, int, int]:
 
 def two_columns(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
     return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+
+def chunk_lines(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
+    """Cut a rendered message on line boundaries; one overlong line is cut as a last resort."""
+    parts: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len(current) + len(line) > limit:
+            if current:
+                parts.append(current)
+            while len(line) > limit:
+                parts.append(line[:limit])
+                line = line[limit:]
+            current = line
+        else:
+            current += line
+    if current:
+        parts.append(current)
+    return parts or [""]
 
 
 FORWARD_HINT = (
@@ -176,7 +197,7 @@ class Transport:
     def agent_for(self, chat_id: int) -> engine.ChatAgent:
         agent = self.agents.get(chat_id)
         if agent is None:
-            agent = chat_agent(self.config, chat_id, f"tg:{chat_id}", self.app)
+            agent = chat_agent(self.config, chat_id, f"{KEY_PREFIX}{chat_id}", self.app)
             self.agents[chat_id] = agent
         return agent
 
@@ -1399,21 +1420,17 @@ class Transport:
         goes), so the agent is told to check that and finish, not to start over. A turn that was
         interrupted again after RESUME_LIMIT tries is dropped with a note instead of looping.
         """
-        store = SessionStore(str(self.config.get("session", "store")))
-        try:
-            pending = store.interrupted()
-        finally:
-            store.close()
         enabled = bool(self.config.get("telegram", "resume_interrupted", True))
-        for key, prompt, resumes in pending:
-            if not key.startswith("tg:"):
-                continue
+        resumable, exhausted = engine.resume_plan(str(self.config.get("session", "store")),
+                                                 KEY_PREFIX)
+        exhausted_keys = {key for key, _prompt, _resumes in exhausted}
+        for key, prompt, resumes in [*resumable, *exhausted]:
             try:
-                chat_id = int(key[3:])
+                chat_id = int(key[len(KEY_PREFIX):])
             except ValueError:
                 continue
             agent = self.agent_for(chat_id)
-            if not enabled or resumes >= RESUME_LIMIT or chat_id not in self.allowed:
+            if not enabled or key in exhausted_keys or chat_id not in self.allowed:
                 agent.store.end_turn(key)
                 log.warning("interrupted turn dropped chat=%s resumes=%s", chat_id, resumes)
                 if chat_id in self.allowed:
@@ -1642,6 +1659,41 @@ class TelegramSurface(engine.Surface):
 
     async def notice(self, text: str):
         return await send_md(self.app.bot, self.chat_id, text)
+
+
+class TelegramDelivery(Delivery):
+    """A scheduled run's report, sent straight to the Bot API with this gateway's token.
+
+    It does not go through `TelegramSurface`: a timer runs with no poller and no chat object
+    around, so all a finished run needs is the one call that reaches the person.
+    """
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    async def deliver(self, target: str, *, title: str, when: str, ok: bool, word: str,
+                      rows: Iterable[tuple[str, str]], body_markdown: str, error: str,
+                      footer: str, files: list[Outgoing], rejected: list[str]) -> int:
+        bot = Bot(self.token)
+        chat_id = int(target)
+        # a failure carries the reason, not a half answer: the card is read hours later
+        body_html = f"<pre>{esc(error[:400])}</pre>" if error else to_html(body_markdown)
+        run = run_card(title, when, run_status(ok, word), rows, body_html, footer)
+        sent = 0
+        for chunk in chunk_lines(run):
+            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML,
+                                   disable_web_page_preview=True)
+            sent += 1
+        for outgoing in files:
+            with outgoing.path.open("rb") as handle:
+                if outgoing.as_photo:
+                    await bot.send_photo(chat_id=chat_id, photo=handle)
+                else:
+                    await bot.send_document(chat_id=chat_id, document=handle)
+            sent += 1
+        if rejected:
+            await bot.send_message(chat_id=chat_id, text="skipped: " + " · ".join(rejected[:4]))
+        return sent
 
 
 def chat_agent(config: Config, chat_id: int, key: str, app: Application) -> engine.ChatAgent:

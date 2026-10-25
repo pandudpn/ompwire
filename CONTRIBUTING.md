@@ -59,14 +59,23 @@ seams are already there:
 1. `gateways.KINDS` and `gateways.IMPLEMENTED` in `gateways.py`.
 2. A `Surface` implementation in `engine.py`'s terms: `post`, `trace`/`reasoning`/`dropped`/`join`
    renderers, a `typing` context, and the button surfaces (`offer_options`, `ask_permission`,
-   `offer_schedule`, `send_file`, `notice`). `telegram.TelegramSurface` is the reference; a rate
-   limit raises `engine.FloodWait`, any other send failure returns None.
+   `offer_schedule`, `send_file`, `notice`). `telegram.TelegramSurface` is the reference and
+   `cli.TerminalSurface` is the smallest one; a rate limit raises `engine.FloodWait`, any other
+   send failure returns None.
 3. The transport module itself, following `telegram.py`: polling or webhook in, one
    `engine.ChatAgent` per conversation via a `chat_agent(config, chat_id, key, app)` factory,
    approvals and option answers routed back through the agent's `answer_permission` and
    `pending_options`.
-4. A credential variable per gateway; `gateways.Gateway.token_var()` derives it.
-5. Tests next to the existing ones. No network in tests.
+4. A key prefix the transport owns (`telegram.KEY_PREFIX = "tg:"`). Session, preference and
+   inflight rows live under it, and resume takes only its own: `store.interrupted(prefix)` and
+   `engine.resume_plan(store_path, prefix)` never look at another transport's turns.
+5. A `Delivery` for the kind, registered in `delivery.FACTORIES`, so a scheduled run can send
+   its report while no poller is running. `TelegramDelivery` is the reference.
+6. A credential variable per gateway; `gateways.Gateway.token_var()` derives it.
+7. Tests next to the existing ones. No network in tests.
+
+The CLI is a transport like any other: `cli.TerminalSurface` plus a REPL on `engine.ChatAgent`.
+It is not a gateway (no credential, no unit), so it is registered as neither.
 
 A transport that cannot be started is worse than no transport: `gateway add` refuses anything
 that is not in `IMPLEMENTED`.

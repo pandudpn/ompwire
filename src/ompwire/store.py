@@ -81,9 +81,17 @@ class SessionStore:
         self._db.execute("DELETE FROM inflight WHERE key = ?", (key,))
         self._db.commit()
 
-    def interrupted(self) -> list[tuple[str, str, int]]:
-        """(key, prompt, resumes) for every turn a previous process did not finish."""
-        rows = self._db.execute("SELECT key, prompt, resumes FROM inflight").fetchall()
+    def interrupted(self, prefix: str) -> list[tuple[str, str, int]]:
+        """(key, prompt, resumes) for unfinished turns whose key starts with `prefix`.
+
+        Each transport resumes only its own keys: a gateway must never pick up a turn that
+        belongs to another one, and the prefix is the only thing that says which is which.
+        """
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = self._db.execute(
+            "SELECT key, prompt, resumes FROM inflight WHERE key LIKE ? ESCAPE '\\'",
+            (f"{escaped}%",),
+        ).fetchall()
         return [(row["key"], row["prompt"], int(row["resumes"])) for row in rows]
 
     def prefs(self, key: str) -> dict[str, str]:
