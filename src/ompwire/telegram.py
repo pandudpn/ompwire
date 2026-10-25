@@ -1970,7 +1970,7 @@ def serve(config: Config) -> int:
         # a revoked token is the most common way a bot stops answering; say which one
         print("\nFAIL Telegram rejected the token for this gateway. It was probably revoked\n"
               "     in @BotFather. Replace it:\n"
-              "       ompwire gateway add telegram --force\n"
+              "       ompwire gateway start   (choose this gateway, then a new token)\n"
               "     `ompwire doctor` shows the same check without starting anything.")
         return 2
     except Conflict:

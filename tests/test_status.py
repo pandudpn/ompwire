@@ -88,7 +88,7 @@ def test_status_says_how_to_add_a_gateway(monkeypatch, tmp_path):
     (config_file.parent / "gateways.toml").unlink()
 
     rows = dict(status.collect(str(config_file)))
-    assert "gateway add telegram" in rows["gateways"]
+    assert "gateway start" in rows["gateways"]
 
 
 def test_status_exits_zero_and_prints_aligned_rows(monkeypatch, tmp_path, capsys):

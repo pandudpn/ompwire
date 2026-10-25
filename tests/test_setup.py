@@ -221,7 +221,7 @@ def test_setup_never_asks_for_a_bot_token(monkeypatch, tmp_path, capsys):
     assert not any("token" in prompt for prompt in asked)
     assert not (tmp_path / ".env").exists()
     out = capsys.readouterr().out
-    assert "ompwire gateway add telegram" in out
+    assert "ompwire gateway start" in out
 
 
 def test_setup_says_when_a_gateway_already_exists(monkeypatch, tmp_path, capsys):
@@ -233,7 +233,7 @@ def test_setup_says_when_a_gateway_already_exists(monkeypatch, tmp_path, capsys)
     assert setup.run(yes=True) == 0
     out = capsys.readouterr().out
     assert "gateways already configured: telegram" in out
-    assert "gateway add" not in out
+    assert "no gateway yet" not in out
 
 
 def test_the_written_config_has_no_gateway_or_telegram_section(monkeypatch, tmp_path):

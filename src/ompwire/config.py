@@ -175,9 +175,20 @@ def _coerce(raw: str) -> Any:
     return raw
 
 
-def find_config_path(explicit: str | Path | None = None) -> Path | None:
+def _override_dir(env: dict[str, str] | None = None) -> Path | None:
+    """OMPWIRE_CONFIG_DIR: a second install or a sandbox, read instead of the real one."""
+    value = ((env if env is not None else os.environ).get("OMPWIRE_CONFIG_DIR") or "").strip()
+    return Path(value).expanduser() if value else None
+
+
+def find_config_path(explicit: str | Path | None = None,
+                     env: dict[str, str] | None = None) -> Path | None:
     if explicit:
         path = Path(explicit).expanduser()
+        return path if path.is_file() else None
+    override = _override_dir(env)
+    if override is not None:
+        path = override / "config.toml"
         return path if path.is_file() else None
     for candidate in DEFAULT_CONFIG_PATHS:
         path = candidate.expanduser()
@@ -221,7 +232,9 @@ DEFAULT_ENV_PATHS = (
 
 def _load_env_files(env: dict[str, str]) -> None:
     """Fill missing keys from .env files. Real environment variables win."""
-    for candidate in DEFAULT_ENV_PATHS:
+    override = _override_dir(env)
+    # a sandbox must not pick up the real install's credentials
+    for candidate in ((override / ".env",) if override is not None else DEFAULT_ENV_PATHS):
         path = candidate.expanduser()
         if not path.is_file():
             continue
@@ -242,7 +255,7 @@ def _load_env_files(env: dict[str, str]) -> None:
 def load_config(explicit: str | Path | None = None, env: dict[str, str] | None = None) -> Config:
     env = dict(os.environ if env is None else env)
     _load_env_files(env)
-    path = find_config_path(explicit)
+    path = find_config_path(explicit, env)
     warnings: list[str] = []
 
     file_data: dict[str, Any] = {}

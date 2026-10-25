@@ -90,8 +90,7 @@ Revoke first, then repair the local copy. For Telegram:
 
 ```bash
 # 1. revoke in @BotFather, then
-ompwire gateway add telegram --force     # verifies the new token with getMe
-ompwire gateway start telegram
+ompwire gateway start telegram           # answer yes to "enter a new one?"; checked with getMe
 ompwire scrub-logs                       # clean any log file the old token reached
 ```
 

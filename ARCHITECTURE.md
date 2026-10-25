@@ -314,9 +314,10 @@ deprecation cycle.
 ## Gateway lifecycle
 
 ```
-ompwire gateway add NAME     -> gateways.toml + .env (getMe verified)
-ompwire gateway start NAME   -> ~/.config/systemd/user/ompwire-NAME.service
-                               daemon-reload, enable --now
+ompwire gateway start [NAME] -> platform, profile, credential (verified first), allow list
+                               gateways.toml + .env (stop first if the credential changes)
+                               ~/.config/systemd/user/ompwire-NAME.service
+                               daemon-reload, enable --now (or restart if already active)
                                ExecStart: ompwire gateway _run NAME
 ompwire gateway stop NAME    -> stop, disable
 ompwire gateway remove NAME  -> stop, delete unit, delete definition

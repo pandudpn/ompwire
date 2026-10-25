@@ -67,8 +67,10 @@ seams are already there:
 The CLI is a transport like any other: `cli.TerminalSurface` plus a REPL on `engine.ChatAgent`.
 It is not a gateway (no credential, no unit), so it is registered as neither.
 
-A transport that cannot be started is worse than no transport: `gateway add` refuses anything
-that is not in `IMPLEMENTED`.
+A transport that cannot be started is worse than no transport: `gateway start` refuses anything
+that is not in `IMPLEMENTED`. A new platform also adds its credential prompt and its check to
+`gateways.platform()` and `gateways.verify()`, so `gateway start` can ask for it and prove it
+before anything is saved.
 
 ## Releases
 

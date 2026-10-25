@@ -23,6 +23,45 @@ IMPLEMENTED = ("telegram",)
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 
 
+@dataclass(frozen=True)
+class Platform:
+    """What `gateway start` needs to know to connect one platform.
+
+    `verify` turns a credential into the identity the platform reports for it (a bot username),
+    or "" when the platform refuses it. Nothing is written before it answers.
+    """
+
+    kind: str
+    credential: str  # what the person is asked for
+    user_ids: str  # how the allow list is described
+
+
+def platform(kind: str) -> Platform:
+    if kind == "telegram":
+        return Platform(kind, credential="bot token from @BotFather",
+                        user_ids="telegram user ids")
+    raise GatewayError(f"the {kind} transport is not implemented yet")
+
+
+def verify(kind: str, credential: str) -> str:
+    """The identity the platform reports for this credential, "" when it refuses it."""
+    if kind == "telegram":
+        from .setup import bot_identity
+
+        return bot_identity(credential)
+    return ""
+
+
+def mask(credential: str) -> str:
+    """Enough of a credential to recognise it, not enough to use it."""
+    value = credential.strip()
+    if not value:
+        return "none"
+    if len(value) <= 8:
+        return "•" * len(value)
+    return f"{value[:4]}…{value[-4:]}"
+
+
 class GatewayError(RuntimeError):
     """A gateway definition that cannot be used, with the reason in the message."""
 
@@ -191,7 +230,7 @@ def selected(config: Any, name: str = "") -> Gateway:
         known = ", ".join(item.name for item in items) or "none configured"
         raise GatewayError(f"no gateway named {name!r} (configured: {known})")
     if not items:
-        raise GatewayError("no gateway configured. Run `ompwire gateway add telegram` first.")
+        raise GatewayError("no gateway configured. Run `ompwire gateway start` first.")
     if len(items) == 1:
         return items[0]
     names = ", ".join(item.name for item in items)

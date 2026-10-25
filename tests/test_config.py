@@ -29,3 +29,22 @@ def test_a_config_file_value_survives_an_unrelated_override(tmp_path, monkeypatc
     loaded = config_module.load_config(str(target), env={})
     assert loaded.get("agent", "model") == "omniroute/coding-max"
     assert loaded.get("stream", "show_reasoning") is True
+
+
+def test_config_dir_override_reads_only_that_directory(tmp_path, monkeypatch):
+    """A sandbox install must not inherit the real install's credentials or settings."""
+    from ompwire import config as config_module
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / ".env").write_text("TELEGRAM_BOT_TOKEN=real-token\n")
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    monkeypatch.setattr(config_module, "DEFAULT_ENV_PATHS", (real / ".env",))
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATHS", (real / "config.toml",))
+    (real / "config.toml").write_text('[agent]\nmodel = "real-model"\n')
+
+    loaded = config_module.load_config(env={"OMPWIRE_CONFIG_DIR": str(sandbox)})
+
+    assert loaded.get("agent", "model") == ""
+    assert not loaded.get("telegram", "bot_token")

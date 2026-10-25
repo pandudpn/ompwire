@@ -245,7 +245,7 @@ def test_start_refuses_a_rejected_credential(monkeypatch, tmp_path, capsys):
 
     assert service.start("telegram") == 1
     out = capsys.readouterr().out
-    assert "not accepted" in out and "gateway add telegram --force" in out
+    assert "not accepted" in out and "gateway start telegram" in out
 
 
 def test_start_proceeds_when_the_credential_verifies(monkeypatch, tmp_path, capsys):

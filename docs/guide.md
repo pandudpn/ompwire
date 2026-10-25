@@ -23,17 +23,44 @@ machine can run several, and stopping one leaves the others running.
 
 | Platform | Status | Connect it with |
 | --- | --- | --- |
-| Telegram | ready | `ompwire gateway add telegram`: a bot token from [@BotFather](https://t.me/BotFather), checked with `getMe`, then your user id |
+| Telegram | ready | `ompwire gateway start --platform telegram`: a bot token from [@BotFather](https://t.me/BotFather), checked with `getMe`, then your user id |
 | Terminal | ready | `ompwire chat`: no gateway, no credential (see [Terminal](#terminal)) |
-| WhatsApp | in progress: defined, `gateway add` refuses it | |
+| WhatsApp | in progress: defined, `gateway start` refuses it | |
 
 `ompwire gateway types` prints the same list for the installed version.
 
+### Starting a gateway
+
+`ompwire gateway start` is the one command for a first start, a restart and a credential
+change. It asks only what it does not know:
+
+1. The platform, from the ones this version implements.
+2. Which profile, when that platform already has gateways: each is listed with its credential
+   masked (`1234…alue`), plus "add a new profile". A platform can run several bots, each with
+   its own name, credential and unit.
+3. The credential, when there is none or the platform rejects the stored one. For an existing
+   profile it shows the current one masked and asks whether to replace it. Nothing is saved
+   until the platform accepts it, and a running gateway is stopped before its credential
+   changes, so the old one never keeps polling next to the new one.
+4. The allow list, when it is empty.
+
+Then it writes the systemd unit and starts it, or restarts it when it is already running.
+Running it again with nothing to change is a plain restart.
+
+Without a terminal (a script, CI), every answer comes from flags and `--yes` fails instead of
+asking:
+
+```bash
+ompwire gateway start work --platform telegram --token-stdin --allowed 42 --yes < token.txt
+```
+
+`--no-start` saves the gateway and its credential without starting it.
+
 | Command | What it does |
 | --- | --- |
+| `ompwire gateway` | this command's help |
 | `ompwire gateway list` | name, platform, bot identity, allow list, unit state |
-| `ompwire gateway add NAME` | read the token, verify it, ask who may use it |
-| `ompwire gateway start NAME` | write the unit from this machine's paths, enable and start it |
+| `ompwire gateway start [NAME]` | add or update a gateway, then run it (see above) |
 | `ompwire gateway stop NAME` | stop and disable it, so it stays down after a reboot |
 | `ompwire gateway restart NAME` | rewrite the unit, then restart it |
 | `ompwire gateway status [NAME]` | unit path, state, log command |
@@ -46,7 +73,7 @@ systemd and runs `enable --now`. The token is checked before anything is written
 unit with `Restart=always` on a revoked token looks like a crash loop.
 
 Each live chat owns its own `omp` process, so memory grows with conversations, not with bots.
-Each unit is capped at `MemoryMax=4G`. `gateway add` refuses a platform that is not
+Each unit is capped at `MemoryMax=4G`. `gateway start` refuses a platform that is not
 implemented yet, so nothing half-configured is ever written.
 
 ## In a chat app
@@ -222,7 +249,7 @@ reports without a handshake.
 | Symptom | Cause |
 | --- | --- |
 | The bot never answers, no error | your user id is not on the allow list (`gateway list` shows it) |
-| `gateway add` says the token is rejected | Telegram: revoked in @BotFather; use `--force` with the new one |
+| `gateway start` says the credential is rejected | Telegram: revoked in @BotFather; run `gateway start` again and give the new one |
 | `409 Conflict` in the journal | Telegram: a second process polls the same token |
 | `start` says systemd --user is unavailable | no user manager (container, CI) |
 | An answer stops mid-turn | `journalctl --user -u ompwire-<name> -f` |

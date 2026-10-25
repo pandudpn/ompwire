@@ -89,7 +89,7 @@ def _run_gateway(config_path: str | None, name: str, force: bool) -> int:
     gateways.apply(config, gateway)
     if not str(config.get("telegram", "bot_token", "") or ""):
         print(f"FAIL no credential for gateway {gateway.name!r}. "
-              f"Run `ompwire gateway add {gateway.name}` or set {gateway.token_var()}.",
+              f"Run `ompwire gateway start {gateway.name}` or set {gateway.token_var()}.",
               file=sys.stderr)
         return 1
     from . import lock
@@ -214,7 +214,12 @@ def cmd_gateway(args: argparse.Namespace) -> int:
     from . import gateways, service
     from .setup import bot_identity
 
-    action = getattr(args, "gateway_action", "list") or "list"
+    action = getattr(args, "gateway_action", "") or ""
+    if not action:
+        args.gateway_help()
+        return 0
+    if getattr(args, "name_flag", ""):
+        args.name = args.name_flag
 
     if action == "types":
         for index, kind in enumerate(gateways.KINDS, 1):
@@ -225,7 +230,7 @@ def cmd_gateway(args: argparse.Namespace) -> int:
     if action == "list":
         items = gateways.load(load_config(args.config))
         if not items:
-            print("no gateway configured. Run `ompwire gateway add telegram`.")
+            print("no gateway configured. Run `ompwire gateway start`.")
             return 0
         width = max(len(item.name) for item in items)
         for item in items:
@@ -240,8 +245,6 @@ def cmd_gateway(args: argparse.Namespace) -> int:
                   f"users {allowed:<12} {service.state(item.name)}")
         return 0
 
-    if action == "add":
-        return _gateway_add(args, gateways, bot_identity)
 
     if action in ("remove", "rm"):
         try:
@@ -254,6 +257,8 @@ def cmd_gateway(args: argparse.Namespace) -> int:
               f"{item.token_var()})")
         return 0
 
+    if action == "start":
+        return _gateway_start(args, gateways, service)
     if action == "status":
         return _gateway_status(args, gateways, service)
     if action == "logs":
@@ -269,7 +274,7 @@ def cmd_gateway(args: argparse.Namespace) -> int:
         print(f"FAIL {exc}", file=sys.stderr)
         return 1
 
-    if action in ("start", "stop", "restart", "_run") and not gateway.implemented:
+    if action in ("stop", "restart", "_run") and not gateway.implemented:
         print(f"FAIL the {gateway.kind!r} transport is not implemented yet; "
               f"`ompwire gateway types` shows what can run today", file=sys.stderr)
         return 1
@@ -277,8 +282,6 @@ def cmd_gateway(args: argparse.Namespace) -> int:
         # what the unit calls. Not a user-facing mode: systemd needs a foreground process,
         # the CLI does not offer one.
         return _run_gateway(args.config, gateway.name, args.force)
-    if action == "start":
-        return service.start(gateway.name, force=args.force)
     return getattr(service, action)(gateway.name)
 
 
@@ -296,7 +299,7 @@ def _gateway_status(args: argparse.Namespace, gateways, service) -> int:
             print(f"FAIL no gateway named {wanted!r}", file=sys.stderr)
             return 1
     if not items:
-        print("no gateway configured. Run `ompwire gateway add telegram`.")
+        print("no gateway configured. Run `ompwire gateway start`.")
         return 0
     for item in items:
         state = service.state(item.name)
@@ -333,102 +336,243 @@ def _allowed_ids(args: argparse.Namespace) -> list[int] | None:
         return []
 
 
-def _gateway_add(args: argparse.Namespace, gateways, bot_identity) -> int:
-    from .setup import normalise_token
+def _choose(prompt: str, options: list[str], default: int = 1) -> int | None:
+    """A numbered menu; the chosen index, or None for an answer that is not on it."""
+    for index, label in enumerate(options, 1):
+        print(f"  {index}. {label}")
+    answer = input(f"{prompt} [1-{len(options)}, enter for {default}]: ").strip() or str(default)
+    if answer.isdigit() and 1 <= int(answer) <= len(options):
+        return int(answer) - 1
+    return None
 
-    kind = getattr(args, "kind", "") or ""
+
+def _start_platform(args: argparse.Namespace, gateways) -> str | None:
+    """The platform to start, from --platform or a menu of the implemented ones."""
+    kind = (getattr(args, "platform", "") or "").strip().lower()
     if not kind:
         if args.yes:
-            kind = "telegram"
+            kind = gateways.IMPLEMENTED[0]
         else:
-            print("gateway type:")
-            for index, name in enumerate(gateways.KINDS, 1):
-                mark = "" if name in gateways.IMPLEMENTED else "   (not implemented yet)"
-                print(f"  {index}. {name}{mark}")
-            answer = input("type [1-2, enter for telegram]: ").strip() or "1"
-            if answer.isdigit() and 1 <= int(answer) <= len(gateways.KINDS):
-                kind = gateways.KINDS[int(answer) - 1]
-            else:
-                kind = answer
-    kind = kind.lower()
+            print("platform:")
+            labels = [kind if kind in gateways.IMPLEMENTED else f"{kind}   (not implemented yet)"
+                      for kind in gateways.KINDS]
+            picked = _choose("platform", labels)
+            if picked is None:
+                print("FAIL that is not one of the platforms listed", file=sys.stderr)
+                return None
+            kind = gateways.KINDS[picked]
     if kind not in gateways.KINDS:
-        print(f"FAIL unknown gateway type {kind!r}; known: {', '.join(gateways.KINDS)}",
+        print(f"FAIL unknown platform {kind!r}; known: {', '.join(gateways.KINDS)}",
               file=sys.stderr)
-        return 1
+        return None
     if kind not in gateways.IMPLEMENTED:
-        print(f"FAIL the {kind} transport is not implemented yet. The definition would point "
-              f"at code that does not exist, so nothing is written.\n"
-              f"     telegram is the transport that works today.", file=sys.stderr)
-        return 1
+        print(f"FAIL the {kind} transport is not implemented yet, so nothing is written. "
+              f"`ompwire gateway types` shows what can run today.", file=sys.stderr)
+        return None
+    return kind
 
+
+def _start_profile(args: argparse.Namespace, gateways, kind: str, items) -> tuple[str, bool] | None:
+    """Which gateway of this platform to start: (name, is_new). A menu when several exist."""
+    named = (getattr(args, "name", "") or "").strip().lower()
+    mine = [item for item in items if item.kind == kind]
+    if named:
+        clash = next((item for item in items if item.name == named and item.kind != kind), None)
+        if clash is not None:
+            print(f"FAIL {named!r} is a {clash.kind} gateway, not {kind}", file=sys.stderr)
+            return None
+        try:
+            return gateways.validate_name(named), all(item.name != named for item in items)
+        except gateways.GatewayError as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return None
+    if not mine:
+        return _new_name(args, gateways, kind, items), True
+    if args.yes:
+        if len(mine) == 1:
+            return mine[0].name, False
+        print(f"FAIL several {kind} gateways exist ({', '.join(item.name for item in mine)}); "
+              f"name one", file=sys.stderr)
+        return None
+    labels = [f"{item.name}   ({_identity_line(gateways, item)})" for item in mine]
+    labels.append("add a new profile")
+    print(f"{kind} gateways:")
+    picked = _choose("which", labels)
+    if picked is None:
+        print("FAIL that is not one of the gateways listed", file=sys.stderr)
+        return None
+    if picked < len(mine):
+        return mine[picked].name, False
+    name = _new_name(args, gateways, kind, items, ask=True)
+    return (name, True) if name else None
+
+
+def _identity_line(gateways, item) -> str:
+    credential = gateways.token(item)
+    return f"credential {gateways.mask(credential)}" if credential else "no credential"
+
+
+def _new_name(args, gateways, kind: str, items, ask: bool = False) -> str | None:
+    taken = {item.name for item in items}
+    suggestion = kind
+    counter = 2
+    while suggestion in taken:
+        suggestion = f"{kind}-{counter}"
+        counter += 1
+    if not ask or args.yes:
+        return suggestion
+    while True:
+        answer = input(f"name for the new {kind} gateway [{suggestion}]: ").strip().lower()
+        name = answer or suggestion
+        if name in taken:
+            print(f"     {name!r} already exists; pick another name")
+            continue
+        try:
+            return gateways.validate_name(name)
+        except gateways.GatewayError as exc:
+            print(f"     {exc}")
+
+
+def _start_credential(args: argparse.Namespace, gateways, gateway, is_new: bool) -> str | None:
+    """A verified credential for this gateway, asking for one when there is none or it is
+    rejected, or when the person chose to replace it."""
+    spec = gateways.platform(gateway.kind)
+    given = _given_credential(args)
+    if given is None:
+        return None
+    current = "" if is_new else gateways.token(gateway)
+    if given:
+        candidate = given
+    elif current and not is_new and not args.yes and _wants_new_credential(current, spec):
+        candidate = ""
+    else:
+        candidate = current
+    for attempt in range(3):
+        if not candidate:
+            if args.yes:
+                print(f"FAIL no {spec.credential} given; pass --token-stdin", file=sys.stderr)
+                return None
+            candidate = _ask_secret_line(spec.credential)
+            if not candidate:
+                print("FAIL no credential given; nothing was written", file=sys.stderr)
+                return None
+        identity = gateways.verify(gateway.kind, candidate)
+        if identity:
+            print(f"ok   credential valid: @{identity}")
+            return candidate
+        print(f"warn {gateway.kind} rejected that credential")
+        if given or args.yes or attempt == 2:
+            print("FAIL no valid credential; nothing was written", file=sys.stderr)
+            return None
+        candidate = ""
+    return None
+
+
+def _given_credential(args: argparse.Namespace) -> str | None:
+    """--token or --token-stdin, "" when neither, None when stdin was asked for but empty."""
+    from .setup import normalise_token
+
+    token = normalise_token(getattr(args, "token", "") or "")
+    if not token and getattr(args, "token_stdin", False):
+        token = normalise_token(sys.stdin.readline())
+        if not token:
+            print("FAIL --token-stdin was given but stdin was empty", file=sys.stderr)
+            return None
+    return token
+
+
+def _wants_new_credential(current: str, spec) -> bool:
+    from .gateways import mask
+
+    print(f"current {spec.credential}: {mask(current)}")
+    answer = input("enter a new one? [y/N]: ").strip().lower()
+    return answer in ("y", "yes")
+
+
+def _start_allowed(args: argparse.Namespace, gateway, spec) -> list[int]:
+    """The allow list: --allowed wins, otherwise the current one, asked for when empty."""
+    given = _allowed_ids(args)
+    if given is not None:
+        return given
+    if gateway.allowed or args.yes:
+        return list(gateway.allowed)
+    answer = input(f"allowed {spec.user_ids} (comma separated, blank = nobody): ").strip()
+    return [int(part) for part in answer.replace(" ", "").split(",") if part.isdigit()]
+
+
+def _gateway_start(args: argparse.Namespace, gateways, service) -> int:
+    """One command for the first start, a token reset and a plain restart.
+
+    It asks only what it does not know: the platform, which profile when there are several, a
+    credential when there is none or the platform rejects it, and the allow list when empty.
+    Nothing is written until the credential is verified. A running gateway is stopped before
+    its credential changes, so the old token is never polling next to the new one.
+    """
     try:
-        name = gateways.validate_name((getattr(args, "name", "") or kind).lower())
-    except gateways.GatewayError as exc:
-        print(f"FAIL {exc}", file=sys.stderr)
+        return _gateway_start_steps(args, gateways, service)
+    except EOFError:
+        print("\nFAIL input ended before every question was answered. Without a terminal, "
+              "pass --yes with --platform, --token-stdin and --allowed.", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("\n--   cancelled; nothing was written")
+        return 130
+
+
+def _gateway_start_steps(args: argparse.Namespace, gateways, service) -> int:
+    config = load_config(args.config)
     try:
-        existing = {item.name for item in gateways.load(load_config(args.config))}
+        items = gateways.load(config)
     except (gateways.GatewayError, ValueError) as exc:
         print(f"FAIL {exc}", file=sys.stderr)
         return 1
-    if name in existing and not args.force:
-        print(f"FAIL a gateway named {name!r} already exists (pass --force to rewrite its "
-              f"credential)", file=sys.stderr)
+
+    named = (getattr(args, "name", "") or "").strip().lower()
+    existing = next((item for item in items if item.name == named), None) if named else None
+    if existing is not None and not getattr(args, "platform", ""):
+        args.platform = existing.kind
+    kind = _start_platform(args, gateways)
+    if kind is None:
         return 1
-
-    token = normalise_token(getattr(args, "token", "") or "")
-    if not token and args.token_stdin:
-        import sys as _sys
-
-        token = normalise_token(_sys.stdin.readline())
-        if not token:
-            print("FAIL --token-stdin was given but stdin was empty", file=sys.stderr)
-            return 1
-    if not token and not args.yes:
-        token = normalise_token(_ask_secret_line("telegram bot token from @BotFather"))
-    if not token:
-        token = gateways.token(gateways.Gateway(name=name, kind=kind))
-    if not token:
-        print("FAIL no credential given; a gateway cannot start without one", file=sys.stderr)
+    profile = _start_profile(args, gateways, kind, items)
+    if profile is None:
         return 1
+    name, is_new = profile
+    gateway = next((item for item in items if item.name == name), None) or gateways.Gateway(
+        name=name, kind=kind)
+    spec = gateways.platform(kind)
 
-    username = bot_identity(token)
-    if not username:
-        print("FAIL that token failed getMe: Telegram rejected it. Nothing was written.",
-              file=sys.stderr)
+    credential = _start_credential(args, gateways, gateway, is_new)
+    if credential is None:
         return 1
+    allowed = _start_allowed(args, gateway, spec)
 
-    if name in existing:
-        gateways.save([item if item.name != name else gateways.Gateway(
-            name=item.name, kind=item.kind, allowed=item.allowed, home=item.home,
-            enabled=item.enabled) for item in gateways.load(load_config(args.config))])
-        print(f"ok   gateway {name!r} already defined, credential replaced")
+    changed_credential = credential != ("" if is_new else gateways.token(gateway))
+    if not is_new and changed_credential and service.state(name) == "active":
+        # one poller per credential: the old token must stop before the new one is stored
+        service.stop(name, disable=False)
+
+    # home is where schedules report; it follows the allow list only when that list changed
+    home = gateway.home if allowed == gateway.allowed else (allowed[0] if allowed else None)
+    updated = gateways.Gateway(name=name, kind=kind, enabled=gateway.enabled, allowed=allowed,
+                               home=home)
+    gateways.save([updated if item.name == name else item for item in items]
+                  + ([updated] if is_new else []))
+    if changed_credential:
+        env_path = gateways.set_token(updated, credential)
+        print(f"ok   credential stored in {env_path} (0600)")
+    print(f"ok   gateway {'added' if is_new else 'updated'}: {name} ({kind})")
+    if allowed:
+        print(f"ok   allowed users: {', '.join(str(user) for user in allowed)}")
     else:
-        gateways.add(name, kind, allowed=_allowed_ids(args), home=None)
-        print(f"ok   gateway added: {name} ({kind})")
+        print("warn no allowed users: nobody can talk to this gateway yet")
 
-    env_path = gateways.set_token(gateways.Gateway(name=name, kind=kind), token)
-    print(f"ok   credential stored in {env_path} (0600)")
-    print(f"ok   token valid: @{username}")
-
-    items = gateways.load(load_config(args.config))
-    item = next(entry for entry in items if entry.name == name)
-    if not item.allowed and not args.yes:
-        ids = _allowed_ids(args)
-        if ids is None:
-            answer = input(f"allowed telegram user ids for @{username} "
-                           f"(comma separated, blank = nobody): ").strip()
-            ids = [int(part) for part in answer.replace(" ", "").split(",") if part.isdigit()]
-        item.allowed = ids
-        item.home = ids[0] if ids else None
-        gateways.save(items)
-        if ids:
-            print(f"ok   allowed users: {', '.join(str(user) for user in ids)}")
-        else:
-            print("warn no allowed users: nobody can talk to this bot yet")
-
-    print(f"\nnext:  ompwire gateway start {name}      # enable and start under systemd")
-    return 0
+    if args.no_start:
+        print(f"--   not started (--no-start); `ompwire gateway start {name}` starts it")
+        return 0
+    if service.state(name) == "active":
+        return service.restart(name)
+    return service.start(name, force=args.force)
 
 
 def _doctor_units(agent: str) -> None:
@@ -534,21 +678,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         failures += 1
         items = []
     if not items:
-        print("--   no gateway configured (run `ompwire gateway add telegram`)")
+        print("--   no gateway configured (run `ompwire gateway start`)")
     from .setup import bot_identity
 
     for item in items:
         token = gateways.token(item)
         if not token:
             print(f"FAIL gateway {item.name}: no credential "
-                  f"(`ompwire gateway add {item.name}` or set {item.token_var()})")
+                  f"(`ompwire gateway start {item.name}` or set {item.token_var()})")
         elif item.kind == "telegram":
             username = bot_identity(token)
             if username:
                 print(f"ok   gateway {item.name}: @{username}")
             else:
                 print(f"--   gateway {item.name}: Telegram rejected the credential "
-                      f"(revoked or rotating; `ompwire gateway add {item.name} --force`)")
+                      f"(revoked or rotating; `ompwire gateway start {item.name}`)")
         else:
             print(f"ok   gateway {item.name}: credential set")
         if item.allowed:
@@ -638,8 +782,7 @@ common flows:
   ompwire setup                     first machine: check the agent, write config and .env
   ompwire doctor                    verify agent, store and each gateway credential
   ompwire gateway list              bots, credentials and whether they run
-  ompwire gateway add telegram      add one bot: token, allow list
-  ompwire gateway start telegram    enable and start it under systemd --user
+  ompwire gateway start             pick a platform, add or update a bot, run it
   ompwire gateway logs telegram     follow its journal
   ompwire update [--edge]           newest release, or the tip of main (restarts gateways)
   ompwire restart                   restart the gateway without updating
@@ -712,7 +855,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup = _sub(sub, "setup", "check for omp, then write the agent config",
                  "In order: agent, provider and model, thinking, mode, yolo, cwd, MCP. The "
-                 "gateway and its token are not part of setup: use `ompwire gateway add`.",
+                 "gateway and its token are not part of setup: use `ompwire gateway start`.",
                  "  ompwire setup\n  ompwire setup --yes\n  ompwire setup --force --install-omp")
     setup.add_argument("--yes", action="store_true", help="accept the defaults, no prompts")
     setup.add_argument("--force", action="store_true", help="rewrite an existing config")
@@ -760,25 +903,32 @@ def build_parser() -> argparse.ArgumentParser:
                     help="add: write the schedule without installing the timer")
     sc.set_defaults(func=cmd_schedule)
 
-    gw = _sub(sub, "gateway", "add, start and inspect gateway bots",
+    gw = _sub(sub, "gateway", "start, list and control gateway bots",
               "A gateway is one bot on one platform: its own credential, its own allow list, "
-              "its own systemd unit. It only ever runs as that unit, so `start` writes and "
-              "enables it. Types: telegram (works today), whatsapp (not yet).",
-              "  ompwire gateway add telegram --token-stdin < token.txt\n"
-              "  ompwire gateway start telegram\n"
-              "  ompwire gateway status")
-    gw.add_argument("gateway_action", nargs="?", default="list", metavar="action",
-                    choices=["list", "add", "remove", "rm", "start", "stop", "restart",
+              "its own systemd unit. `start` does everything: pick a platform, pick or add a "
+              "profile, check the credential with the platform, write the unit, start it. Run "
+              "it again to restart, or to replace a credential.",
+              "  ompwire gateway start\n"
+              "  ompwire gateway start --platform telegram --name work\n"
+              "  ompwire gateway start work --token-stdin < token.txt --yes\n"
+              "  ompwire gateway list")
+    gw.add_argument("gateway_action", nargs="?", default=None, metavar="action",
+                    choices=["list", "remove", "rm", "start", "stop", "restart",
                              "status", "logs", "types", "_run"])
     gw.add_argument("name", nargs="?", default="", help="gateway name")
-    gw.add_argument("--kind", default="", help="add: telegram | whatsapp")
-    gw.add_argument("--allowed", default="", help="add: comma separated user ids")
-    gw.add_argument("--token", default="", help="add: the bot token itself (prefer --token-stdin)")
+    gw.add_argument("--name", dest="name_flag", default="", metavar="NAME",
+                    help="start: gateway name (same as the positional name)")
+    gw.add_argument("--platform", default="", help="start: which platform (gateway types lists them)")
+    gw.add_argument("--allowed", default="", help="start: comma separated user ids")
+    gw.add_argument("--token", default="", help="start: the credential itself (prefer --token-stdin)")
     gw.add_argument("--token-stdin", action="store_true",
-                    help="add: read the token from stdin")
-    gw.add_argument("--force", action="store_true", help="add: replace an existing credential")
-    gw.add_argument("--yes", action="store_true", help="add: take the defaults, no prompts")
-    gw.set_defaults(func=cmd_gateway)
+                    help="start: read the credential from stdin")
+    gw.add_argument("--no-start", action="store_true",
+                    help="start: save the gateway and credential, do not start it")
+    gw.add_argument("--force", action="store_true",
+                    help="start: write the unit even when a check fails")
+    gw.add_argument("--yes", action="store_true", help="start: no prompts; fail instead of asking")
+    gw.set_defaults(func=cmd_gateway, gateway_help=gw.print_help)
 
     st = _sub(sub, "status", "what this installation is set to, and whether it is running",
               "One screen: version and how it was installed, agent, model/mode/thinking, "

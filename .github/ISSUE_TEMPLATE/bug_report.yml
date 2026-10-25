@@ -9,7 +9,7 @@ body:
         each credential, and its output answers most of the questions below.
 
         Do not paste a bot token. If one leaked into a log or a screenshot, revoke it in
-        @BotFather first, then `ompwire gateway add <name> --force`.
+        @BotFather first, then run `ompwire gateway start <name>` and give the new one.
 
   - type: textarea
     id: what-happened
@@ -25,9 +25,8 @@ body:
       label: Steps to reproduce
       description: The exact command or message, in order. "It broke" cannot be reproduced.
       placeholder: |
-        1. ompwire gateway add telegram
-        2. ompwire gateway start telegram
-        3. send /status in the chat
+        1. ompwire gateway start
+        2. send /status in the chat
         4. ...
     validations:
       required: true

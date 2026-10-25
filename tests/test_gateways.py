@@ -89,7 +89,7 @@ class TestSelection:
             gateways.selected(None)
 
     def test_no_gateway_says_what_to_run(self, sandbox):
-        with pytest.raises(gateways.GatewayError, match="gateway add telegram"):
+        with pytest.raises(gateways.GatewayError, match="gateway start"):
             gateways.selected(None)
 
     def test_an_unknown_name_lists_what_exists(self, sandbox):

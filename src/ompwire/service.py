@@ -177,8 +177,7 @@ def start(gateway: str = "telegram", *, force: bool = False, now: bool = True) -
 
     env_file = _env_file()
     if not env_file.is_file():
-        print(f"FAIL {env_file} is missing: add a credential first "
-              f"(`ompwire gateway add {gateway}`)")
+        print(f"FAIL {env_file} is missing: run `ompwire gateway start` to add a credential")
         return 1
     agent = agent_binary()
     if agent is None:
@@ -194,7 +193,7 @@ def start(gateway: str = "telegram", *, force: bool = False, now: bool = True) -
     if not force and not _credential_works(gateway):
         print(f"FAIL the credential for {gateway!r} is not accepted by the platform. "
               f"Restart=always would hammer it every 5 seconds.\n"
-              f"     replace it: ompwire gateway add {gateway} --force")
+              f"     replace it: ompwire gateway start {gateway}")
         return 1
 
     target.parent.mkdir(parents=True, exist_ok=True)

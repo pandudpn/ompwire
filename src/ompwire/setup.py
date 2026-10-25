@@ -580,5 +580,4 @@ def _gateway_hint() -> None:
         print("     ompwire gateway list          # credential, allow list, service state")
         return
     print("\n--   no gateway yet: an agent alone cannot be talked to")
-    print("     ompwire gateway add telegram    # bot token and who may use it")
-    print("     ompwire gateway start telegram  # enable and start under systemd")
+    print("     ompwire gateway start           # pick a platform, credential, allow list, run it")

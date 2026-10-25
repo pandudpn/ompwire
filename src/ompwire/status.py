@@ -56,7 +56,7 @@ def _gateway_rows() -> list[tuple[str, str]]:
     except gateways.GatewayError as exc:
         return [("gateways", f"unreadable: {exc}")]
     if not items:
-        return [("gateways", "none (run `ompwire gateway add telegram`)")]
+        return [("gateways", "none (run `ompwire gateway start`)")]
     rows: list[tuple[str, str]] = []
     for item in items:
         token = gateways.token(item)

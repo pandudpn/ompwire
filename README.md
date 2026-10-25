@@ -74,12 +74,15 @@ curl -fsSL https://raw.githubusercontent.com/pandudpn/ompwire/main/install.sh | 
 Then:
 
 ```bash
-ompwire setup                    # agent, model, thinking level, working directory
-ompwire gateway types            # which platforms this version can connect
-ompwire gateway add <name> --kind <platform>   # credential, checked first, and who may talk
-ompwire gateway start <name>     # systemd unit, enabled and started
-ompwire doctor                   # one line per check
+ompwire setup            # agent, model, thinking level, working directory
+ompwire gateway start    # pick a platform, give it a credential, choose who may talk
+ompwire doctor           # one line per check
 ```
+
+`gateway start` asks only what it does not know yet. The first time it asks for the platform,
+the credential (checked with the platform before anything is saved) and the allow list, then
+runs the gateway under systemd. Run it again to restart a gateway, replace its credential, or
+add another profile on the same platform.
 
 Each gateway is one connection with its own credential, allow list and systemd unit, so you
 can run several side by side. Only users on a gateway's allow list get an answer; everyone
