@@ -261,3 +261,34 @@ def test_status_does_not_create_a_store_it_only_reads(tmp_path):
     target = tmp_path / "none" / "sessions.db"
     assert "none yet" in status._sessions(str(target))
     assert not target.exists()
+
+
+def test_a_v09_telegram_block_becomes_a_gateway_on_migration(sandbox, monkeypatch):
+    """v0.14 still ran an install whose only bot was config.toml's [telegram] block."""
+    (sandbox / "config.toml").write_text(
+        "[agent]\nmodel = \"m\"\n\n[telegram]\nallowed_users = [42]\nhome_channel = 42\n")
+    (sandbox / ".env").write_text("TELEGRAM_BOT_TOKEN=9:old\n")
+
+    gateways.migrate()
+
+    item = gateways.get("telegram")
+    assert (item.kind, item.allowed, item.home) == ("telegram", [42], 42)
+    assert gateways.token(item) == "9:old"
+    assert gateways.migrate() == []  # once
+
+
+def test_no_telegram_block_means_no_gateway(sandbox):
+    (sandbox / "config.toml").write_text("[agent]\nmodel = \"m\"\n")
+    gateways.migrate()
+    assert gateways.load() == []
+
+
+def test_a_telegram_block_with_the_token_only_in_the_environment(sandbox, monkeypatch):
+    (sandbox / "config.toml").write_text("[telegram]\nallowed_users = [5]\n")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "7:env")
+
+    gateways.migrate()
+
+    item = gateways.get("telegram")
+    assert item.allowed == [5]
+    assert gateways.token(item) == "7:env"

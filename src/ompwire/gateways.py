@@ -450,6 +450,7 @@ def migrate(state_for: str = "") -> list[str]:
     from .config import default_state_dir
 
     moved: list[str] = []
+    moved.extend(_adopt_telegram_block())
     legacy = gateways_file()
     if legacy.is_file() and not any(gateways_dir().glob("*/gateway.toml")):
         items = _read(legacy)
@@ -491,6 +492,34 @@ def _has_sessions(store: Path) -> bool:
         return True  # unreadable: do not overwrite it
     finally:
         connection.close()
+
+
+def _adopt_telegram_block() -> list[str]:
+    """Before gateways.toml (v0.9), the one bot lived in config.toml's [telegram] block and its
+    token in TELEGRAM_BOT_TOKEN, and v0.14 still read that as a gateway named `telegram`. Turn it
+    into a gateway directory once, when no gateway is defined any other way."""
+    from .setup import _paths
+
+    if any(gateways_dir().glob("*/gateway.toml")) or gateways_file().is_file():
+        return []
+    config_file = _paths()[1]
+    try:
+        block = tomllib.loads(config_file.read_text(encoding="utf-8")).get("telegram") or {}
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    allowed: list[int] = []
+    for value in block.get("allowed_users") or []:
+        try:
+            allowed.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    has_token = bool(os.environ.get("TELEGRAM_BOT_TOKEN") or read_env_file().get("TELEGRAM_BOT_TOKEN"))
+    if not allowed and not has_token:
+        return []
+    home = block.get("home_channel")
+    save([Gateway(name="telegram", kind="telegram", allowed=allowed,
+                  home=int(home) if str(home or "").strip().isdigit() else None)])
+    return [f"definitions: [telegram] in {config_file} -> {gateway_file('telegram')}"]
 
 
 def _held(lock: Path) -> bool:

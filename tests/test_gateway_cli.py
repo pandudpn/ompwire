@@ -568,3 +568,16 @@ def test_remove_refuses_while_a_schedule_reports_to_it(sandbox, monkeypatch, tmp
     assert cli.main(["gateway", "remove", "work", "--yes"]) == 1
     assert "morning" in capsys.readouterr().err
     assert len(gateways.load()) == 2
+
+
+def test_an_old_install_s_bot_is_found_by_gateway_list(sandbox, monkeypatch, capsys):
+    """A v0.9 install has only config.toml's [telegram] block and TELEGRAM_BOT_TOKEN."""
+    _identifies(monkeypatch, "old_bot")
+    (sandbox / "config.toml").write_text("[telegram]\nallowed_users = [42]\n")
+    (sandbox / ".env").write_text("TELEGRAM_BOT_TOKEN=9:old\n")
+
+    assert cli.main(["gateway", "list"]) == 0
+
+    out = capsys.readouterr().out
+    assert "migrated definitions" in out
+    assert "@old_bot" in out and "42" in out

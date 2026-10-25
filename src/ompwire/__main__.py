@@ -231,6 +231,11 @@ def cmd_gateway(args: argparse.Namespace) -> int:
     if not action:
         args.gateway_help()
         return 0
+    if action != "_run":
+        # an older install's definitions and credentials, so list/start/remove see its bots;
+        # `_run` migrates for itself, state included, before it takes its lock
+        for line in gateways.migrate():
+            print(f"migrated {line}")
     if getattr(args, "name_flag", ""):
         args.name = args.name_flag
 
