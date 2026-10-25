@@ -1,3 +1,3 @@
 """ompwire — a chat harness that drives an OMP agent over ACP."""
 
-__version__ = "0.13.3-rc.1"
+__version__ = "0.14.0"
