@@ -19,6 +19,16 @@ not installed yet.
 A gateway is one bot on one platform, with its own token, allow list and systemd unit. One
 machine can run several, and stopping one leaves the others running.
 
+### Platforms
+
+| Platform | Status | Connect it with |
+| --- | --- | --- |
+| Telegram | ready | `ompwire gateway add telegram`: a bot token from [@BotFather](https://t.me/BotFather), checked with `getMe`, then your user id |
+| Terminal | ready | `ompwire chat`: no gateway, no credential (see [Terminal](#terminal)) |
+| WhatsApp | in progress: defined, `gateway add` refuses it | |
+
+`ompwire gateway types` prints the same list for the installed version.
+
 | Command | What it does |
 | --- | --- |
 | `ompwire gateway list` | name, platform, bot identity, allow list, unit state |

@@ -1,9 +1,9 @@
 <h1 align="center">ompwire</h1>
 
 <p align="center">
-  <strong>Your coding agent, in the chat app already on your phone.</strong><br/>
-  ompwire puts an <a href="https://omp.sh">OMP</a> agent behind a Telegram bot. You send a message, and
-  the agent works on your own machine with your shell, your repos and your MCP servers.
+  <strong>Your coding agent, wherever you already chat.</strong><br/>
+  ompwire connects an <a href="https://omp.sh">OMP</a> agent to the places you talk. You send a
+  message, and the agent works on your own machine with your shell, your repos and your MCP servers.
 </p>
 
 <p align="center">
@@ -20,14 +20,16 @@
 </p>
 
 ```
-Telegram  ─┐
-           ├─>  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
-terminal  ─┘
+chat platforms  ─>  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
 ```
 
 Ask from your phone, then approve the deploy when the agent asks. ompwire carries the
-conversation between the chat and OMP, and nothing else: the agent loop, the tools, the
-memory and compaction stay in OMP, so you get the same agent you run in a terminal.
+conversation between a chat and OMP, and nothing else: the agent loop, the tools, the memory
+and compaction stay in OMP, so every platform gets the same agent.
+
+Each platform plugs into one engine. Steering, questions, approvals, sessions and schedules
+are written once and work the same everywhere; a platform only decides how a message, a
+button or a file looks.
 
 ## What you get
 
@@ -60,12 +62,10 @@ as a photo.
 **Scheduled turns.** "Every morning at 7, summarise last night's commits." The agent proposes
 it, you confirm, and a systemd timer runs it and reports to the chat.
 
-**A terminal too.** `ompwire chat` runs the same engine in your shell, no bot needed.
-
 ## Install
 
-You need Linux with `systemd --user`, Python 3.11+, and a bot token from
-[@BotFather](https://t.me/BotFather). The installer brings `omp` if it is missing.
+You need Linux with `systemd --user`, Python 3.11+, and a credential for the platform you
+connect (a bot token, for example). The installer brings `omp` if it is missing.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pandudpn/ompwire/main/install.sh | bash
@@ -75,25 +75,23 @@ Then:
 
 ```bash
 ompwire setup                    # agent, model, thinking level, working directory
-ompwire chat                     # try it in this terminal first
-
-ompwire gateway add telegram     # bot token (checked with getMe) and your user id
-ompwire gateway start telegram   # systemd unit, enabled and started
+ompwire gateway types            # which platforms this version can connect
+ompwire gateway add <name> --kind <platform>   # credential, checked first, and who may talk
+ompwire gateway start <name>     # systemd unit, enabled and started
 ompwire doctor                   # one line per check
 ```
 
-Send `/start` to your bot. Only user ids on the allow list get an answer; everyone else gets
-silence.
+Each gateway is one connection with its own credential, allow list and systemd unit, so you
+can run several side by side. Only users on a gateway's allow list get an answer; everyone
+else gets silence. The [guide](docs/guide.md#gateways) has the per-platform steps.
 
 ## Platforms
 
-| Platform | Status |
-| --- | --- |
-| Telegram | ready: `ompwire gateway add telegram` |
-| Terminal | ready: `ompwire chat` |
-| WhatsApp | defined in the gateway list, not implemented yet |
+The goal is every place you already chat. Platforms are added one at a time behind the same
+engine, and `ompwire gateway types` lists what the installed version supports. The
+[guide](docs/guide.md#gateways) tracks which are ready and which are in progress.
 
-The engine never talks to a platform directly, so a new one is a surface plus a gateway.
+A new platform is a surface plus a gateway.
 [Adding a transport](CONTRIBUTING.md#adding-a-transport) walks through it, and it is the most
 useful contribution right now.
 
@@ -102,16 +100,17 @@ useful contribution right now.
 ompwire runs your agent, with your credentials, on your machine. That shapes it:
 
 - one allow list per bot; strangers get no reply at all
-- long polling, so no port is opened and nothing listens
+- no inbound port: gateways reach out to their platform; one that needs a port has to say so
+  in SECURITY.md first
 - the bot token never reaches the agent process, and logs mask it
-- no telemetry: messages go to Telegram and to your model provider, nowhere else
+- no telemetry: messages go to the platforms you connect and your model provider, nowhere else
 - `~/.omp` stays OMP's; uninstall never touches it
 
 The full threat model is in [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
-- [Guide](docs/guide.md): gateways, chat commands, approvals, schedules, the terminal,
+- [Guide](docs/guide.md): gateways and platforms, chat commands, approvals, schedules,
   configuration, troubleshooting
 - [Architecture](ARCHITECTURE.md): how a turn flows, the ACP surface used, decisions and
   their costs
