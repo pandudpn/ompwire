@@ -223,8 +223,7 @@ async def _repl(agent: engine.ChatAgent, surface: TerminalSurface) -> int:
             config_id, value = line[1:].split(maxsplit=1)
             try:
                 await agent.ensure()
-                await asyncio.to_thread(agent.client.set_config_option, agent.session_id,
-                                        config_id, value)
+                await agent.set_option(config_id, value)
             except AcpError as exc:
                 print(f"error: {exc}", file=sys.stderr)
             continue

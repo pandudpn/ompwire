@@ -522,3 +522,56 @@ def test_the_transcript_names_each_tool_call_by_its_id():
     with path.open("a") as handle:
         handle.write(json.dumps(later) + "\n")
     assert omp_sessions.usage("xyz").tools["toolu_2"] == "mcp__kaneo_get_task"
+
+
+def _options(model, mode="default"):
+    return [{"id": "model", "currentValue": model, "options": []},
+            {"id": "mode", "currentValue": mode, "options": []},
+            {"id": "thinking", "currentValue": "high", "options": []}]
+
+
+def _option_update(model, mode="default"):
+    return Update(kind="config_option_update", session_id="s",
+                  raw={"sessionUpdate": "config_option_update", "configOptions": _options(model, mode)})
+
+
+def test_a_model_or_mode_switch_made_by_omp_is_told_to_the_chat(tmp_path):
+    """omp can change model or mode itself (a fallback, plan approval); it used to happen silently."""
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent.options = {opt["id"]: opt for opt in _options("a/one")}
+        agent._on_update(_option_update("a/two"))
+        agent._on_update(Update(kind="current_mode_update", session_id="s",
+                                raw={"sessionUpdate": "current_mode_update", "currentModeId": "plan"}))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return agent
+
+    agent = asyncio.run(go())
+    sent = agent.surface.app.bot.messages
+    assert any("model" in body and "a/one" in body and "a/two" in body for body in sent), sent
+    assert any("mode" in body and "default" in body and "plan" in body for body in sent), sent
+    assert agent.options["model"]["currentValue"] == "a/two"
+    assert agent.options["mode"]["currentValue"] == "plan"
+    assert agent._updates.empty()  # never reaches the turn renderer
+
+
+def test_a_switch_the_chat_asked_for_is_not_reported_back(tmp_path):
+    """omp echoes /model as config_option_update before it replies; that is not omp's own change."""
+    async def go():
+        agent = _make_agent(_config(tmp_path), [])()
+        agent.options = {opt["id"]: opt for opt in _options("a/one")}
+
+        def set_config_option(_sid, config_id, value):
+            agent._on_update(_option_update(value))  # the echo arrives first
+            return {"configOptions": _options(value)}
+
+        agent.client.set_config_option = set_config_option
+        await agent.set_option("model", "a/two")
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return agent
+
+    agent = asyncio.run(go())
+    assert agent.options["model"]["currentValue"] == "a/two"
+    assert not any("switched" in body for body in agent.surface.app.bot.messages)

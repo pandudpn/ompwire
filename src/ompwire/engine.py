@@ -331,6 +331,9 @@ class ChatAgent:
         self.turns = 0
         self.tools_used = 0
         self.options: dict[str, dict[str, Any]] = {}
+        # values ompwire itself asked for; omp echoes them as config_option_update, which must
+        # not be reported back as a change made from omp's side
+        self._asked: set[tuple[str, str]] = set()
         self.info: dict[str, Any] = {}
         self.agent_version = ""
         self.advertised_commands: list[str] = []
@@ -456,6 +459,23 @@ class ChatAgent:
         """Per-chat choices that must outlive a session (/new used to reset them)."""
         return self.store.prefs(self.key)
 
+    async def set_option(self, config_id: str, value: str) -> dict[str, Any]:
+        """Set one session option and keep `options` current; every setter goes through here."""
+        self._asked.add((config_id, value))
+        try:
+            result = await asyncio.to_thread(
+                self.client.set_config_option, self.session_id, config_id, value)
+        finally:
+            # the echo, if omp sends one, arrives before the reply; once the reply is in, a
+            # later update carrying the same value is someone else's change
+            self._loop.call_soon(self._asked.discard, (config_id, value))
+        # the reply carries the authoritative option set; without this the pickers keep
+        # showing the previous value after a restart or /new
+        updated = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
+        if updated:
+            self.options = updated
+        return result
+
     async def _apply_preferences(self) -> None:
         stored = self.prefs()
         for config_id in PREF_KEYS:
@@ -463,14 +483,7 @@ class ChatAgent:
             if not value or self.client is None:
                 continue
             try:
-                result = await asyncio.to_thread(
-                    self.client.set_config_option, self.session_id, config_id, value
-                )
-                # the reply carries the authoritative option set; without this the
-                # pickers keep showing the previous value after a restart or /new
-                updated = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
-                if updated:
-                    self.options = updated
+                await self.set_option(config_id, value)
                 log.info("preference applied %s=%s (session=%s, source=%s, effective=%s)",
                          config_id, value, self.session_id[:8],
                          "store" if stored.get(config_id) else "config",
@@ -485,6 +498,14 @@ class ChatAgent:
             self._loop.call_soon_threadsafe(self.advertised_commands.__setitem__, slice(None), names)
             return
         if update.kind == "session_info_update":
+            return
+        if update.kind == "config_option_update":
+            options = update.raw.get("configOptions") or []
+            self._loop.call_soon_threadsafe(self._on_options, options)
+            return
+        if update.kind == "current_mode_update":
+            mode = str(update.raw.get("currentModeId") or "")
+            self._loop.call_soon_threadsafe(self._on_mode, mode)
             return
         if update.kind == "usage_update":
             raw = update.raw
@@ -536,6 +557,34 @@ class ChatAgent:
             await self.surface.notice(text)
         except Exception:
             log.warning("context notice failed chat=%s", self.label, exc_info=True)
+
+    # Option changes the chat should hear about when omp makes them on its own: a model falling
+    # back, plan mode ending once a plan is approved. Thinking is left out; it moves with the model.
+    WATCHED_OPTIONS = ("model", "mode")
+
+    def _on_options(self, raw: list[Any]) -> None:
+        """Runs on the loop thread. Keeps `options` current and names a change ompwire did not ask for."""
+        updated = {opt.get("id"): opt for opt in raw if isinstance(opt, dict)}
+        if not updated:
+            return
+        changes = []
+        for config_id in self.WATCHED_OPTIONS:
+            old = str((self.options.get(config_id) or {}).get("currentValue") or "")
+            new = str((updated.get(config_id) or {}).get("currentValue") or "")
+            if old and new and old != new and (config_id, new) not in self._asked:
+                changes.append((config_id, old, new))
+        self.options = updated
+        for config_id, old, new in changes:
+            log.info("option changed by omp %s %s: %s -> %s", self.label, config_id, old, new)
+            self._loop.create_task(self._context_notice(f"⚙️ omp switched {config_id}: `{old}` → `{new}`"))
+
+    def _on_mode(self, mode: str) -> None:
+        """current_mode_update carries only the id; fold it into `options` like the full update."""
+        current = self.options.get("mode")
+        if not mode or current is None:
+            return
+        self._on_options([*(opt for key, opt in self.options.items() if key != "mode"),
+                          {**current, "currentValue": mode}])
 
     def _on_permission(self, params: dict[str, Any]) -> str | None:
         policy = approval_policy(self.config)
@@ -896,6 +945,9 @@ class ChatAgent:
                 seen = self._transcript()
                 named = seen.tools.get(call_id, "") if seen is not None else ""
                 entry.tool = tool_name(entry.kind, inputs.get(call_id, {}), named)
+            # the start line logs the guess; this one logs the name the chat shows
+            log.info("tool done %s tool=%s status=%s %r", self.label, entry.tool,
+                     entry.status or "-", entry.title[:80])
             if entry.tool == "todo" and entry.status == "completed":
                 # omp sends the list a todo call produced right after the call ends, and that
                 # checklist says more than the trace. Hold the trace until the next update shows

@@ -6,7 +6,6 @@ A mixin of `telegram.Transport`: it uses the transport's `app`, `config`, `agent
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -136,8 +135,7 @@ class PickerMixin:
     async def _apply_pick(self, agent: engine.ChatAgent, config_id: str, value: str) -> tuple[str, str]:
         """Set a config option; returns (previous, current) so the caller can render once."""
         previous = self._current(agent, config_id)
-        result = await asyncio.to_thread(agent.client.set_config_option, agent.session_id, config_id, value)
-        agent.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
+        await agent.set_option(config_id, value)
         current = self._current(agent, config_id)
         if config_id in PREF_KEYS and current:
             agent.store.set_pref(agent.key, config_id, current)

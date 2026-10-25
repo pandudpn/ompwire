@@ -197,7 +197,7 @@ decision behind it:
 | `usage_update` | fills `agent.context` and drives the ⚠️ warning at `stream.compaction_warn`; a report under 5% of the last good one is held, since omp can anchor it on a few hundred tokens after `session/load`; never enters the turn queue |
 | `session_info_update` | read for accounting, never rendered |
 | `available_commands_update` | fills `/commands` |
-| `config_option_update`, `current_mode_update` | kept so the pickers show current values |
+| `config_option_update`, `current_mode_update` | keep the pickers current; a model or mode change the chat did not ask for (a fallback, plan mode ending after approval) is posted as `⚙️ omp switched …`, while the echo of a chat's own `/model` or `/mode` stays silent |
 
 ACP gives a tool call only a coarse `kind`, and omp files most of its tools under `other` (`wait`,
 `ask`, `lsp`, every MCP tool) and its `todo` tool under `think`. omp's transcript records each call
