@@ -292,3 +292,31 @@ def test_a_telegram_block_with_the_token_only_in_the_environment(sandbox, monkey
     item = gateways.get("telegram")
     assert item.allowed == [5]
     assert gateways.token(item) == "7:env"
+
+
+def test_the_shared_env_is_retired_once_it_holds_no_token(sandbox):
+    (sandbox / "gateways.toml").write_text('[gateway.telegram]\ntype = "telegram"\n')
+    (sandbox / ".env").write_text("# Secrets for ompwire.\nTELEGRAM_BOT_TOKEN=1:a\n")
+
+    moved = gateways.migrate()
+
+    assert not (sandbox / ".env").exists()
+    assert any("removed" in line for line in moved)
+    assert gateways.token(gateways.get("telegram")) == "1:a"
+
+
+def test_a_shared_env_with_other_keys_is_kept_and_named(sandbox):
+    (sandbox / "gateways.toml").write_text('[gateway.telegram]\ntype = "telegram"\n')
+    (sandbox / ".env").write_text("TELEGRAM_BOT_TOKEN=1:a\nHONCHO_API_KEY=x\n")
+
+    moved = gateways.migrate()
+
+    assert (sandbox / ".env").read_text().strip() == "HONCHO_API_KEY=x"
+    assert any("HONCHO_API_KEY" in line for line in moved)
+
+
+def test_a_token_left_in_the_shared_env_is_not_read(sandbox):
+    """Only migrate() reads the old file: a stray key there must not become a gateway's token."""
+    gateways.add("telegram")
+    (sandbox / ".env").write_text("TELEGRAM_BOT_TOKEN=stray\n")
+    assert gateways.token(gateways.get("telegram")) == ""

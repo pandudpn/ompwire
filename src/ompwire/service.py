@@ -109,18 +109,11 @@ WantedBy=default.target
 """
 
 
-def _env_file(gateway: str = "") -> Path:
-    """The credential file a unit loads: the gateway's own once it has one, the shared one
-    for an install that has not migrated (and for schedules, which need no bot token)."""
-    from .setup import _paths
+def _env_file(gateway: str) -> Path:
+    """The credential file a gateway's unit loads: its own, and only its own."""
+    from .gateways import env_file
 
-    if gateway:
-        from .gateways import env_file
-
-        own = env_file(gateway)
-        if own.is_file():
-            return own
-    return _paths()[2]
+    return env_file(gateway)
 
 
 def _workdir() -> str:

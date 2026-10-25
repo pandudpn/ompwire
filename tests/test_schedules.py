@@ -93,10 +93,11 @@ def test_an_unknown_gateway_is_refused(monkeypatch):
 
 def test_the_service_unit_is_capped_and_runs_one_turn():
     item = schedules.Schedule(name="morning", cron="0 7 * * *", prompt="x", timeout=600.0)
-    unit = schedules.render_service(item, "/etc/ompwire/config.toml", "/etc/ompwire/.env",
-                                    "/home/you", "/usr/local/bin/ompwire")
+    unit = schedules.render_service(item, "/etc/ompwire/config.toml", "/home/you",
+                                    "/usr/local/bin/ompwire")
 
     assert "Type=oneshot" in unit
+    assert "EnvironmentFile" not in unit  # no bot token for the agent the run starts
     assert "ExecStart=/usr/local/bin/ompwire schedule _run morning" in unit
     assert "TimeoutStartSec=600" in unit
     assert "MemoryMax=1G" in unit
@@ -107,7 +108,7 @@ def test_the_unit_carries_a_path_so_the_agent_is_findable():
     """Found by running it: the timer fired, the process started, and the turn died with
     "ACP command not found: omp" because a user unit does not inherit the shell's PATH."""
     item = schedules.Schedule(name="morning", cron="0 7 * * *", prompt="x")
-    unit = schedules.render_service(item, "/c.toml", "/e.env", "/home/you", "/usr/bin/ompwire",
+    unit = schedules.render_service(item, "/c.toml", "/home/you", "/usr/bin/ompwire",
                                     path="/home/you/.local/bin:/usr/bin:/bin")
 
     assert "Environment=PATH=/home/you/.local/bin:/usr/bin:/bin" in unit

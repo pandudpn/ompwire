@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ompwire import __main__ as cli
 from ompwire import config as config_module
-from ompwire import gateways, status
+from ompwire import status
 
 CONFIG = """[agent]
 cwd = "/srv/app"
@@ -41,12 +41,13 @@ def _sandbox(monkeypatch, tmp_path):
         CONFIG.format(store=store, log=log), encoding="utf-8")
     monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(config_dir))
     monkeypatch.setattr(config_module, "_load_env_files", lambda env: None)
-    # gateways live in their own file now; the legacy [telegram] block is elsewhere
-    (config_dir / "gateways.toml").write_text(
+    # one folder per gateway: its definition and its own credential
+    gateway_dir = config_dir / "gateways" / "telegram"
+    gateway_dir.mkdir(parents=True)
+    (gateway_dir / "gateway.toml").write_text(
         '[gateway.telegram]\ntype = "telegram"\nenabled = true\n'
         "allowed_users = [111, 222]\nhome_channel = 111\n", encoding="utf-8")
-    (config_dir / ".env").write_text("TELEGRAM_BOT_TOKEN=111:tok\n", encoding="utf-8")
-    monkeypatch.setattr(gateways, "gateways_file", lambda: config_dir / "gateways.toml")
+    (gateway_dir / ".env").write_text("TELEGRAM_BOT_TOKEN=111:tok\n", encoding="utf-8")
     monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "test_bot")
     monkeypatch.setattr("ompwire.service.state", lambda gateway="telegram": "active")
     monkeypatch.setattr(status, "_gateway_state", lambda: ("stopped", "not running"))
@@ -75,7 +76,7 @@ def test_status_shows_every_setting_that_decides_behaviour(monkeypatch, tmp_path
 
 def test_status_says_so_when_nobody_is_allowed(monkeypatch, tmp_path):
     config_file, _store, _log = _sandbox(monkeypatch, tmp_path)
-    target = config_file.parent / "gateways.toml"
+    target = config_file.parent / "gateways" / "telegram" / "gateway.toml"
     target.write_text(target.read_text().replace("allowed_users = [111, 222]",
                                                  "allowed_users = []"), encoding="utf-8")
 
@@ -85,7 +86,9 @@ def test_status_says_so_when_nobody_is_allowed(monkeypatch, tmp_path):
 
 def test_status_says_how_to_add_a_gateway(monkeypatch, tmp_path):
     config_file, _store, _log = _sandbox(monkeypatch, tmp_path)
-    (config_file.parent / "gateways.toml").unlink()
+    import shutil
+
+    shutil.rmtree(config_file.parent / "gateways")
 
     rows = dict(status.collect(str(config_file)))
     assert "gateway start" in rows["gateways"]
@@ -132,12 +135,12 @@ def _doctor(monkeypatch, tmp_path, allowed: str):
         .replace("[111, 222]", allowed), encoding="utf-8")
     monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(config_dir))
     monkeypatch.setattr(config_module, "_load_env_files", lambda env: None)
-    # gateways live in their own file now; the legacy [telegram] block is elsewhere
-    monkeypatch.setattr(gateways, "gateways_file", lambda: config_dir / "gateways.toml")
-    (config_dir / "gateways.toml").write_text(
+    gateway_dir = config_dir / "gateways" / "telegram"
+    gateway_dir.mkdir(parents=True, exist_ok=True)
+    (gateway_dir / "gateway.toml").write_text(
         '[gateway.telegram]\ntype = "telegram"\nenabled = true\n'
         f"allowed_users = {allowed}\nhome_channel = 111\n", encoding="utf-8")
-    (config_dir / ".env").write_text("TELEGRAM_BOT_TOKEN=111:tok\n", encoding="utf-8")
+    (gateway_dir / ".env").write_text("TELEGRAM_BOT_TOKEN=111:tok\n", encoding="utf-8")
     monkeypatch.setattr("ompwire.setup.bot_identity", lambda token, timeout=10.0: "test_bot")
     monkeypatch.setattr("ompwire.service.state", lambda gateway="telegram": "active")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/omp")

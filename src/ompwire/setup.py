@@ -5,7 +5,8 @@ provider must be logged in before a model means anything, the bot token must be
 verified before the gateway has an identity, and only then do preferences and MCP
 servers make sense.
 
-Secrets go to `.env` (0600), settings to `config.toml`, and MCP servers to omp's own
+Settings go to `config.toml`, each bot's token to its gateway folder (`gateway start`), and MCP
+servers to omp's own
 `~/.omp/agent/mcp.json` — that is the file omp reads, so ompwire does not re-inject
 servers omp already knows about.
 """
@@ -32,7 +33,7 @@ MCP_SCHEMA = ("https://raw.githubusercontent.com/can1357/oh-my-pi/main/"
 
 TEMPLATE = """# ompwire configuration — written by `ompwire setup`
 #
-# Settings live here; the bot token lives in .env next to this file.
+# Settings every gateway shares; each bot's token lives in gateways/<name>/.env.
 # `ompwire config` prints the merged result.
 
 [acp]

@@ -44,7 +44,7 @@ def targets(keep_config: bool = False) -> list[tuple[Path, str]]:
         (data, "MCP server installs created by ompwire"),
     ]
     if not keep_config:
-        plan.insert(0, (_config_dir(), "config.toml and .env (bot token)"))
+        plan.insert(0, (_config_dir(), "config.toml, schedules and every gateway's folder (bot tokens)"))
     return [(path, note) for path, note in plan if path.exists()]
 
 

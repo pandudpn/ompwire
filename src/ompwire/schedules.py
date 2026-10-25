@@ -325,7 +325,7 @@ def unit_names(name: str) -> tuple[str, str]:
     return f"ompwire-schedule-{name}.service", f"ompwire-schedule-{name}.timer"
 
 
-def render_service(item: Schedule, config_path: str, env_file: str, workdir: str,
+def render_service(item: Schedule, config_path: str, workdir: str,
                    command: str, path: str = "") -> str:
     """One thing to run, capped so a runaway turn cannot hurt the rest of the machine."""
     return "\n".join([
@@ -337,7 +337,8 @@ def render_service(item: Schedule, config_path: str, env_file: str, workdir: str
         "Type=oneshot",
         f"ExecStart={command} schedule _run {item.name}",
         f"WorkingDirectory={workdir}",
-        f"EnvironmentFile=-{env_file}",
+        # no EnvironmentFile: the run reads its gateway's token from that gateway's own folder
+        # when it delivers, and the agent it starts must not inherit any bot token
         f"Environment=OMPWIRE_CONFIG={config_path}",
         # The agent is not on systemd's default path, so the unit carries the one this install
         # used. Without it the timer fires, the process starts, and the turn fails with
@@ -402,7 +403,7 @@ def install(item: Schedule) -> tuple[Path, Path]:
     service_unit = directory / service_name
     timer_unit = directory / timer_name
     service_unit.write_text(
-        render_service(item, config_path, str(service._env_file()), service._workdir(),
+        render_service(item, config_path, service._workdir(),
                        service.command_path(), service.service_path(service.agent_command())),
         encoding="utf-8")
     timer_unit.write_text(render_timer(item), encoding="utf-8")

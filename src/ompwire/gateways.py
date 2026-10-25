@@ -384,11 +384,10 @@ def _read_env(path: Path) -> dict[str, str]:
 
 
 def token(gateway: Gateway) -> str:
-    """This gateway's credential: the environment wins, then its own .env, then the shared .env
-    an install has not migrated yet."""
+    """This gateway's credential: the environment wins, then its own .env. The shared .env of an
+    older install is read only by migrate(), which every `gateway` command runs first."""
     name = gateway.token_var()
-    return (os.environ.get(name) or _read_env(env_file(gateway.name)).get(name)
-            or read_env_file().get(name) or "")
+    return os.environ.get(name) or _read_env(env_file(gateway.name)).get(name) or ""
 
 
 def set_token(gateway: Gateway, value: str) -> Path:
@@ -424,12 +423,11 @@ def _drop_key(path: Path, key: str) -> bool:
 
 
 def unset_token(gateway: Gateway) -> bool:
-    """Remove this gateway's credential, wherever it is stored. Its own .env goes when nothing
-    else is left in it, and the gateway's config directory with it when that is empty too."""
+    """Remove this gateway's credential. Its own .env goes when nothing else is left in it, and
+    the gateway's config directory with it when that is empty too."""
     key = gateway.token_var()
     own = env_file(gateway.name)
     removed = _drop_key(own, key)
-    removed = _drop_key(_env_file(), key) or removed
     if own.is_file() and not _read_env(own):
         own.unlink()
     _prune(own.parent)
@@ -459,12 +457,15 @@ def migrate(state_for: str = "") -> list[str]:
             legacy.rename(legacy.with_name("gateways.toml.migrated"))
             moved.append(f"definitions: {legacy} -> {gateways_dir()}/<name>/gateway.toml")
     shared = read_env_file()
+    took = False
     for item in load():
         key = item.token_var()
         if key in shared and not _read_env(env_file(item.name)).get(key):
             set_token(item, shared[key])
             _drop_key(_env_file(), key)
             moved.append(f"credential {key}: shared .env -> {env_file(item.name)}")
+            took = True
+    moved.extend(_retire_shared_env(announce=took))
 
     root = default_state_dir()
     old_store = root / "sessions.db"
@@ -492,6 +493,21 @@ def _has_sessions(store: Path) -> bool:
         return True  # unreadable: do not overwrite it
     finally:
         connection.close()
+
+
+def _retire_shared_env(announce: bool) -> list[str]:
+    """The shared .env held every bot's token. Once each gateway has its own, nothing reads it:
+    delete it when only comments are left, and say once what is still in it otherwise."""
+    path = _env_file()
+    if not path.is_file():
+        return []
+    left = read_env_file()
+    if left:
+        if not announce:
+            return []
+        return [f"note: {path} still holds {', '.join(sorted(left))}; nothing reads it any more"]
+    path.unlink()
+    return [f"removed {path}: every credential now lives in its gateway's folder"]
 
 
 def _adopt_telegram_block() -> list[str]:
