@@ -31,43 +31,44 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 
 ## Modules
 
-| File | Lines | What it is |
-| --- | --- | --- |
-| `engine.py` | ~910 | the platform-neutral agent engine: ChatAgent, the turn renderer, the `Surface` contract, `ToolTrace`, `FloodWait`, resume planning |
-| `telegram.py` | ~1770 | the Telegram transport: handlers, pickers, `TelegramSurface`, `TelegramDelivery`, buttons, banners |
-| `__main__.py` | ~650 | the CLI: one function per command, `argparse` wiring |
-| `setup.py` | ~580 | the wizard, `.env` writing token normalisation, `bot_identity` verification |
-| `update.py` | ~370 | install mode detection, update, restart of running gateways |
-| `acp.py` | ~330 | the ACP client over stdio |
-| `gateways.py` | ~260 | gateway definitions, credentials per gateway, selection rules |
-| `config.py` | ~250 | layered config: defaults, `config.toml`, environment, redaction of dumps |
-| `service.py` | ~235 | systemd unit rendering, start, stop, remove, state |
-| `catalog.py` | ~230 | model, mode, thinking, provider and skill lists read from the agent |
-| `cli.py` | ~240 | `ompwire chat`: `TerminalSurface` and the REPL, both on the engine. A terminal has no rate limit, so its surface sets `streams` and prints the answer as it is written (markers held back until they close); Telegram posts one message per segment |
-| `uninstall.py` | ~225 | what to remove, and what to leave alone |
-| `mdrender.py` | ~210 | markdown to Telegram HTML |
-| `status.py` | ~175 | one screen of current state, no handshake |
-| `mcp_hub.py` | ~150 | `servers.yaml` to `session/new` `mcpServers` |
-| `login.py` | ~135 | provider login on a pty, driven from chat |
-| `store.py` | ~170 | sqlite: chat key to session id, per-chat prefs, unfinished turns per transport prefix |
-| `format.py` | ~80 | neutral helpers: `uptime`, WIB clock, token counts (`58.6k`), the tool-trace clip |
-| `omp_sessions.py` | ~120 | session totals and compactions, read incrementally from omp's transcript JSONL |
-| `omp_config.py` | ~130 | omp's `compaction:` block in `config.yml`, edited in place |
-| `tg_html.py` | ~112 | Telegram HTML: cards, grids, tool blocks, help and run cards |
-| `lock.py` | ~100 | one flock per gateway |
-| `logs.py` | ~62 | redaction filter |
-| `questions.py` | ~40 | the `<<options: a \| b>>` marker turned into buttons |
-| `attachments.py` | ~150 | the `<<file: path>>` marker, its guard rails, and incoming documents |
-| `schedules.py` | ~330 | cron to `OnCalendar`, the units, and the `<<schedule: ...>>` proposal |
-| `schedule_run.py` | ~200 | one unattended turn: build, run, deliver, record, exit |
-| `delivery.py` | ~45 | the `Delivery` a scheduled run needs, one implementation per gateway kind |
+| File | What it is |
+| --- | --- |
+| `engine.py` | the platform-neutral agent engine: ChatAgent, the turn renderer, the `Surface` contract, `ToolTrace`, `FloodWait`, resume planning |
+| `telegram.py` | the Telegram transport: handlers, pickers, `TelegramSurface`, `TelegramDelivery`, buttons, banners |
+| `__main__.py` | the CLI: one function per command, `argparse` wiring |
+| `setup.py` | the wizard, `.env` writing token normalisation, `bot_identity` verification |
+| `update.py` | install mode detection, update, restart of running gateways |
+| `acp.py` | the ACP client over stdio |
+| `gateways.py` | gateway definitions, credentials per gateway, selection rules |
+| `config.py` | layered config: defaults, `config.toml`, environment, redaction of dumps |
+| `service.py` | systemd unit rendering, start, stop, remove, state |
+| `catalog.py` | model, mode, thinking, provider and skill lists read from the agent |
+| `cli.py` | `ompwire chat`: `TerminalSurface` and the REPL, both on the engine. A terminal has no rate limit, so its surface sets `streams` and prints the answer as it is written (markers held back until they close); Telegram posts one message per segment |
+| `uninstall.py` | what to remove, and what to leave alone |
+| `mdrender.py` | markdown to Telegram HTML |
+| `status.py` | one screen of current state, no handshake |
+| `mcp_hub.py` | `servers.yaml` to `session/new` `mcpServers` |
+| `login.py` | provider login on a pty, driven from chat |
+| `store.py` | sqlite: chat key to session id, per-chat prefs, unfinished turns per transport prefix |
+| `format.py` | neutral helpers: `uptime`, WIB clock, token counts (`58.6k`), the tool-trace clip |
+| `omp_sessions.py` | session totals and compactions, read incrementally from omp's transcript JSONL |
+| `omp_config.py` | omp's `compaction:` block in `config.yml`, edited in place |
+| `tg_html.py` | Telegram HTML: cards, grids, tool blocks, help and run cards |
+| `lock.py` | one flock per gateway |
+| `logs.py` | redaction filter |
+| `allowlist.py` | which shell commands are read-only and skip the approval button |
+| `questions.py` | the `<<options: a \| b>>` marker; held messages and Skip live in `telegram.py` |
+| `attachments.py` | the `<<file: path>>` marker, its guard rails, and incoming documents |
+| `schedules.py` | cron to `OnCalendar`, the units, and the `<<schedule: ...>>` proposal |
+| `schedule_run.py` | one unattended turn: build, run, deliver, record, exit |
+| `delivery.py` | the `Delivery` a scheduled run needs, one implementation per gateway kind |
 
-Line counts move. If a number here is wrong, the file is right and this table is stale.
 
 ## A turn, end to end
 
 1. Telegram delivers an update. The transport drops it unless the sender is on the gateway's
-   allow list.
+   allow list. A message sent while a turn runs is steered into it or queued, with a reply
+   saying which; one sent while a question is open is held until the question is settled.
 2. The chat key resolves to a session id in `sessions.db`, or a new ACP session is created.
 3. Stored prefs (model, mode, thinking, yolo) are replayed onto the session with
    `session/set_config_option`.
@@ -169,6 +170,13 @@ A denial is the safe default: the request expires after `[approval] timeout`, th
 `cancelled`, and omp fails that one tool call instead of the turn. That is why an approval left
 unanswered at 04:00 cannot silently approve itself.
 
+Not every shell command reaches a person. `allowlist.py` names the commands that cannot change
+the machine (`ls`, `rg`, `git log`, `gh pr view`, ...) and answers those itself, because a button
+on every `git status` trains the person to tap Allow without reading. The command is tokenised
+rather than pattern-matched: a pipeline or chain passes only when every part is read-only, a
+redirect only into `/dev/null`, and per-command flags that make a reader write (`git --output`,
+`sort -o`, `rg --pre`, `journalctl --vacuum-*`) send it back to the button.
+
 What this gate does not cover is a file the agent writes with its own write tool, which `write` mode
 allows by design. The appended prompt is what keeps that honest, and `yolo` removes both.
 
@@ -206,15 +214,21 @@ against a fake stream rather than the live model.
 | `~/.config/ompwire/config.toml` | agent settings |
 | `~/.config/ompwire/gateways.toml` | gateway definitions |
 | `~/.config/ompwire/.env` | one credential per gateway, mode `0600` |
-| `~/.local/state/ompwire/sessions.db` | chat key to session id, per-chat prefs |
+| `~/.local/state/ompwire/sessions.db` | chat key to session id, per-chat prefs (model, mode, thinking, yolo, `context_size`), unfinished turns |
 | `~/.local/state/ompwire/overrides.json` | approval overrides set from chat |
 | `~/.local/state/ompwire/files/<chat id>/` | documents sent from the chat, for the agent to read |
 | `~/.config/ompwire/schedules.toml` | the schedules, one row each (no daemon state) |
 | `~/.local/state/ompwire/serve-<gateway>.lock` | flock, one process per gateway |
 | `~/.local/state/ompwire/ompwire.log` | rotating log, redacted |
 
-`~/.omp` is the agent's own store: sessions, provider credentials, MCP config. ompwire reads
-`~/.omp/agent/mcp.json` only to write MCP servers during setup, and uninstall never touches it.
+`~/.omp` is the agent's own store: sessions, provider credentials, MCP config. ompwire touches it
+in three places, and uninstall never does:
+
+| Path | What ompwire does |
+| --- | --- |
+| `~/.omp/agent/mcp.json` | written once by setup with the MCP servers |
+| `~/.omp/agent/sessions/<cwd>/<ts>_<id>.jsonl` | read incrementally for `/usage` totals and compaction notices |
+| `~/.omp/agent/config.yml` | the `compaction:` block only, through `/compaction`, after a one-time `.ompwire-bak` |
 
 ## The ACP surface used
 

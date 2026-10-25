@@ -29,17 +29,8 @@ file and piped invocation styles. A red build usually means a real bug, not a fo
 argument: ruff is configured as a deliberate subset (bugs, imports, modernisation,
 simplification), and rules that only argue about shape are off.
 
-Three rules that matter more than style:
-
-1. **Tests never touch the machine.** `tests/conftest.py` redirects every writable path (systemd
-   units, `gateways.toml`, `overrides.json`, the lock, `sessions.db`) into a temporary
-   directory. Without it, a test run once disabled a real unit and read a real chat override.
-   If you add a code path that writes somewhere, add it to that fixture.
-2. **No secrets in the tree.** Not in tests, not in fixtures, not in screenshots. Use synthetic
-   ids and tokens.
-3. **Explain the wire change.** If you touch `acp.py` or the agent surface, say what the agent
-   returned. `tests/test_acp_contract.py` is there so drift shows up as a failing test instead of
-   a broken chat.
+Then read [RULES.md](RULES.md): what may change, how to verify it, and why tests must never
+touch the machine they run on.
 
 ## Commits and branches
 
@@ -48,8 +39,7 @@ Three rules that matter more than style:
   readable and the diff stays yours.
 - Commit subjects in the imperative, with a scope when it helps: `fix(service): ...`,
   `docs: ...`, `refactor(gateway): ...`. The body explains why, including what breaks otherwise.
-- A PR that changes behaviour updates `README.md`. A PR that moves a boundary updates
-  `ARCHITECTURE.md`.
+- Docs change with the code they describe; RULES.md says which file gets what.
 
 ## Adding a transport
 

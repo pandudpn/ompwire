@@ -1,40 +1,45 @@
 # ompwire
 
-Telegram as a front end for an [OMP](https://omp.sh) agent.
+Telegram front end for an [OMP](https://omp.sh) agent.
 
-OMP keeps the memory, the skills, the tools and the agent loop. ompwire is the transport: it
-takes a message from Telegram, sends it to `omp --mode acp`, and streams the answer back
-into the same message. One conversation, one session, one agent process.
-
-Single user by design: no database server, no web UI, no second agent loop. The one thing
-ompwire stores is a SQLite file, `~/.local/state/ompwire/sessions.db`, which maps a chat to a
-session id.
+OMP owns the agent: the loop, the tools, the skills, the memory and context compaction.
+ompwire carries messages between a chat and `omp --mode acp` and renders what comes back. One
+chat is one OMP session and one `omp` process.
 
 ```
 Telegram  <->  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
 ```
 
-## What you get
+It is built for one person on their own machine. The only state ompwire keeps is a SQLite file
+that maps a chat to a session id. There is no server, no web UI and no second agent loop.
 
-- Every step is its own message with its own timestamp: the agent's text up to each tool call,
-  then each tool call with its output. Nothing is edited after it is sent
-- Approvals arrive as buttons; `/approve` sets the policy, or run with `yolo` and skip them
-- Sessions survive restarts; `/new` starts one, `/resume` picks an old one
-- Model, mode and thinking level switch from chat
-- Photos go straight to the agent; a PDF, zip or csv is saved and the agent gets the path
-- The agent sends files back: a chart, a screenshot or a report arrives as a photo or a document
-- One systemd unit per bot, so a second bot cannot take the first one down
+## What it does
+
+- Every step is its own message: the text up to a tool call, then the tool call with its
+  output. Nothing is edited after it is sent.
+- A message sent while the agent works goes into the running turn (`↪️ steered`), or waits its
+  turn (`📥 queued #2`).
+- The agent can ask with buttons. While a question is open, other messages wait
+  (`⏸️ held #1`) until you answer it or tap Skip.
+- Shell commands that can change the machine ask for approval with buttons. Commands that only
+  read (`git log`, `ls`, `rg`) run without asking.
+- Sessions survive restarts, and a turn cut by a restart is resumed.
+- `/usage` shows token totals for the whole session, the context window and when OMP last
+  compacted it.
+- Files travel both ways: photos reach the agent as images, documents are saved for it to
+  read, and the agent sends files back by naming them.
+- Scheduled turns run on systemd timers and report to the chat.
+- `ompwire chat` runs the same engine in a terminal.
 
 ## Requirements
 
-- Linux with `systemd --user` (a gateway only runs as that unit)
-- Python 3.11 or newer
-- `omp` on `PATH`
-- A bot token from [@BotFather](https://t.me/BotFather)
+- Linux with `systemd --user`. A gateway only runs as a user unit.
+- Python 3.11 or newer.
+- `omp` on `PATH`.
+- A bot token from [@BotFather](https://t.me/BotFather).
 
-`omp --mode acp` is not in `omp --help`. It works, and `tests/test_acp_contract.py` asserts
-the wire against the real binary, so an agent upgrade that changes something shows up as a
-failing test instead of a broken chat.
+`omp --mode acp` is not listed in `omp --help`. `tests/test_acp_contract.py` checks the wire
+against the real binary, so an agent upgrade that changes it fails a test instead of a chat.
 
 ## Install
 
@@ -43,17 +48,10 @@ curl -fsSL https://raw.githubusercontent.com/pandudpn/ompwire/main/install.sh | 
 ```
 
 The script installs `omp` if it is missing, installs ompwire from the newest release tag with
-`uv` (or `pipx`), puts `~/.local/bin` on your shell path, then offers to run `ompwire setup`.
+`uv` (or `pipx`), puts `~/.local/bin` on your shell path and offers to run `ompwire setup`.
 Flags: `--ref`, `--no-setup`, `--no-omp`, `--no-path`.
 
-From a clone:
-
-```bash
-git clone https://github.com/pandudpn/ompwire.git
-cd ompwire && ./install.sh
-```
-
-Working on ompwire itself, a checkout and a symlink is enough:
+From a checkout, for working on ompwire itself:
 
 ```bash
 uv venv && uv pip install -e '.[dev]'
@@ -64,171 +62,168 @@ ln -sfn "$PWD/.venv/bin/ompwire" ~/.local/bin/ompwire
 
 ```bash
 ompwire setup                    # find the agent, pick model, mode, thinking, cwd
-ompwire gateway add telegram     # token (verified with getMe), then your user id
+ompwire gateway add telegram     # token (checked with getMe), then your user id
 ompwire gateway start telegram   # write the systemd unit, enable it, start it
-ompwire doctor                   # agent, store, credential, one line per check
+ompwire doctor                   # agent, store and credentials, one line per check
 ```
 
-`setup` configures the agent only. A bot connection is a gateway, and gateways have their own
-command, so adding a second bot never means running the wizard again.
-
-Then send `/start` to your bot. Only user ids on the allow list get an answer; everyone else
-is ignored without a reply.
+Then send `/start` to the bot. Only user ids on the allow list get an answer. Everyone else is
+ignored without a reply.
 
 ## Gateways
 
-A gateway is one bot on one platform with its own credential, its own allow list and its own
-systemd unit. One machine can run several.
-
-```
-$ ompwire gateway list
-telegram   telegram  @vidura_omp_bot      users 749994884  active
-telegram-2 telegram  credential rejected  users 42         no unit
-```
+A gateway is one bot on one platform, with its own token, allow list and systemd unit. One
+machine can run several, and stopping one leaves the others running.
 
 | Command | What it does |
 | --- | --- |
 | `ompwire gateway list` | name, platform, bot identity, allow list, unit state |
 | `ompwire gateway add NAME` | read the token, verify it, ask who may use it |
 | `ompwire gateway start NAME` | write the unit from this machine's paths, enable and start it |
-| `ompwire gateway stop NAME` | stop it and disable it, so it stays down after a reboot |
-| `ompwire gateway restart NAME` | restart the unit |
+| `ompwire gateway stop NAME` | stop and disable it, so it stays down after a reboot |
+| `ompwire gateway restart NAME` | rewrite the unit, then restart it |
 | `ompwire gateway status [NAME]` | unit path, state, log command |
 | `ompwire gateway logs NAME` | last 40 journal lines |
-| `ompwire gateway remove NAME` | stop the unit, delete the unit, delete the definition |
+| `ompwire gateway remove NAME` | stop it, delete the unit and the definition |
 | `ompwire gateway types` | which platforms exist and which are implemented |
 
-There is no install step and no foreground mode: `start` is the install. It writes
-`~/.config/systemd/user/ompwire-<name>.service`, runs `daemon-reload`, then `enable --now`.
-Run it again after moving a checkout and the unit is rewritten to match.
+`start` is the install: it writes `~/.config/systemd/user/ompwire-<name>.service`, reloads
+systemd and runs `enable --now`. The token is checked before anything is written, because a
+unit with `Restart=always` on a revoked token looks like a crash loop.
 
-The token is verified before anything is written, and `start` checks it again. A unit with
-`Restart=always` on a revoked token restarts every five seconds, which looks like a crash
-loop rather than the one-line fix it is.
+Each live chat owns its own `omp` process, so memory grows with conversations, not with bots.
+Each unit is capped at `MemoryMax=4G`. Telegram is the only platform implemented today;
+`gateway add whatsapp` refuses and writes nothing.
 
-WhatsApp is in the type list because the design is per platform, but that transport does not
-exist yet: `gateway add whatsapp` refuses and writes nothing.
-
-Several bots on one machine is cheap: each adds one poller process. What costs memory is
-conversations, because every live chat owns its own `omp` subprocess. Each unit is capped at
-`MemoryMax=4G` so one runaway conversation cannot take another bot down.
-
-## Chat commands
+## In the chat
 
 | Command | What it does |
 | --- | --- |
 | `/new`, `/sessions`, `/resume <id>`, `/continue` | session lifecycle |
 | `/fork` | branch the current session |
-| `/model`, `/mode`, `/thinking` | switch, with an inline keyboard |
+| `/model`, `/mode`, `/thinking` | switch with an inline keyboard |
 | `/cwd <path>` | start a session in another directory |
-| `/status`, `/usage`, `/context` | what is running, what it cost, how full the context is |
-| `/compact` | run omp's context compaction now |
-| `/compaction [10-95\|off\|on]` | show or set omp's auto-compaction threshold (edits omp's config.yml; new agent processes pick it up) |
-| `/skills [query]`, `/commands` | what the agent can do |
-| `/login` | authenticate a model provider |
-| `/approve`, `/verbose`, `/yolo` | approval policy, tool trace, bypass approvals |
-| `/queue <text>`, `/steer <text>` | queue the next turn, or steer the running one |
-| `/schedule [run\|rm <name>]` | list scheduled turns, run one now, remove one |
+| `/status`, `/usage`, `/context` | what is running, what the session cost, what fills the context |
+| `/compact` | run OMP's compaction now |
+| `/compaction [10-95\|off\|on]` | show or set OMP's auto-compaction threshold |
+| `/queue <text>`, `/steer <text>` | queue a turn, or add to the running one |
+| `/stop`, `/kill` | cancel the turn, or stop this chat's agent process |
+| `/approve`, `/verbose`, `/yolo` | approval policy, tool trace, approvals off for this chat |
 | `/reasoning [on\|off]` | show the agent's thinking above the answer |
-| `/stop`, `/kill` | cancel the turn, kill the agent process for this chat |
-| `/help`, `/whoami` | what this thing is |
+| `/skills [query]`, `/commands` | what the agent can do |
+| `/schedule [run\|rm <name>]` | list scheduled turns, run one now, remove one |
+| `/login` | sign in to a model provider |
+| `/help`, `/whoami` | help, ids |
 
-Anything else is forwarded to the agent as a prompt. `/queue` is a real queue: a second prompt
-sent into a running turn cancels it on this agent version, so ompwire holds the text and sends
-it after the turn ends.
+Any other slash command is forwarded to the agent as a prompt.
+
+### While the agent is working
+
+A message sent mid-turn is steered into the running turn: the agent reads it at its next step,
+and the reply says `↪️ steered`. When OMP declines it, or when `[telegram] busy_message =
+"queue"` is set, the message is queued and the reply says its place (`📥 queued #2`). `/queue`
+always queues. `/stop` cancels the turn.
+
+### Questions
+
+The agent asks by ending a reply with `<<options: a | b>>`. The line becomes buttons, plus
+✏️ Other answer and ⏭️ Skip. While the question is open:
+
+- a message about something else is held (`⏸️ held #1`) and runs after the question is settled;
+- after ✏️ Other answer, the next message you type is the answer;
+- ⏭️ Skip, or `/new`, closes the question and releases what was held.
+
+Once the question is settled the buttons are removed, so a late tap sends nothing.
+
+### Context and compaction
+
+OMP compacts the context itself when it passes `compaction.thresholdPercent` in
+`~/.omp/agent/config.yml`. ompwire shows it and lets you control it:
+
+```
+context   216k / 1.05M (20%)
+compacts  at 70% (734k)
+last      10:41 WIB · 735.1k → 68.2k
+```
+
+- `/usage` sums every model call in the session from OMP's transcript, so the totals survive a
+  gateway restart and `/resume`.
+- A ⚠️ notice arrives once when the context crosses `[stream] compaction_warn` (60%).
+- When OMP compacts during a turn, a `🗜️` notice with the time and before → after follows the
+  turn.
+- `/compaction 70` edits only the `compaction:` block of OMP's config and keeps a one-time
+  backup next to it. `/kill` makes the next process pick the new value up.
+
+## Approval
+
+The agent runs with `approval_mode = write`. Reads and file writes are free; a shell command
+that can change something sends a request with Allow once, Always allow, Deny and Always deny.
+Commands that only read are let through: the command is tokenised, a pipeline counts as
+read-only only when every part is, and a redirect is allowed only into `/dev/null`.
+
+`write` is the one OMP mode that both lets the agent work and reaches a person. Under
+`always-ask` OMP denies writes without sending a request, so no button ever appears. `yolo`
+asks nothing; `/yolo` turns it on for one chat. An unanswered request is denied after
+`[approval] timeout` (120 seconds by default).
+
+The appended system prompt sets the scope: a question gets a read-only answer, a clone goes to
+`/tmp` or `~/.cache`, and anything that touches production stops so the agent can say what it
+would run.
 
 ## Schedules
 
-A schedule runs one turn on a timer and exits. There is no daemon: between runs nothing of ompwire
-is alive, and the cost of a schedule is a timer entry plus about a kilobyte of text.
+A schedule runs one turn on a timer and exits. Nothing of ompwire stays alive between runs.
 
-```
-ompwire schedule add morning --cron "0 7 * * *" --prompt "ringkas aktivitas repo semalam"
-ompwire schedule run morning      # prove it now instead of waiting for 07:00
+```bash
+ompwire schedule add morning --cron "0 7 * * *" --prompt "summarise last night's repo activity"
+ompwire schedule run morning      # run it now instead of waiting for 07:00
 ompwire schedule list
 ompwire schedule remove morning
 ```
 
-The cron fields are read on `Asia/Jakarta` by default, because that is the clock the bot shows,
-and the result goes to the gateway named in the schedule (default `telegram`). Each run reports as
-a card: when it runs (in words, not cron), the model and thinking level, how long it took, which
-tools it used, the tokens it cost, and the answer rendered as markdown. A failed run reports the
-same way with the reason, so a 04:00 failure is visible in the chat instead of only in the journal. Each schedule is a
-`oneshot` unit capped at 1 GB and 200% CPU with a 30 minute timeout, so one runaway turn cannot
-disturb anything else on the machine. Runs are ephemeral and answer `cancelled` to any tool that
-would need a human approval; `--yolo` per schedule opts out, deliberately.
+Cron fields are read in `Asia/Jakarta`. The result goes to the gateway named on the schedule as
+a card: when it runs, model, duration, tools, tokens, and the answer. A failed run reports the
+same way with the reason. Each run is a `oneshot` unit capped at 1 GB, 200% CPU and a 30 minute
+timeout.
 
-You can also just ask in the chat ("every morning at 7, summarise the repo"). The agent proposes
-it with a marker, the transport turns that into a confirmation card, and nothing is installed until
-you press **Buat schedule**.
+`--approval` decides what a run may do while nobody watches: `ask` reads only, `write` also
+writes files, `yolo` (the default) asks nothing. You can also ask in the chat ("every morning
+at 7, summarise the repo"); the agent proposes it and nothing is installed until you confirm.
 
-`--approval` decides what a run may do while nobody is looking, and the three names are measured
-against omp rather than guessed: `ask` reads only (a write is refused), `write` also writes files
-(an ordinary shell command is refused), `yolo` asks nothing. The default is `yolo`, because a
-scheduled job that cannot run git or kubectl is a job that does nothing; use `--approval ask` for a
-schedule that only reports.
+## Thinking and subagents
 
-## Approval
-
-The agent runs with `approval_mode = write`: reads and file writes are free, and every shell
-command sends a permission request into the chat with Allow once, Always allow, Deny and Always
-deny. That is deliberate, and the mode names were measured rather than guessed. `always-ask` and
-`always-ask-cached` deny a write without ever sending a request, so the button never appears and the
-agent simply refuses; `write` is the only mode that both lets the agent work and reaches a human for
-the part that can clone, delete, or deploy. `yolo` asks nothing at all, which is why it is off by
-default and why `/yolo` is a per-chat decision, not a config default.
-
-An unanswered request is denied after `[approval] timeout` (600s). `ompwire doctor` says which gate
-is in force, and warns when yolo is on.
-
-The appended system prompt carries the rest: a read/check/explain request is read-only, a clone goes
-to `/tmp` or `~/.cache` and never the home directory, nothing outside the directory in question is
-modified, and anything touching production stops the agent so it can say what it would run.
-
-## Thinking
-
-ACP carries the agent's reasoning as `agent_thought_chunk`. `/reasoning on` renders it above the
-answer, in a collapsible block, keeping the last 1200 characters; `/reasoning off` (the default)
-drops it. `ompwire setup` asks once and writes `[stream] show_reasoning`.
-
-Subagents are visible without a switch: omp runs them through its `task` tool, so the trace labels
-the call `subagent`, names it (`subagent: ReadNote (sonic)`), and shows what it is doing as the
-progress text arrives. ACP has no event of its own for a subagent, which is why that is where they
-appear. The call that only says it is waiting for the result is dropped: it adds a line and no
-information.
+`/reasoning on` shows the agent's thinking above the answer in a collapsed block.
+`[stream] show_reasoning` sets the default. Subagents need no switch: OMP runs them through its
+`task` tool, and the trace labels that call `subagent` with its name and progress.
 
 ## Configuration
 
 | Path | Holds |
 | --- | --- |
-| `~/.config/ompwire/config.toml` | agent settings: model, mode, thinking, cwd, streaming, logging |
+| `~/.config/ompwire/config.toml` | agent settings |
 | `~/.config/ompwire/gateways.toml` | one block per gateway: platform, allow list, home channel |
-| `~/.config/ompwire/.env` | secrets (`0600`): one bot token per gateway |
+| `~/.config/ompwire/.env` | one bot token per gateway, mode `0600` |
 
-Precedence is defaults, then `config.toml`, then environment variables. Sections in
-`config.toml`: `[acp]`, `[agent]`, `[stream]`, `[mcp]`, `[files]`, `[approval]`, `[logging]`.
-`ompwire config` prints the merged result with secrets masked. `OMPWIRE_CONFIG_DIR` points
-everything at another directory, for a second install or a throwaway experiment.
+Precedence: defaults, then `config.toml`, then environment variables. Sections: `[acp]`,
+`[agent]`, `[session]`, `[stream]`, `[approval]`, `[files]`, `[logging]`, `[mcp]`,
+`[telegram]`. `ompwire config` prints the merged result with secrets masked.
+`OMPWIRE_CONFIG_DIR` points everything at another directory.
 
-`ompwire setup` rewrites the file with your answers. Running it again pre-fills every prompt
-with what is on disk, so pressing enter keeps a value and typing changes one thing.
+`ompwire setup` can be run again: every prompt is pre-filled with what is on disk.
 
-MCP servers are not duplicated here. `[mcp] source = "mcp-hub"` reads a shared `servers.yaml`,
-and `exclude` or `[mcp.overrides.<name>]` adjust it per machine without editing the shared file.
+`[mcp] source = "mcp-hub"` reads a shared `servers.yaml`; `exclude` and
+`[mcp.overrides.<name>]` adjust it per machine.
 
-`[files]` sets the limits for attachments in both directions: `max_mb` (20 by default, applied to
-every file either way) and `incoming_dir`, where documents sent into the chat are written
-(`~/.local/state/ompwire/files` by default). There is no on/off switch: a screenshot, a PDF or a
-file the agent produces travels without being configured first. The agent sends a file by naming it in the reply:
+`[files]` sets `max_mb` (20, both directions) and `incoming_dir` for documents sent into the
+chat. The agent sends a file by naming it on its own line:
 
 ```
-Here is the chart you asked for.
+Here is the chart.
 <<file: /home/you/report/chart.png>>
 ```
 
-The line is removed before the message is shown. A path outside the agent's working directory, a
-missing file, or one over the limit is refused, and the chat gets one short line saying which file
-and why instead of silently dropping it.
+The path must be inside the agent's working directory, exist and fit the limit; at most five
+files go out per reply. A refused file is named in the chat with the reason.
 
 ## Update and remove
 
@@ -240,50 +235,28 @@ ompwire restart             # restart without updating
 ompwire uninstall --dry-run # list what would be removed
 ```
 
-`update` restarts the gateways it finds, because new code is worthless while the old process
-is still polling. `--no-restart` leaves them alone.
-
 `uninstall` removes only what ompwire created: `~/.config/ompwire`, `~/.local/state/ompwire`,
-`~/.local/share/ompwire` and the installed package. `~/.omp` is never touched, so agent
-sessions, credentials and MCP config survive.
+`~/.local/share/ompwire` and the package. `~/.omp` is never touched.
 
 ## When it goes quiet
 
-Start with `ompwire doctor`. It checks the agent, the store and each credential, and exits
-non-zero when something is broken. `ompwire status` reports instead, with no handshake.
+Start with `ompwire doctor`; it exits non-zero when something is broken. `ompwire status`
+reports without a handshake.
 
 | Symptom | Cause |
 | --- | --- |
-| Bot never answers, no error | your user id is not on the allow list; `gateway list` shows who is |
-| `gateway add` says the token is rejected | revoked in @BotFather, use `--force` |
-| Two bots answer each other's messages | the same token in two gateways; one token is one poller |
-| `409 Conflict` in the journal | a second process is polling the same token |
-| `start` says systemd --user is unavailable | no user manager (container, CI); run `gateway _run NAME` under your own supervisor |
+| The bot never answers, no error | your user id is not on the allow list (`gateway list` shows it) |
+| `gateway add` says the token is rejected | revoked in @BotFather; use `--force` with the new one |
+| `409 Conflict` in the journal | a second process polls the same token |
+| `start` says systemd --user is unavailable | no user manager (container, CI) |
 | An answer stops mid-turn | `journalctl --user -u ompwire-<name> -f` |
 
-An empty allow list is the failure that looks like success: the bot starts, answers nobody and
-logs nothing unusual.
+## Documentation
 
-## Development
-
-```bash
-make install   # venv plus dev extras
-make test      # pytest
-make lint      # ruff
-make run       # start the telegram gateway
-```
-
-CI runs lint and tests on Python 3.11, 3.12 and 3.13, plus a shell check on `install.sh`.
-Contract tests skip themselves when `omp` is absent, so CI stays meaningful without an agent.
-`tests/conftest.py` redirects every writable path into a temporary directory, because a test
-run once disabled a real systemd unit.
-
-Architecture, boundaries and the reasoning behind them: [ARCHITECTURE.md](ARCHITECTURE.md), and
-the same picture drawn with its failure modes at
-[docs/ompwire-architecture.html](docs/ompwire-architecture.html).
-
-Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md),
-never a public issue.
+- [ARCHITECTURE.md](ARCHITECTURE.md): the seams, the ACP surface used, decisions and their costs.
+- [RULES.md](RULES.md): how to change this repo without breaking a running install.
+- [SECURITY.md](SECURITY.md): threat model and how to report a problem. Never a public issue.
+- [CONTRIBUTING.md](CONTRIBUTING.md): setup, adding a transport, releases.
 
 ## License
 
