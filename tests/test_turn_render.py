@@ -523,3 +523,16 @@ def test_a_tool_is_named_from_the_transcript_not_acp_kind(rendered, tmp_path):
     assert "🔌 <code>kaneo_get_task</code>" in traces
     assert "<code>github</code>" in traces
     assert "<code>other</code>" not in traces
+
+
+def test_a_todo_call_that_changes_nothing_keeps_its_trace(rendered):
+    """A list equal to the last one is not posted again, so the call behind it must show."""
+    messages = rendered([
+        plan(("tulis tes", "in_progress")),
+        kinded_call("t1", "think", "Reading the list", {"op": "view"}),
+        tool_progress("t1", "", status="completed"),
+        plan(("tulis tes", "in_progress")),
+        message("selesai"),
+    ])
+    assert sum(body.startswith("📋 <b>Todo</b>") for body in messages) == 1
+    assert any(body.startswith("📋 <code>todo</code>") for body in messages), messages

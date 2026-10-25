@@ -917,15 +917,16 @@ class ChatAgent:
                 show_tool(held_todo.pop(0))
 
         def post_plan(raw_entries: Any) -> None:
-            held_todo.clear()  # the checklist stands in for the todo call that changed it
             items = [PlanItem(content=" ".join(str(item.get("content") or "").split()),
                               status=str(item.get("status") or "pending"))
                      for item in (raw_entries or []) if isinstance(item, dict)]
             items = [item for item in items if item.content]
             # an emptied list (omp clears it once all is done) and a reminder repeating the
-            # last one carry nothing new
+            # last one carry nothing new; a todo call behind them keeps its own trace
             if not items or items == self._last_plan:
+                release_todo()
                 return
+            held_todo.clear()  # the checklist stands in for the todo call that changed it
             self._last_plan = items
             enqueue("plan", self.surface.plan(items), essential=True)
 

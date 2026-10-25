@@ -501,3 +501,24 @@ def test_usage_card_shows_when_omp_last_compacted(tmp_path):
     body = asyncio.run(go())
     assert "735.1k → 68.2k" in body
     assert "limit not reported yet" in body
+
+
+def test_the_transcript_names_each_tool_call_by_its_id():
+    """ACP sends only a coarse kind; the tool's real name comes from omp's own transcript."""
+    import json
+
+    from ompwire import omp_sessions
+
+    folder = omp_sessions.SESSIONS_DIR / "-"
+    folder.mkdir(parents=True)
+    path = folder / "2026-10-25T00-00-00-000Z_xyz.jsonl"
+    call = {"type": "message", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "cek"},
+        {"type": "toolCall", "id": "toolu_1|fc_toolu_1", "name": "wait", "arguments": {}}]}}
+    path.write_text(json.dumps(call) + "\n")
+    assert omp_sessions.usage("xyz").tools == {"toolu_1|fc_toolu_1": "wait"}
+    later = {"type": "message", "message": {"role": "assistant", "content": [
+        {"type": "toolCall", "id": "toolu_2", "name": "mcp__kaneo_get_task", "arguments": {}}]}}
+    with path.open("a") as handle:
+        handle.write(json.dumps(later) + "\n")
+    assert omp_sessions.usage("xyz").tools["toolu_2"] == "mcp__kaneo_get_task"
