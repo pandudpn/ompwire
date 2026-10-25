@@ -105,7 +105,7 @@ def _target(item: schedules.Schedule) -> str:
     if not allowed:
         raise schedules.ScheduleError(
             f"gateway '{item.gateway}' has no allowed users, so there is nowhere to send the result")
-    return str(allowed[0])
+    return str(gateway.home or allowed[0])
 
 
 def _collector(run: dict[str, Any]):

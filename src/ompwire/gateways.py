@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 KINDS = ("telegram", "whatsapp")
-IMPLEMENTED = ("telegram",)
+IMPLEMENTED = ("telegram", "whatsapp")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 
 
@@ -69,6 +69,27 @@ def platform(kind: str) -> Platform:
                 "until you run gateway start again.",
             ),
         )
+    if kind == "whatsapp":
+        return Platform(
+            kind,
+            credential="linked WhatsApp number",
+            user_ids="phone numbers",
+            credential_steps=(
+                "Use a number of its own for the bot, not your daily one: anyone who messages "
+                "that number reaches the bot's gate, and WhatsApp may restrict an unofficial "
+                "client.",
+                "On the phone with that number: WhatsApp > Settings > Linked devices > Link a "
+                "device, then scan the QR shown here.",
+                "No camera at hand? Pass --pair-phone <number> and type the 8-character code "
+                "WhatsApp shows instead of scanning.",
+            ),
+            user_id_steps=(
+                "Phone numbers with the country code, digits only: 6281234567890, not "
+                "081234567890 or +62 812-3456-7890.",
+                "Separate several with commas. Only these numbers get an answer, in a direct "
+                "chat and in a group.",
+            ),
+        )
     raise GatewayError(f"the {kind} transport is not implemented yet")
 
 
@@ -79,6 +100,29 @@ def verify(kind: str, credential: str) -> str:
 
         return bot_identity(credential)
     return ""
+
+
+def ready(gateway: Gateway) -> bool:
+    """Whether the gateway has what it needs to connect: a token, or a linked WhatsApp device."""
+    if gateway.kind == "whatsapp":
+        from .wa_client import linked_number, session_path
+
+        return bool(linked_number(session_path(gateway.name)))
+    return bool(token(gateway))
+
+
+def identity(gateway: Gateway) -> str:
+    """Who this gateway is on its platform, for `list`, `status` and `doctor`; "" when unknown."""
+    if gateway.kind == "whatsapp":
+        from .wa_client import linked_number, session_path
+
+        number = linked_number(session_path(gateway.name))
+        return f"+{number}" if number else ""
+    credential = token(gateway)
+    if not credential:
+        return ""
+    username = verify(gateway.kind, credential)
+    return f"@{username}" if username else ""
 
 
 def mask(credential: str) -> str:
@@ -100,15 +144,28 @@ class GatewayError(RuntimeError):
 OWN_SECTIONS = ("agent", "stream", "approval", "files", "session")
 
 
+GROUP_MODES = ("mention", "all", "read")
+
+
 @dataclass
 class Gateway:
     name: str
     kind: str = "telegram"
     enabled: bool = True
-    allowed: list[int] = field(default_factory=list)
-    home: int | None = None
+    # who may talk to it, as the platform names a person: Telegram user ids, WhatsApp phone
+    # numbers (digits, country code first). Kept as text so neither platform's id is mangled.
+    allowed: list[str] = field(default_factory=list)
+    home: str | None = None
+    # WhatsApp only: the groups it listens in, and how it answers there
+    groups: list[str] = field(default_factory=list)
+    group_mode: str = "mention"
     # this gateway's own settings, layered over config.toml: {"agent": {"model": ...}, ...}
     settings: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # every constructor (a parsed file, `gateway start`, a test) ends up with the same shape
+        self.allowed = [user for user in map(user_id, self.allowed) if user]
+        self.home = user_id(self.home) or None
 
     @property
     def implemented(self) -> bool:
@@ -147,18 +204,20 @@ def env_file(name: str) -> Path:
     return gateways_dir() / name / ".env"
 
 
+def user_id(value: Any) -> str:
+    """One allow-list entry as text: digits only, so "+62 812-2227" and 628122227 match."""
+    return re.sub(r"\D", "", str(value or ""))
+
+
 def _parse(data: dict[str, Any]) -> list[Gateway]:
     found: list[Gateway] = []
     for name, raw in (data.get("gateway") or {}).items():
         if not isinstance(raw, dict):
             continue
-        allowed: list[int] = []
-        for value in raw.get("allowed_users") or []:
-            try:
-                allowed.append(int(value))
-            except (TypeError, ValueError):
-                continue
-        home = raw.get("home_channel")
+        allowed = [user for user in (user_id(value) for value in raw.get("allowed_users") or [])
+                   if user]
+        home = user_id(raw.get("home_channel"))
+        mode = str(raw.get("group_mode") or "mention").lower()
         settings = {section: dict(raw[section]) for section in OWN_SECTIONS
                     if isinstance(raw.get(section), dict) and raw[section]}
         found.append(Gateway(
@@ -166,7 +225,9 @@ def _parse(data: dict[str, Any]) -> list[Gateway]:
             kind=str(raw.get("type") or raw.get("kind") or "telegram").lower(),
             enabled=bool(raw.get("enabled", True)),
             allowed=allowed,
-            home=int(home) if str(home or "").strip().isdigit() else None,
+            home=home or None,
+            groups=[str(group).strip() for group in raw.get("groups") or [] if str(group).strip()],
+            group_mode=mode if mode in GROUP_MODES else "mention",
             settings=settings,
         ))
     return sorted(found, key=lambda gw: gw.name)
@@ -203,12 +264,13 @@ def render(items: list[Gateway]) -> str:
         lines.append(f"[gateway.{item.name}]")
         lines.append(f'type = "{item.kind}"')
         lines.append(f"enabled = {'true' if item.enabled else 'false'}")
-        if item.allowed:
-            lines.append("allowed_users = [" + ", ".join(str(user) for user in item.allowed) + "]")
-        else:
-            lines.append("allowed_users = []")
+        # numbers stay numbers in the file, so a hand-edited v0.14 file keeps its shape
+        lines.append("allowed_users = [" + ", ".join(item.allowed) + "]")
         if item.home:
             lines.append(f"home_channel = {item.home}")
+        if item.kind == "whatsapp":
+            lines.append("groups = [" + ", ".join(_toml_value(group) for group in item.groups) + "]")
+            lines.append(f'group_mode = "{item.group_mode}"')
         lines.append("")
         for section in OWN_SECTIONS:
             values = item.settings.get(section) or {}
@@ -300,8 +362,8 @@ def validate_name(name: str) -> str:
     return value
 
 
-def add(name: str, kind: str = "telegram", allowed: list[int] | None = None,
-        home: int | None = None, *, enabled: bool = True) -> Gateway:
+def add(name: str, kind: str = "telegram", allowed: list[Any] | None = None,
+        home: Any = None, *, enabled: bool = True) -> Gateway:
     name = validate_name(name)
     kind = str(kind or "").strip().lower()
     if kind not in KINDS:
@@ -310,7 +372,8 @@ def add(name: str, kind: str = "telegram", allowed: list[int] | None = None,
     if any(item.name == name for item in items):
         raise GatewayError(f"a gateway named {name!r} already exists")
     gateway = Gateway(name=name, kind=kind, enabled=enabled,
-                      allowed=list(allowed or []), home=home)
+                      allowed=[user for user in map(user_id, allowed or []) if user],
+                      home=user_id(home) or None)
     save(items + [gateway])
     return gateway
 
@@ -523,18 +586,12 @@ def _adopt_telegram_block() -> list[str]:
         block = tomllib.loads(config_file.read_text(encoding="utf-8")).get("telegram") or {}
     except (OSError, tomllib.TOMLDecodeError):
         return []
-    allowed: list[int] = []
-    for value in block.get("allowed_users") or []:
-        try:
-            allowed.append(int(value))
-        except (TypeError, ValueError):
-            continue
+    allowed = [user for user in map(user_id, block.get("allowed_users") or []) if user]
     has_token = bool(os.environ.get("TELEGRAM_BOT_TOKEN") or read_env_file().get("TELEGRAM_BOT_TOKEN"))
     if not allowed and not has_token:
         return []
-    home = block.get("home_channel")
     save([Gateway(name="telegram", kind="telegram", allowed=allowed,
-                  home=int(home) if str(home or "").strip().isdigit() else None)])
+                  home=user_id(block.get("home_channel")) or None)])
     return [f"definitions: [telegram] in {config_file} -> {gateway_file('telegram')}"]
 
 
@@ -602,5 +659,7 @@ def apply(config: Any, gateway: Gateway) -> Any:
         "credential": token(gateway),
         "allowed_users": list(gateway.allowed),
         "home_channel": gateway.home,
+        "groups": list(gateway.groups),
+        "group_mode": gateway.group_mode,
     }
     return config

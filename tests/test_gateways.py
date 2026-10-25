@@ -41,8 +41,8 @@ class TestDefinitions:
         gateways.add("telegram", "telegram", allowed=[42, 43], home=42)
         items = gateways.load()
         assert [item.name for item in items] == ["telegram"]
-        assert items[0].allowed == [42, 43]
-        assert items[0].home == 42
+        assert items[0].allowed == ["42", "43"]
+        assert items[0].home == "42"
         assert items[0].kind == "telegram"
 
     def test_a_duplicate_name_is_refused(self, sandbox):
@@ -66,11 +66,19 @@ class TestDefinitions:
         with pytest.raises(gateways.GatewayError, match="no gateway named"):
             gateways.remove("telegram")
 
-    def test_whatsapp_is_known_but_not_implemented(self, sandbox):
-        item = gateways.add("whatsapp", "whatsapp")
-        assert item.kind == "whatsapp"
-        assert item.implemented is False
-        assert gateways.get("whatsapp").implemented is False
+    def test_a_whatsapp_gateway_keeps_its_groups_and_mode(self, sandbox):
+        gateways.save([gateways.Gateway(name="wa", kind="whatsapp", allowed=["+62 812-2227"],
+                                        groups=["120363@g.us"], group_mode="all")])
+        item = gateways.get("wa")
+        assert item.allowed == ["628122227"]  # a typed number matches what WhatsApp reports
+        assert (item.groups, item.group_mode) == (["120363@g.us"], "all")
+
+    def test_an_unknown_group_mode_falls_back_to_mention(self, sandbox):
+        (sandbox / "gateways").mkdir()
+        (sandbox / "gateways" / "wa").mkdir()
+        (sandbox / "gateways" / "wa" / "gateway.toml").write_text(
+            '[gateway.wa]\ntype = "whatsapp"\nallowed_users = [1]\ngroup_mode = "loud"\n')
+        assert gateways.get("wa").group_mode == "mention"
 
 
 class TestSelection:
@@ -142,8 +150,8 @@ class TestApply:
         gateways.apply(config, gateway)
 
         assert config.get("gateway", "credential") == "tok"
-        assert config.get("gateway", "allowed_users") == [42]
-        assert config.get("gateway", "home_channel") == 42
+        assert config.get("gateway", "allowed_users") == ["42"]
+        assert config.get("gateway", "home_channel") == "42"
         assert config.get("gateway", "name") == "telegram"
         # the platform section keeps only platform behaviour; no credential is copied into it
         assert config.data["telegram"] == {"busy_message": "queue"}
@@ -272,7 +280,7 @@ def test_a_v09_telegram_block_becomes_a_gateway_on_migration(sandbox, monkeypatc
     gateways.migrate()
 
     item = gateways.get("telegram")
-    assert (item.kind, item.allowed, item.home) == ("telegram", [42], 42)
+    assert (item.kind, item.allowed, item.home) == ("telegram", ["42"], "42")
     assert gateways.token(item) == "9:old"
     assert gateways.migrate() == []  # once
 
@@ -290,7 +298,7 @@ def test_a_telegram_block_with_the_token_only_in_the_environment(sandbox, monkey
     gateways.migrate()
 
     item = gateways.get("telegram")
-    assert item.allowed == [5]
+    assert item.allowed == ["5"]
     assert gateways.token(item) == "7:env"
 
 

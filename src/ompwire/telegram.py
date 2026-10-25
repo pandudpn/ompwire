@@ -53,6 +53,7 @@ from .engine import (
 )
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
+from .gateways import user_id
 from .tg_html import card, change, esc, help_sections
 from .tg_login import LoginMixin
 from .tg_pickers import PickerMixin
@@ -137,8 +138,9 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         self._login_before: dict[int, dict[str, tuple[str, str]]] = {}
         self.credential_db = str(config.get("agent", "credential_db", "~/.omp/agent/agent.db"))
         self.token = str(config.get("gateway", "credential", "") or "")
-        self.allowed = {int(str(u)) for u in (config.get("gateway", "allowed_users") or [])
-                        if str(u).strip()}
+        # Telegram names a person by a numeric id; the gateway keeps ids as text for every platform
+        self.allowed = {int(u) for u in map(user_id, config.get("gateway", "allowed_users") or [])
+                        if u}
         self.agents: dict[int, engine.ChatAgent] = {}
         self.queues: dict[int, asyncio.Queue[tuple[str, Any]]] = {}
         self.workers: dict[int, asyncio.Task] = {}

@@ -60,18 +60,14 @@ def _gateway_rows() -> list[tuple[str, str]]:
         return [("gateways", "none (run `ompwire gateway start`)")]
     rows: list[tuple[str, str]] = []
     for item in items:
-        token = gateways.token(item)
-        if not token:
-            identity = "no credential"
+        if not gateways.ready(item):
+            identity = "not linked" if item.kind == "whatsapp" else "no credential"
         else:
             try:
-                from .setup import bot_identity
-
-                username = bot_identity(token)
+                identity = gateways.identity(item) or "credential rejected"
             except Exception:
-                username = ""
-            identity = f"@{username}" if username else "credential rejected"
-        allowed = ", ".join(str(user) for user in item.allowed) or "no users"
+                identity = "credential rejected"
+        allowed = ", ".join(item.allowed) or "no users"
         rows.append((f"gateway {item.name}",
                      f"{item.kind} · {identity} · users {allowed} · {service.state(item.name)}"))
     return rows

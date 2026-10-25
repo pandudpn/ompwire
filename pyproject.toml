@@ -13,6 +13,9 @@ requires-python = ">=3.11"
 dependencies = [
   "python-telegram-bot>=21.0",
   "PyYAML>=6",
+  # WhatsApp: whatsmeow through a prebuilt binding; segno draws the link QR
+  "neonize>=0.5.2",
+  "segno>=1.6",
 ]
 
 [project.optional-dependencies]

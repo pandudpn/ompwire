@@ -31,8 +31,15 @@ def _telegram(gateway: gateways.Gateway) -> Delivery:
     return TelegramDelivery(gateways.token(gateway))
 
 
+def _whatsapp(gateway: gateways.Gateway) -> Delivery:
+    from .wa_outbox import WhatsAppDelivery
+
+    return WhatsAppDelivery(gateway.name)
+
+
 FACTORIES: dict[str, Callable[[gateways.Gateway], Delivery]] = {
     "telegram": _telegram,
+    "whatsapp": _whatsapp,
 }
 
 

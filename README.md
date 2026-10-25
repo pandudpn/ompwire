@@ -65,8 +65,9 @@ it, you confirm, and a systemd timer runs it and reports to the chat.
 
 ## Install
 
-You need Linux with `systemd --user`, Python 3.11+, and a credential for the platform you
-connect (a bot token, for example). The installer brings `omp` if it is missing.
+You need Linux with `systemd --user`, Python 3.11+, and a way in to the platform you connect:
+a bot token for Telegram, a number of its own for WhatsApp. The installer brings `omp` if it is
+missing.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pandudpn/ompwire/main/install.sh | bash
@@ -81,8 +82,8 @@ ompwire doctor           # one line per check
 ```
 
 `gateway start` asks only what it does not know yet. The first time it asks for the platform,
-the credential (checked with the platform before anything is saved) and the allow list, then
-runs the gateway under systemd. Run it again to restart a gateway, replace its credential, or
+the credential (checked with the platform before anything is saved; on WhatsApp, a QR to scan)
+and the allow list, then runs the gateway under systemd. Run it again to restart a gateway, replace its credential, or
 add another profile on the same platform.
 
 Each gateway is one connection with its own credential, allow list and systemd unit, so you
@@ -106,7 +107,8 @@ ompwire runs your agent, with your credentials, on your machine. That shapes it:
 - one allow list per bot; strangers get no reply at all
 - no inbound port: gateways reach out to their platform; one that needs a port has to say so
   in SECURITY.md first
-- the bot token never reaches the agent process, and logs mask it
+- the bot token never reaches the agent process, and logs mask it; a WhatsApp link stays in
+  a `0600` file of its gateway
 - no telemetry: messages go to the platforms you connect and your model provider, nowhere else
 - `~/.omp` stays OMP's; uninstall never touches it
 

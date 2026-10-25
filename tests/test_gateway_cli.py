@@ -40,13 +40,6 @@ def test_list_says_how_to_add_the_first_gateway(sandbox, capsys):
     assert "gateway start" in capsys.readouterr().out
 
 
-def test_types_lists_both_with_their_state(sandbox, capsys):
-    assert cli.main(["gateway", "types"]) == 0
-    out = capsys.readouterr().out
-    assert "telegram" in out and "implemented" in out
-    assert "whatsapp" in out and "not implemented yet" in out
-
-
 def test_list_shows_identity_users_and_state(sandbox, monkeypatch, capsys):
     _identifies(monkeypatch, "vidura_omp_bot")
     gateways.add("telegram", "telegram", allowed=[749994884])
@@ -94,12 +87,6 @@ def test_stop_refuses_a_gateway_that_does_not_exist(sandbox, capsys):
     gateways.add("telegram-2")
     assert cli.main(["gateway", "stop", "nope"]) == 1
     assert "no gateway named" in capsys.readouterr().err
-
-
-def test_a_transport_that_does_not_exist_yet_is_refused(sandbox, capsys):
-    gateways.add("whatsapp", "whatsapp")
-    assert cli.main(["gateway", "start", "whatsapp", "--yes"]) == 1
-    assert "not implemented" in capsys.readouterr().err
 
 
 def test_there_is_no_serve_or_service_command_any_more():
@@ -213,7 +200,7 @@ def test_first_start_asks_platform_credential_and_users_then_starts(sandbox, mon
     assert any("platform" in prompt for prompt in asked)
     assert any("bot token" in prompt for prompt in asked)
     item = gateways.load()[0]
-    assert (item.name, item.kind, item.allowed) == ("telegram", "telegram", [42])
+    assert (item.name, item.kind, item.allowed) == ("telegram", "telegram", ["42"])
     assert "123:abcdef" in _envs(sandbox)
     assert units.calls[-1][:2] == ("start", "telegram")
     assert "credential valid: @first_bot" in capsys.readouterr().out
@@ -254,7 +241,7 @@ def test_scripted_start_needs_no_prompt(sandbox, monkeypatch):
                      "--allowed", "11, 22"]) == 0
 
     assert asked == []
-    assert gateways.load()[0].allowed == [11, 22]
+    assert gateways.load()[0].allowed == ["11", "22"]
 
 
 def test_existing_profiles_are_listed_with_a_masked_credential(sandbox, monkeypatch, capsys):
@@ -300,7 +287,7 @@ def test_replacing_a_credential_stops_the_old_poller_first(sandbox, monkeypatch)
     assert [call[:2] for call in units.calls] == [("stop", "telegram"), ("start", "telegram")]
     assert "111:old" in units.calls[0][2]  # stopped while the old token was still stored
     assert "222:new" in units.calls[1][2]
-    assert gateways.load()[0].allowed == [42]  # the allow list survives
+    assert gateways.load()[0].allowed == ["42"]  # the allow list survives
 
 
 def test_add_a_new_profile_on_a_platform_that_has_one(sandbox, monkeypatch):
@@ -314,7 +301,7 @@ def test_add_a_new_profile_on_a_platform_that_has_one(sandbox, monkeypatch):
 
     names = {item.name: item for item in gateways.load()}
     assert set(names) == {"telegram", "work"}
-    assert names["work"].allowed == [77]
+    assert names["work"].allowed == ["77"]
     env = _envs(sandbox)
     assert "111:first" in env and "222:second" in env  # one credential each
     assert units.calls[-1][:2] == ("start", "work")
@@ -352,9 +339,11 @@ def test_start_rejects_an_invalid_name(sandbox, monkeypatch, capsys):
     assert "FAIL" in capsys.readouterr().err
 
 
-def test_whatsapp_is_refused_before_anything_is_written(sandbox, capsys):
-    assert cli.main(["gateway", "start", "--platform", "whatsapp", "--yes"]) == 1
-    assert "not implemented yet" in capsys.readouterr().err
+def test_an_unattended_whatsapp_start_cannot_link_and_writes_nothing(sandbox, capsys):
+    """Linking needs the phone in hand; --yes alone must fail before any file is written."""
+    assert cli.main(["gateway", "start", "--platform", "whatsapp", "--yes",
+                     "--allowed", "6281234567890"]) == 1
+    assert "needs the phone in hand" in capsys.readouterr().err
     assert gateways.load() == []
 
 

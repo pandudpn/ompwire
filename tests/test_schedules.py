@@ -256,6 +256,6 @@ def test_a_scheduled_result_is_delivered_as_a_card(monkeypatch):
 def test_a_gateway_kind_without_a_delivery_is_refused():
     from ompwire import delivery, gateways
 
-    gateway = gateways.Gateway(name="wa", kind="whatsapp", allowed=[1])
+    gateway = gateways.Gateway(name="x", kind="signal", allowed=[1])
     with pytest.raises(gateways.GatewayError, match="no delivery exists"):
         delivery.for_gateway(gateway)

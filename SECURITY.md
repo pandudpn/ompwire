@@ -21,15 +21,18 @@ patched. `main` is unreleased code.
 
 ompwire exposes a personal agent on your own machine to the chat platforms you connect as
 gateways, and to your own terminal through `ompwire chat`. It is single user on purpose, and the
-boundaries follow from that. Every gateway gets the same rules below; Telegram is the one
-implemented today.
+boundaries follow from that. Every gateway gets the same rules below; Telegram and WhatsApp
+are the ones implemented today.
 
 **Who can talk to the agent**
-- Every update is dropped unless the sender's user id is in the gateway's `allowed_users`.
-  Strangers get no reply, not a refusal.
-- No inbound network. The Telegram gateway uses long polling: no port, no webhook secret,
-  nothing listening. A future gateway that needs a webhook is a change to this model and has
-  to be documented here.
+- Every update is dropped unless the sender's user id is in the gateway's `allowed_users`
+  (a Telegram user id, a WhatsApp phone number). Strangers get no reply, not a refusal.
+- WhatsApp groups: only listed groups are read, only allowed numbers in them are answered, and
+  `group_mode` limits it further (`mention` by default). Being in a group with the bot gives a
+  stranger nothing.
+- No inbound network. The Telegram gateway uses long polling and the WhatsApp gateway an
+  outgoing websocket: no port, no webhook secret, nothing listening. A future gateway that
+  needs a webhook is a change to this model and has to be documented here.
 - `ompwire chat` is reachable only by whoever already has a shell as your user.
 
 **What the agent may do without a person**
@@ -54,6 +57,9 @@ implemented today.
 - The agent process starts without the harness's secrets: `child_env()` removes every bot token
   (`TELEGRAM_BOT_TOKEN`, every `OMPWIRE_GATEWAY_*_TOKEN`) and memory API keys before spawning
   `omp`, schedules included.
+- A WhatsApp gateway has no token. Its credential is the linked-device session in
+  `~/.local/state/ompwire/gateways/<name>/whatsapp.db`, created `0600` before whatsmeow opens it;
+  nothing logs its contents, and the agent process never gets its path.
 - Logs mask token-shaped strings before they are written; `ompwire scrub-logs` cleans older
   files.
 - ompwire holds no provider keys. OMP authenticates itself.
@@ -68,7 +74,8 @@ implemented today.
 
 - A token, chat id or other secret written to a log, unit file, error message or crash trace.
 - An allow-list bypass: any path where an update from a user not in `allowed_users` reaches the
-  agent.
+  agent, including a WhatsApp group that is not listed or a member who is not allowed.
+- A message the bot sends that mentions (tags) someone the agent did not name.
 - An approval bypass: a command the read-only check lets through that can write, delete or
   run code.
 - A `<<file:>>` path that escapes the working directory or the limits.
@@ -98,3 +105,8 @@ ompwire scrub-logs                       # clean any log file the old token reac
 
 If the token reached a git history you push, treat the bot as compromised, not only the token:
 whoever used it could read your conversations and act as you until it was revoked.
+
+For WhatsApp the credential is the session file
+`~/.local/state/ompwire/gateways/<name>/whatsapp.db`: whoever copies it acts as the linked
+device. Remove the device on the phone (Settings > Linked devices), then
+`ompwire gateway start <name> --relink`.

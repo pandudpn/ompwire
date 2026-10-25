@@ -21,6 +21,7 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | --- | --- | --- |
 | Engine (`engine.py`) | the turn itself: ACP session lifecycle, update drain, pacing, permissions, schedules, files. Speaks `Surface`, never a platform | a turn fails: recorded, the next gateway start resumes it |
 | Transport (`telegram.py`, `tg_*.py`) | Telegram routing and buttons: handlers, `TelegramSurface` (posting, cards, approvals), `TelegramDelivery`, pickers, per-chat prefs, the `tg:` key prefix | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
+| Transport (`whatsapp.py`, `wa_*.py`) | WhatsApp: the linked device (neonize), who may talk (allowed numbers, listed groups, group mode), numbered answers in place of buttons, `WhatsAppSurface`, the outbox for scheduled reports, the `wa:` key prefix | WhatsApp ends the link (logged out, new QR asked): the gateway stops and says to relink; a send fails: logged as a WARNING, the turn goes on |
 | `sessions.db` (`store.py`) | chat key to session id, prefs, approval override, turns a restart left unfinished (read per key prefix) | unreadable: a new agent session, the chat key is kept |
 | ACP client (`acp.py`) | stdio framing, request ids, timeouts | the subprocess dies mid-turn: respawn, then `session/load` on the same id |
 | Agent (`omp`) | loop, tools, MCP, compaction, skills, memory, prompt | provider or tool error: reported to the chat as the agent's own text |
@@ -37,6 +38,10 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `telegram.py` | the Telegram transport: polling, routing (steer, queue, held questions), commands, callbacks, banners |
 | `tg_surface.py` | how one Telegram chat shows a turn: `TelegramSurface`, `TelegramDelivery`, the steered/queued/held acks |
 | `tg_pickers.py`, `tg_login.py`, `tg_skills.py` | mixins of the transport: the model/mode/thinking pickers, provider login, `/skills` |
+| `whatsapp.py` | the WhatsApp transport: who may talk (numbers, groups, group mode), routing, numbered answers, commands, banners |
+| `wa_surface.py` | how one WhatsApp chat shows a turn: `WhatsAppSurface`, cards and tool traces in WhatsApp markup, numbered lists |
+| `wa_client.py` | the link: session file, QR or pairing-code linking, the linked number, markdown to WhatsApp markup |
+| `wa_outbox.py` | `WhatsAppDelivery`: a scheduled report written for the running gateway to send |
 | `__main__.py` | the CLI: one function per command, `argparse` wiring |
 | `gateway_cli.py` | `ompwire gateway ...`: start, remove, list, status, logs, and `_run`, the unit's entry point |
 | `setup.py` | the wizard, `.env` writing token normalisation, `bot_identity` verification |
@@ -150,9 +155,13 @@ card with the reason, because a scheduled run that dies silently is worse than o
 Delivery is per gateway kind: `schedule_run` resolves the gateway stored on the schedule, asks
 `delivery.for_gateway` for that kind's `Delivery`, and hands over neutral fields (title, the
 schedule in words, outcome, rows, answer markdown, error, footer, files, skipped files).
-`TelegramDelivery` is the only implementation; it sends straight to the Bot API with the
-gateway's token, so a result still arrives when that gateway's poller is stopped. Only the token
-has to be valid. The destination (the gateway's first allowed user) comes from the schedule
+`TelegramDelivery` sends straight to the Bot API with the gateway's token, so a result still
+arrives when that gateway's poller is stopped. Only the token has to be valid.
+`WhatsAppDelivery` cannot do that: a WhatsApp number is one linked device with one connection,
+and a second process opening the same session would knock the running gateway off. It writes
+the report to `state/gateways/<name>/outbox/` (written aside, then renamed) and the running
+gateway sends it within two seconds. A gateway that is not running fails the schedule with that
+reason, and a report older than six hours is dropped rather than delivered out of context. The destination (the gateway's first allowed user) comes from the schedule
 rather than being chosen at run time: an unattended turn that picks its own destination is a
 mistake nobody is watching for.
 
@@ -341,6 +350,18 @@ deprecation cycle.
 - **One poller per token.** Two processes polling the same bot token make Telegram answer
   `409 Conflict` and drop updates. The per-gateway flock and the unit model both exist because
   of this.
+- **neonize turns every "@digits" into a mention.** A reply that quoted an image caption
+  containing the bot's own LID tagged a stranger whose phone number happened to match it. Plain
+  sends go out as a bare conversation message (no context, no mentions), and a reply clears
+  the mention list neonize derived from the text: agent output is full of ids, ports and emails.
+- **A WhatsApp sender is a LID, not a phone number.** The phone arrives in `SenderAlt`, and the
+  allow list, the direct-chat session key and the reply target all use it, so the same person
+  maps to one session whichever form a message used.
+- **Linking cannot rely on cleanup.** whatsmeow holds the thread in Go while it waits for the
+  scan, so a closed terminal kills the process without unwinding. The link is made in a scratch
+  directory and moved into the gateway's folder only once it is complete.
+- **Importing neonize starts processes.** It probes `ldconfig` and `uname` at import time and
+  never reaps them, so it is imported only where the link is actually used.
 
 ## Gateway lifecycle
 

@@ -123,6 +123,20 @@ def _workdir() -> str:
     return str(Path(cwd).expanduser()) if cwd else str(Path.home())
 
 
+def _connected(gateway: str) -> bool:
+    """A token in its .env, or for WhatsApp a linked device. A gateway that is not defined here
+    (a hand-written unit) is judged by its .env, the only thing the unit itself would read."""
+    from . import gateways
+
+    try:
+        item = {item.name: item for item in gateways.load()}.get(gateway)
+    except gateways.GatewayError:
+        item = None
+    if item is not None and item.kind == "whatsapp":
+        return gateways.ready(item)
+    return _env_file(gateway).is_file()
+
+
 def _credential_works(gateway: str) -> bool:
     """A unit that restarts a rejected token every 5 seconds is worse than no unit."""
     from . import gateways
@@ -171,8 +185,9 @@ def start(gateway: str = "telegram", *, force: bool = False, now: bool = True) -
         return 1
 
     env_file = _env_file(gateway)
-    if not env_file.is_file():
-        print(f"FAIL {env_file} is missing: run `ompwire gateway start` to add a credential")
+    if not _connected(gateway):
+        print(f"FAIL gateway {gateway!r} has no credential or linked device: "
+              f"run `ompwire gateway start {gateway}`")
         return 1
     agent = agent_binary()
     if agent is None:
@@ -192,6 +207,11 @@ def start(gateway: str = "telegram", *, force: bool = False, now: bool = True) -
         return 1
 
     target.parent.mkdir(parents=True, exist_ok=True)
+    if not env_file.is_file():
+        # a WhatsApp gateway has no token; systemd refuses a unit whose EnvironmentFile is
+        # missing, so it gets an empty one it can own and later fill (OMPWIRE_* overrides)
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.touch(mode=0o600)
     target.write_text(render_unit(command_path(), env_file, _workdir(), gateway),
                       encoding="utf-8")
     print(f"ok   unit written: {target}")

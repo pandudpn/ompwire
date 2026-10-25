@@ -49,8 +49,9 @@ seams are already there:
 1. `gateways.KINDS` and `gateways.IMPLEMENTED` in `gateways.py`.
 2. A `Surface` implementation in `engine.py`'s terms: `post`, `trace`/`plan`/`reasoning`/`dropped`/`join`
    renderers, a `typing` context, and the button surfaces (`offer_options`, `ask_permission`,
-   `offer_schedule`, `send_file`, `notice`). `tg_surface.TelegramSurface` is the reference and
-   `cli.TerminalSurface` is the smallest one; a rate limit raises `engine.FloodWait`, any other
+   `offer_schedule`, `send_file`, `notice`). `tg_surface.TelegramSurface` is the reference,
+   `wa_surface.WhatsAppSurface` shows the same choices as numbered lists for a platform without
+   buttons, and `cli.TerminalSurface` is the smallest one; a rate limit raises `engine.FloodWait`, any other
    send failure returns None.
 3. The transport module itself, following `telegram.py`: polling or webhook in, one
    `engine.ChatAgent` per conversation via a `chat_agent(config, chat_id, key, app)` factory,
@@ -58,12 +59,16 @@ seams are already there:
    `pending_options`. It reads its bot from the config's `[gateway]` section (`credential`,
    `allowed_users`, `home_channel`, set by `gateways.apply()`), never from its platform section,
    which holds only platform behaviour.
-4. A key prefix the transport owns (`telegram.KEY_PREFIX = "tg:"`). Session, preference and
+4. A key prefix the transport owns (`telegram.KEY_PREFIX = "tg:"`, `whatsapp.KEY_PREFIX = "wa:"`). Session, preference and
    inflight rows live under it, and resume takes only its own: `store.interrupted(prefix)` and
    `engine.resume_plan(store_path, prefix)` never look at another transport's turns.
 5. A `Delivery` for the kind, registered in `delivery.FACTORIES`, so a scheduled run can send
-   its report while no poller is running. `TelegramDelivery` is the reference.
-6. A credential variable per gateway; `gateways.Gateway.token_var()` derives it.
+   its report while no poller is running. `TelegramDelivery` is the reference; a platform that
+   allows one connection per account hands the report to the running gateway instead
+   (`wa_outbox.WhatsAppDelivery`).
+6. A credential: a variable per gateway (`gateways.Gateway.token_var()` derives it), or, for a
+   platform that links a device, a file in the gateway's state directory. `gateways.ready()` and
+   `gateways.identity()` are where `gateway start`, `list` and `doctor` learn which one it is.
 7. Tests next to the existing ones. No network in tests.
 
 The CLI is a transport like any other: `cli.TerminalSurface` plus a REPL on `engine.ChatAgent`.

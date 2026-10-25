@@ -24,8 +24,8 @@ machine can run several, and stopping one leaves the others running.
 | Platform | Status | Connect it with |
 | --- | --- | --- |
 | Telegram | ready | `ompwire gateway start --platform telegram`: a bot token from [@BotFather](https://t.me/BotFather), checked with `getMe`, then your user id |
+| WhatsApp | ready | `ompwire gateway start --platform whatsapp`: scan a QR with the bot's number (Linked devices), then the phone numbers allowed to talk to it (see [WhatsApp](#whatsapp)) |
 | Terminal | ready | `ompwire chat`: no gateway, no credential (see [Terminal](#terminal)) |
-| WhatsApp | in progress: defined, `gateway start` refuses it | |
 
 `ompwire gateway types` prints the same list for the installed version.
 
@@ -75,14 +75,51 @@ systemd and runs `enable --now`. The token is checked before anything is written
 unit with `Restart=always` on a revoked token looks like a crash loop.
 
 Each live chat owns its own `omp` process, so memory grows with conversations, not with bots.
-Each unit is capped at `MemoryMax=4G`. `gateway start` refuses a platform that is not
-implemented yet, so nothing half-configured is ever written.
+Each unit is capped at `MemoryMax=4G`. Nothing is written for a gateway until its platform
+accepts it (a token Telegram verifies, a WhatsApp device that finished linking).
+
+### WhatsApp
+
+A WhatsApp gateway is a linked device on a number of its own, the way WhatsApp Web is. There is
+no token: `gateway start` shows a QR in the terminal, and you scan it on the bot's phone under
+**Settings > Linked devices > Link a device**. No camera at hand: `--pair-phone <number>` asks
+WhatsApp for an 8-character code to type on that phone instead.
+
+```bash
+ompwire gateway start --platform whatsapp --allowed 6281234567890 \
+  --groups 120363000000000000@g.us --group-mode mention
+```
+
+- **Use a number of its own.** Anyone who messages it reaches the bot's gate, and WhatsApp may
+  restrict a number that runs an unofficial client. The link goes through
+  [neonize](https://github.com/krypton-byte/neonize) (whatsmeow), which speaks WhatsApp Web's
+  protocol; it is not Meta's Cloud API.
+- **Allowed numbers** are phone numbers with the country code, digits only. Only they get an
+  answer, in a direct chat and in a group. Anyone else gets nothing back, not even "not
+  allowed".
+- **Groups** are opt-in: list the group ids (`…@g.us`; `/whoami` in the group shows it). In a
+  listed group the bot answers allowed members only, and `--group-mode` decides when:
+  `mention` (default) answers an @mention of the bot or a reply to one of its messages, `all`
+  answers every message, `read` answers nothing. One agent session serves the whole group, and
+  each prompt says who asked.
+- **No buttons.** A question, an approval or `/model` arrives as a numbered list: reply with the
+  number. A question also takes your own words, or `0` to skip.
+- **Photos and files** work as on Telegram: a photo goes to the agent as an image, a document
+  is saved and its path handed over. Voice notes and stickers are not supported yet.
+- **The session file is the credential.** It lives in
+  `~/.local/state/ompwire/gateways/<name>/whatsapp.db` (mode `0600`); whoever holds it acts as
+  the linked device. `gateway remove --purge` deletes it; also remove the device on the phone.
+- **Relink** with `gateway start <name> --relink`, for example after the phone logged the
+  device out. The gateway stops itself when WhatsApp ends the link.
+- **Schedules** reporting to a WhatsApp gateway are sent by that gateway while it runs: one
+  number holds one connection, so the timer leaves the report in the gateway's outbox. A
+  schedule whose gateway is down fails with that reason.
 
 ## In a chat app
 
-The commands and behaviour below are the Telegram gateway's. A future chat platform would
-follow the same rules; the terminal has its own smaller set, described under
-[Terminal](#terminal).
+The commands and behaviour below are the same on Telegram and WhatsApp, except that WhatsApp
+answers a choice with a typed number instead of a button, and has no `/skills` or `/login`.
+The terminal has its own smaller set, described under [Terminal](#terminal).
 
 | Command | What it does |
 | --- | --- |
@@ -292,5 +329,7 @@ reports without a handshake.
 | The bot never answers, no error | your user id is not on the allow list (`gateway list` shows it) |
 | `gateway start` says the credential is rejected | Telegram: revoked in @BotFather; run `gateway start` again and give the new one |
 | `409 Conflict` in the journal | Telegram: a second process polls the same token |
+| WhatsApp bot silent for one person | their number is not on the allow list, or (in a group) the group is not listed or the mode is `mention` and nobody mentioned the bot; the journal says which (`message dropped … sender not allowed`) |
+| `whatsapp asked for a new QR` in the journal | the phone logged the device out; `gateway start <name> --relink` |
 | `start` says systemd --user is unavailable | no user manager (container, CI) |
 | An answer stops mid-turn | `journalctl --user -u ompwire-<name> -f` |

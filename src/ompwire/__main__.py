@@ -273,22 +273,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from .setup import bot_identity
 
     for item in items:
-        token = gateways.token(item)
-        if not token:
+        if item.kind == "whatsapp":
+            number = gateways.identity(item)
+            if number:
+                print(f"ok   gateway {item.name}: whatsapp {number}")
+            else:
+                print(f"FAIL gateway {item.name}: no linked WhatsApp device "
+                      f"(`ompwire gateway start {item.name}`)")
+        elif not gateways.token(item):
             print(f"FAIL gateway {item.name}: no credential "
                   f"(`ompwire gateway start {item.name}` or set {item.token_var()})")
-        elif item.kind == "telegram":
-            username = bot_identity(token)
+        else:
+            username = bot_identity(gateways.token(item))
             if username:
                 print(f"ok   gateway {item.name}: @{username}")
             else:
                 print(f"--   gateway {item.name}: Telegram rejected the credential "
                       f"(revoked or rotating; `ompwire gateway start {item.name}`)")
-        else:
-            print(f"ok   gateway {item.name}: credential set")
         if item.allowed:
-            print(f"ok   allowed users for {item.name}: "
-                  f"{', '.join(str(user) for user in item.allowed)}")
+            print(f"ok   allowed users for {item.name}: {', '.join(item.allowed)}")
         else:
             print(f"--   allowed users for {item.name}: none (nobody can talk to this bot)")
 
@@ -514,6 +517,7 @@ def build_parser() -> argparse.ArgumentParser:
               "  ompwire gateway start\n"
               "  ompwire gateway start --platform telegram --name work\n"
               "  ompwire gateway start work --token-stdin < token.txt --yes\n"
+              "  ompwire gateway start --platform whatsapp --allowed 6281234567890\n"
               "  ompwire gateway remove\n"
               "  ompwire gateway remove work --yes --purge\n"
               "  ompwire gateway list")
@@ -525,7 +529,19 @@ def build_parser() -> argparse.ArgumentParser:
     gw.add_argument("--name", dest="name_flag", default="", metavar="NAME",
                     help="start: gateway name (same as the positional name)")
     gw.add_argument("--platform", default="", help="start: which platform (gateway types lists them)")
-    gw.add_argument("--allowed", default="", help="start: comma separated user ids")
+    gw.add_argument("--allowed", default="",
+                    help="start: who may talk to it, comma separated (Telegram user ids, "
+                         "WhatsApp phone numbers)")
+    gw.add_argument("--groups", default=None,
+                    help="start, whatsapp: comma separated group ids it listens in")
+    gw.add_argument("--group-mode", default="", choices=["", "mention", "all", "read"],
+                    help="start, whatsapp: in a group, answer an @mention or reply (mention), "
+                         "every message (all), or nothing (read)")
+    gw.add_argument("--relink", action="store_true",
+                    help="start, whatsapp: link a new device even when one is linked")
+    gw.add_argument("--pair-phone", default="",
+                    help="start, whatsapp: link with a pairing code sent to this number "
+                         "instead of a QR")
     gw.add_argument("--token", default="", help="start: the credential itself (prefer --token-stdin)")
     gw.add_argument("--token-stdin", action="store_true",
                     help="start: read the credential from stdin")
