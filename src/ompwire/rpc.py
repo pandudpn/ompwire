@@ -9,12 +9,13 @@ an event frame. Facts this module relies on, measured against omp 18.12.6:
     steer                       queued into the running turn; `queue_update` shows it, then empties
     abort                       ends the run; its prompt_result says status "aborted"
     extension_ui_request        approvals arrive as `select`; `ask` carries the ask tool's questions
-    --resume <sessionId>        reopens a transcript written by an earlier process (ACP's included)
+    --resume <sessionId>        reopens a transcript written by an earlier process
     get_state                   sessionId, sessionFile, contextUsage, todoPhases, model, thinking
 
-The engine was written against ACP updates and its rendering is tested in that shape, so this
-client translates RPC events into the same `Update` kinds (agent_message_chunk, tool_call, plan,
-usage_update, config_option_update). Everything protocol-specific stays in this file.
+The engine renders `Update` kinds (agent_message_chunk, tool_call, plan, config_option_update)
+that predate this transport, so the client translates RPC events into them. The context window is
+not an event here: the engine reads it from get_state. Everything protocol-specific stays in this
+file.
 
 A plain `--mode rpc-ui` reads the agent's own `mcp.json`, so MCP servers are omp's business here:
 the lazy hub starts what a turn calls instead of every server per chat.
@@ -220,6 +221,8 @@ class AgentClient:
                 # a person may take minutes to answer; never block the reader on it
                 threading.Thread(target=self._answer_dialog, args=(frame,),
                                  name="rpc-dialog", daemon=True).start()
+            # presentation frames (setWidget, setStatus, notify, open_url) need no answer and
+            # are ignored, not cancelled
             return
         if kind == "prompt_result":
             turn = self._turn

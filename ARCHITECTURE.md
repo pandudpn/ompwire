@@ -5,10 +5,10 @@ ompwire is the transport between a chat platform and an OMP agent. Everything th
 back*, and where the seams are.
 
 ```
-+--------+        +---------+        +------------------+        +----------------------+
-| chat   | <----> | ompwire | <----> | omp --mode rpc-ui| <----> | tools, skills, MCP   |
-| surface|        |         | stdio  | loop, memory     |        | providers, files     |
-+--------+        +---------+        +------------------+        +----------------------+
++--------+        +---------+        +-------------------+        +----------------------+
+| chat   | <----> | ompwire | <----> | omp --mode rpc-ui | <----> | tools, skills, MCP   |
+| surface|        |         | stdio  | loop, memory      |        | providers, files     |
++--------+        +---------+        +-------------------+        +----------------------+
                        |
                   sessions.db
 ```

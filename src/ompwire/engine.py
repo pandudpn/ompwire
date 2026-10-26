@@ -718,8 +718,8 @@ class ChatAgent:
         self.info: dict[str, Any] = {}
         self.agent_version = ""
         self.advertised_commands: list[str] = []
-        # context window from usage_update; the size is remembered per chat, because after a
-        # restart /usage is asked before omp has sent its first report
+        # context window from get_state; the size is remembered per chat, because after a
+        # restart /usage is asked before omp has been asked
         self.context = {"used": 0, "size": int(self.store.prefs(key).get("context_size") or 0)}
         # compactions already in the transcript; a higher count after a turn is a new one
         self._compactions_seen: int | None = None
@@ -813,7 +813,7 @@ class ChatAgent:
         await self._apply_preferences()
 
     def _seed_context(self) -> None:
-        """The first usage_update after a restart can be an unanchored sliver; the transcript
+        """The first context read after a restart can be an unanchored sliver; the transcript
         knows what the last real call carried, so that is the reference to hold it against."""
         seen = self._transcript()
         if seen is None:
@@ -1213,7 +1213,7 @@ class ChatAgent:
 
     def _on_usage(self, used: int, size: int) -> None:
         """Runs on the loop thread. Tracks the context window, the warning crossing and
-        compaction drops; usage_update never enters the turn queue."""
+        compaction drops; a context read never enters the turn queue."""
         good = self._context_good
         if good and not self._compact_turn and not plausible_context(used, good):
             # omp anchors the number on the last assistant message; a turn resumed after a
@@ -2117,7 +2117,7 @@ class ChatAgent:
 
     async def new_session(self) -> str:
         self.forget_turn()
-        # the old context numbers belong to the old session; the next usage_update re-reads them
+        # the old context numbers belong to the old session; the next get_state re-reads them
         self._compactions_seen = None
         self._last_plan = []
         self._context_good = None

@@ -322,7 +322,8 @@ behind.
 
 Precedence: defaults, then `config.toml`, then the gateway's own settings, then toggles set from
 its chat, then environment variables. Sections: `[acp]` (the agent command, run as
-`omp --mode rpc`; an old `--mode acp` is read as rpc), `[agent]`, `[session]`, `[stream]`,
+`omp --mode rpc-ui`; an old `--mode acp` or `--mode rpc` is read as rpc-ui), `[agent]`,
+`[session]`, `[stream]`,
 `[approval]`, `[files]`, `[logging]`,
 and one per platform (`[telegram]`). `ompwire config` prints the merged result with secrets masked.
 `OMPWIRE_CONFIG_DIR` points everything at another directory.

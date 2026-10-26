@@ -139,8 +139,9 @@ class GatewayError(RuntimeError):
     """A gateway definition that cannot be used, with the reason in the message."""
 
 
-# The config sections a gateway may set for itself. Everything else (acp, mcp, logging) is the
-# machine's, shared by every gateway; the agent binary and ~/.omp are always shared.
+# The config sections a gateway may set for itself. Everything else ([acp], the agent command,
+# and logging) is the machine's, shared by every gateway; the agent binary and ~/.omp, MCP
+# servers included, are always shared.
 OWN_SECTIONS = ("agent", "stream", "approval", "files", "session")
 
 

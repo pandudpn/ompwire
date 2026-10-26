@@ -393,7 +393,7 @@ def _sub(sub, name: str, help_text: str, description: str, examples: str):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ompwire",
-        description="Chat harness driving an OMP agent over ACP",
+        description="Chat harness driving an OMP agent over its RPC mode",
         epilog=TOP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
