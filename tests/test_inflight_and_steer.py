@@ -294,3 +294,16 @@ def test_deny_takes_the_next_message_as_feedback_and_stays_in_plan_mode(tmp_path
     assert "also add a license" in revised and "Revise the plan" in revised
     assert agent.mode == "plan"
     assert agent.plan_review == "pending"  # the revised plan is up for review again
+
+
+def test_a_restart_in_plan_mode_starts_the_agent_read_only(tmp_path):
+    """After a restart the options are empty until omp answers; the stored mode must decide."""
+    config = _config(tmp_path)
+
+    async def build():
+        agent = _agent(config, Client())
+        agent.store.set_pref(agent.key, "mode", "plan")
+        agent.options = {}
+        return agent._build_client().args
+
+    assert "--approval-mode=always-ask" in asyncio.run(build())

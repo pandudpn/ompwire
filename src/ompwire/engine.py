@@ -1421,5 +1421,10 @@ class ChatAgent:
 
     @property
     def mode(self) -> str:
-        return str((self.options.get("mode") or {}).get("currentValue") or "default")
+        """ompwire's own mode; before omp first answers (a restart), the chat's stored choice."""
+        current = (self.options.get("mode") or {}).get("currentValue")
+        if current:
+            return str(current)
+        store = getattr(self, "store", None)
+        return str((store.prefs(self.key).get("mode") if store is not None else "") or "default")
 
