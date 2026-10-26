@@ -62,7 +62,8 @@ ompwire gateway start work --platform telegram --token-stdin --allowed 42 --yes 
 | --- | --- |
 | `ompwire gateway` | this command's help |
 | `ompwire gateway list` | name, platform, bot identity, allow list, unit state |
-| `ompwire gateway start [NAME]` | add or update a gateway, then run it (see above) |
+| `ompwire gateway start [NAME]` | add a gateway or replace its credential, then run it (see above) |
+| `ompwire gateway update [NAME]` | change its groups, group mode and own settings (see [Changing a gateway](#changing-a-gateway)) |
 | `ompwire gateway stop NAME` | stop and disable it, so it stays down after a reboot |
 | `ompwire gateway restart NAME` | rewrite the unit, then restart it |
 | `ompwire gateway status [NAME]` | unit path, state, log command |
@@ -97,8 +98,9 @@ ompwire gateway start --platform whatsapp --allowed 6281234567890 \
 - **Allowed numbers** are phone numbers with the country code, digits only. Only they get an
   answer, in a direct chat and in a group. Anyone else gets nothing back, not even "not
   allowed".
-- **Groups** are opt-in: list the group ids (`…@g.us`), which `gateway start` offers to pick
-  from. The modes are the same as on Telegram, see [Groups and channels](#groups-and-channels).
+- **Groups** are opt-in. The running gateway records every group its number is in, and
+  `gateway update` lists them by name to switch on. The modes are the same as on Telegram,
+  see [Groups and channels](#groups-and-channels).
 - **No buttons.** A question, an approval or `/model` arrives as a numbered list: reply with the
   number. A question also takes your own words, or `0` to skip.
 - **Photos and files** work as on Telegram: a photo goes to the agent as an image, a document
@@ -119,8 +121,9 @@ chats, and people not on the allow list, get no reply at all; the journal says w
 (`update dropped … group not listed`).
 
 ```bash
-# Telegram: group and channel ids are negative; id:mode gives one chat its own mode
-ompwire gateway start work --groups -1001234567890,-1009876543210:all --group-mode mention
+ompwire gateway update work     # pick groups by name, then a mode for each
+# or by flag: Telegram ids are negative; id:mode gives one chat its own mode
+ompwire gateway update work --groups -1001234567890,-1009876543210:all --group-mode mention
 ```
 
 | Mode | In a group | In a channel |
@@ -129,9 +132,11 @@ ompwire gateway start work --groups -1001234567890,-1009876543210:all --group-mo
 | `all` | every message from an allowed member | every post |
 | `read` | nothing | nothing |
 
-- **Finding the id.** Add the bot to the group or channel while the gateway runs: it sends
-  the chat's id to you in a private message (or to `home_channel`). Telegram has no call that
-  lists a bot's chats. In a listed chat `/whoami@the_bot` shows the id and mode.
+- **No id hunting.** Add the bot to the group or channel while the gateway runs. It records
+  the chat with its title, and `gateway update` offers it by name; on Telegram it also tells
+  you in a private message (or in `home_channel`). Telegram has no call that lists a bot's
+  chats, so a chat the bot was added to before this version is recorded on its first message.
+  In a listed chat `/whoami@the_bot` shows the id and mode.
 - **Telegram privacy mode.** By default a bot in a group sees only replies to it and
   `/command@the_bot`. For a plain @mention, or for `all`, make the bot an admin, or run
   `/setprivacy` in @BotFather, pick the bot, choose Disable, then remove and re-add it.
@@ -295,10 +300,11 @@ servers and memory in `~/.omp`. What it does not share:
 - **Sessions.** Each gateway has its own session store, so the same person talking to two bots
   has two separate conversations, and `/new` in one leaves the other alone.
 - **Chat toggles.** `/approve` and `/reasoning` persist to that gateway's own overrides.
+  `/model`, `/thinking`, `/reasoning` and `/verbose` in one chat stay with that chat.
 - **The log.** Each gateway writes its own.
 - **Settings, if you want.** A gateway can set its own `[agent]`, `[stream]`, `[approval]`,
   `[files]` or `[session]` values over `config.toml`. `gateway start` asks when it creates a
-  profile, or pass `--model`, `--cwd` and `--approval`. By hand:
+  profile, `gateway update` changes them later (see below). By hand:
 
 ```toml
 # ~/.config/ompwire/gateways/work/gateway.toml
@@ -309,6 +315,37 @@ allowed_users = [42]
 [gateway.work.agent]
 model = "anthropic/claude-sonnet"
 cwd = "~/work"
+```
+
+### Changing a gateway
+
+`ompwire gateway update [NAME]` changes a gateway that exists, the same way on every
+platform. Without flags it is a menu: pick a line, change it, repeat, then save. Each line
+shows the value in force and whether it is the gateway's own or comes from `config.toml`.
+
+| Setting | Flag | Values |
+| --- | --- | --- |
+| groups and channels | `--groups` | picked by name in the menu; ids by flag, `id:mode` for its own mode |
+| group mode | `--group-mode` | `mention`, `all`, `read` |
+| model | `--model` | `provider/id`; the menu lists what the agent offers |
+| working directory | `--cwd` | an existing directory |
+| approval mode | `--approval` | `write`, `yolo` |
+| thinking level | `--thinking` | `off`, `auto`, `minimal`, `low`, `medium`, `high`, `xhigh` (the menu asks the agent) |
+| reasoning in direct chats | `--reasoning` | `on`, `off` |
+| activity in direct chats | `--verbose` | `on`, `off`: tool trace, todo list, notices |
+
+`inherit` as a value drops the gateway's own setting, so `config.toml` decides again.
+Reasoning and activity apply to direct chats; a group or channel stays quiet unless someone
+there runs `/reasoning` or `/verbose`.
+
+A chat's own `/model`, `/thinking`, `/reasoning` or `/verbose` beats the gateway's setting.
+So when `update` changes one of those, it clears that choice in direct chats, and the new
+value reaches them. A group keeps its own. A running gateway restarts once at the end to pick
+the change up; `--no-start` saves without restarting.
+
+```bash
+ompwire gateway update work --thinking high --reasoning on --verbose off
+ompwire gateway update work --model inherit
 ```
 
 Scheduled turns run with the settings of the gateway they report to.

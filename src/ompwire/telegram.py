@@ -63,6 +63,7 @@ from .engine import (
 )
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
+from .gateways import remember_chat
 from .tg_html import card, change, esc, help_sections
 from .tg_login import LoginMixin
 from .tg_pickers import PickerMixin
@@ -149,6 +150,8 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         self.token = str(config.get("gateway", "credential", "") or "")
         # Telegram names a person by a numeric id; the gateway keeps ids as text for every platform
         self.audience = Audience.from_config(config)
+        # (chat, title, kind) already written to seen_chats.json by this process
+        self._noted: set[tuple[str, str, str]] = set()
         self.allowed = {int(user) for user in self.audience.allowed}
         self.username = ""   # the bot's own @name, set at startup; a group mention is checked against it
         self.bot_id = 0
@@ -260,6 +263,22 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         log.info("update dropped chat=%s user=%s: %s",
                  update.effective_chat.id if update.effective_chat else "?",
                  user.id if user else "-", self._refusal(update) or "not allowed")
+
+    def _note_chat(self, chat: Any) -> None:
+        """Remember a group or channel by id and title, for `gateway update` to offer later.
+        Telegram has no call that lists a bot's chats, so the bot keeps its own list."""
+        if chat is None or chat.type == Chat.PRIVATE:
+            return
+        kind = "channel" if chat.type == Chat.CHANNEL else "group"
+        entry = (str(chat.id), str(chat.title or ""), kind)
+        if entry in self._noted:
+            return
+        self._noted.add(entry)
+        try:
+            remember_chat(str(self.config.get("gateway", "name", "telegram") or "telegram"),
+                          *entry)
+        except OSError as exc:
+            log.warning("could not record chat %s: %s", chat.id, exc)
 
     # ----------------------------------------------------------------- queue
     def enqueue(self, chat_id: int, kind: str, payload: Any) -> int:
@@ -964,6 +983,8 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         chat = change.chat
         joined = change.new_chat_member.status in {"member", "administrator"}
         listed = str(chat.id) in self.audience.chats
+        if joined:
+            self._note_chat(chat)
         log.info("bot %s %s %s %r (listed: %s)", "added to" if joined else "removed from",
                  chat.type, chat.id, chat.title, listed)
         home = self._home_chat()
@@ -971,8 +992,8 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             return
         mode = self.audience.mode(str(chat.id))
         note = (f"listed · mode {mode}" if listed else
-                f"not listed, so it is ignored · add it: ompwire gateway start "
-                f"{self.config.get('gateway', 'name', 'telegram')} --groups {chat.id}")
+                f"not listed, so it is ignored · add it: ompwire gateway update "
+                f"{self.config.get('gateway', 'name', 'telegram')} (it is offered by name)")
         await self.announce(home, card(f"➕ added to a {chat.type}", chat.title or "",
                                        [("id", chat.id)], note))
 
@@ -1151,6 +1172,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
 
     async def log_update(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
+        self._note_chat(update.effective_chat)
         message = update.effective_message
         body = (message.text if message and message.text else "")
         log.info("update chat=%s user=%s authorized=%s text=%r",

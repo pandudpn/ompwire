@@ -39,7 +39,7 @@ from .config import Config, approval_policy, save_override
 from .engine import RESUME_PROMPT, mcp_label, resolve_mcp_servers
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
-from .gateways import user_id
+from .gateways import remember_chat, user_id
 from .telegram import COMMANDS, FORWARD_HINT, configure_logging
 from .wa_client import (
     GROUP_SERVER,
@@ -110,6 +110,8 @@ class Transport:
         self.started_at = time.time()
         self.name = str(config.get("gateway", "name", "whatsapp") or "whatsapp")
         self.audience = Audience.from_config(config)
+        # (chat, title) already written to seen_chats.json by this process
+        self._noted: set[tuple[str, str]] = set()
         self.allowed = self.audience.allowed
         self.home = user_id(config.get("gateway", "home_channel")) or next(iter(sorted(self.allowed)), "")
         self.session = session_path(self.name)
@@ -321,6 +323,8 @@ class Transport:
         message = event.Message
         chat = self._chat(source)
         sender = self._sender(source)
+        if source.IsGroup:
+            self._note_group(chat)
         reason = self.audience.admit(chat=chat, kind=GROUP if source.IsGroup else PRIVATE,
                                      sender=sender, addressed=bool(source.IsGroup)
                                      and self.addressed(message))
@@ -850,6 +854,25 @@ class Transport:
                  device.JID.User, sorted(self.allowed), sorted(self.audience.chats) or "none",
                  self.audience.default_mode)
         self._connected.set()
+        try:
+            groups = await client.get_joined_groups()
+        except Exception as exc:
+            log.warning("could not list joined groups: %s", exc)
+            return
+        for group in groups:
+            self._note_group(f"{group.JID.User}@{GROUP_SERVER}",
+                             group.GroupName.Name or group.JID.User)
+
+    def _note_group(self, chat: str, title: str = "") -> None:
+        """Remember a group by id and name, for `gateway update` to offer later. Reading the
+        list from the CLI needs the device connection, which the running gateway holds."""
+        if (chat, title) in self._noted:
+            return
+        self._noted.add((chat, title))
+        try:
+            remember_chat(self.name, chat, title, "group")
+        except OSError as exc:
+            log.warning("could not record group %s: %s", chat, exc)
 
     async def on_logged_out(self, _client: Any, _event: Any) -> None:
         log.error("whatsapp logged this device out; relink with `ompwire gateway start %s --relink`",

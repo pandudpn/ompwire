@@ -86,6 +86,10 @@ the credential (checked with the platform before anything is saved; on WhatsApp,
 and the allow list, then runs the gateway under systemd. Run it again to restart a gateway, replace its credential, or
 add another profile on the same platform.
 
+`gateway update` changes one later, on any platform: the groups it listens in (picked by name
+from the chats it has seen), the mode it answers in there, its model, working directory,
+approval mode, thinking level, and whether direct chats show reasoning and activity.
+
 Each gateway is one connection with its own credential, allow list and systemd unit, so you
 can run several side by side. Only users on a gateway's allow list get an answer; everyone
 else gets silence. The [guide](docs/guide.md#gateways) has the per-platform steps.

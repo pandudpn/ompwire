@@ -498,15 +498,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="add: write the schedule without installing the timer")
     sc.set_defaults(func=cmd_schedule)
 
-    gw = _sub(sub, "gateway", "start, remove, list and control gateway bots",
+    gw = _sub(sub, "gateway", "start, update, remove, list and control gateway bots",
               "A gateway is one bot on one platform: its own credential, its own allow list, "
               "its own systemd unit and its own folders. `start` does everything: pick a "
               "platform, pick or add a profile, check the credential with the platform, write "
               "the unit, start it. Run it again to restart, or to replace a credential. "
+              "`update` changes an existing gateway on any platform: its groups (picked by "
+              "name from the chats it has seen), the mode it answers in there, and its own "
+              "settings over config.toml. A flag set to `inherit` falls back to config.toml. "
               "`remove` asks which gateway and how far: keep its sessions and log, or delete "
               "everything.\n\n"
               "actions:\n"
-              "  start [NAME]    add or update a gateway, then run it\n"
+              "  start [NAME]    add a gateway or replace its credential, then run it\n"
+              "  update [NAME]   change groups, group mode and its own settings; a menu, or flags\n"
               "  remove [NAME]   remove a gateway; asks which, and confirms by name\n"
               "  list            gateways, bot identity, allow list, unit state\n"
               "  status [NAME]   unit path, state and where its logs are\n"
@@ -518,13 +522,17 @@ def build_parser() -> argparse.ArgumentParser:
               "  ompwire gateway start --platform telegram --name work\n"
               "  ompwire gateway start work --token-stdin < token.txt --yes\n"
               "  ompwire gateway start --platform whatsapp --allowed 6281234567890\n"
+              "  ompwire gateway update work\n"
+              "  ompwire gateway update work --thinking high --reasoning on --verbose off\n"
+              "  ompwire gateway update work --groups -1001234,-1005678:all --group-mode mention\n"
+              "  ompwire gateway update work --model inherit\n"
               "  ompwire gateway remove\n"
               "  ompwire gateway remove work --yes --purge\n"
               "  ompwire gateway list")
     gw.add_argument("gateway_action", nargs="?", default=None, metavar="action",
-                    choices=["list", "remove", "rm", "start", "stop", "restart",
+                    choices=["list", "remove", "rm", "start", "update", "stop", "restart",
                              "status", "logs", "types", "_run"],
-                    help="start, remove, list, status, stop, restart, logs, types")
+                    help="start, update, remove, list, status, stop, restart, logs, types")
     gw.add_argument("name", nargs="?", default="", help="gateway name")
     gw.add_argument("--name", dest="name_flag", default="", metavar="NAME",
                     help="start: gateway name (same as the positional name)")
@@ -533,11 +541,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="start: who may talk to it, comma separated (Telegram user ids, "
                          "WhatsApp phone numbers)")
     gw.add_argument("--groups", default=None,
-                    help="start: groups and Telegram channels it listens in, comma separated; "
-                         "id:mode gives one its own mode (\"\" lists none)")
+                    help="start, update: groups and Telegram channels it listens in, comma "
+                         "separated; id:mode gives one its own mode (\"\" lists none)")
     gw.add_argument("--group-mode", default="", choices=["", "mention", "all", "read"],
-                    help="start: in those chats, answer an @mention or reply (mention), "
-                         "every message (all), or nothing (read)")
+                    help="start, update: in those chats, answer an @mention or reply "
+                         "(mention), every message (all), or nothing (read)")
     gw.add_argument("--relink", action="store_true",
                     help="start, whatsapp: link a new device even when one is linked")
     gw.add_argument("--pair-phone", default="",
@@ -546,14 +554,25 @@ def build_parser() -> argparse.ArgumentParser:
     gw.add_argument("--token", default="", help="start: the credential itself (prefer --token-stdin)")
     gw.add_argument("--token-stdin", action="store_true",
                     help="start: read the credential from stdin")
-    gw.add_argument("--model", default="", help="start: this gateway's own model")
-    gw.add_argument("--cwd", default="", help="start: this gateway's own working directory")
-    gw.add_argument("--approval", default="", choices=["", "write", "yolo"],
-                    help="start: this gateway's own approval mode")
+    gw.add_argument("--model", default="",
+                    help="start, update: this gateway's own model (provider/id, or inherit)")
+    gw.add_argument("--cwd", default="",
+                    help="start, update: this gateway's own working directory (or inherit)")
+    gw.add_argument("--approval", default="", choices=["", "write", "yolo", "inherit"],
+                    help="start, update: this gateway's own approval mode")
+    gw.add_argument("--thinking", default="",
+                    choices=["", "off", "auto", "minimal", "low", "medium", "high", "xhigh",
+                             "inherit"],
+                    help="update: this gateway's thinking level")
+    gw.add_argument("--reasoning", default="", choices=["", "on", "off", "inherit"],
+                    help="update: show the agent's thinking in direct chats")
+    gw.add_argument("--verbose", default="", choices=["", "on", "off", "inherit"],
+                    help="update: show activity (trace, todo list, notices) in direct chats")
     gw.add_argument("--purge", action="store_true",
                     help="remove --yes: also delete the gateway's sessions and log")
     gw.add_argument("--no-start", action="store_true",
-                    help="start: save the gateway and credential, do not start it")
+                    help="start: save the gateway and credential, do not start it; update: "
+                         "save, do not restart it")
     gw.add_argument("--force", action="store_true",
                     help="start: write the unit even when a check fails; remove: even when a "
                          "schedule reports to it")
@@ -588,8 +607,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _join_negative_ids(argv: list[str]) -> list[str]:
+    """`--groups -1001,-1002:all` → `--groups=-1001,-1002:all`. A Telegram group id is negative,
+    and argparse takes a value starting with "-" for a flag unless it is one plain number."""
+    out: list[str] = []
+    index = 0
+    while index < len(argv):
+        if argv[index] == "--groups" and index + 1 < len(argv) and argv[index + 1].startswith("-") \
+                and argv[index + 1][1:2].isdigit():
+            out.append(f"--groups={argv[index + 1]}")
+            index += 2
+            continue
+        out.append(argv[index])
+        index += 1
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
+    argv = _join_negative_ids(list(sys.argv[1:] if argv is None else argv))
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):

@@ -322,6 +322,47 @@ def state_dir(name: str) -> Path:
 
 
 LOG_NAME = "ompwire.log"
+SEEN_NAME = "seen_chats.json"
+
+
+def remember_chat(name: str, chat: str, title: str = "", kind: str = "group") -> bool:
+    """Note a group or channel this gateway was added to or heard from, so `gateway update`
+    can offer it by name instead of asking for an id nobody has at hand. True when it is new
+    or its title changed. Written by the running transport, read by the CLI."""
+    import json
+
+    chat = chat_id(chat)
+    if not chat:
+        return False
+    path = state_dir(name) / SEEN_NAME
+    seen = seen_chats(name)
+    known = seen.get(chat) or {}
+    # a message carries no title on WhatsApp; it must not erase the one the group list gave
+    entry = {"title": str(title or "") or known.get("title", ""), "kind": kind}
+    if known == entry:
+        return False
+    seen[chat] = entry
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(seen, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return True
+
+
+def seen_chats(name: str) -> dict[str, dict[str, str]]:
+    """{chat id: {"title", "kind"}} for every group or channel this gateway has seen."""
+    import json
+
+    try:
+        data = json.loads((state_dir(name) / SEEN_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {chat_id(key): {"title": str(value.get("title") or ""), "kind": str(value.get("kind") or "group")}
+            for key, value in data.items() if isinstance(value, dict) and chat_id(key)}
+
+
 
 
 def stores(config: Any = None) -> list[tuple[str, Path]]:

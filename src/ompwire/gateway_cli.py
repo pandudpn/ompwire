@@ -1,9 +1,9 @@
-"""`ompwire gateway ...`: start, remove, list and control the bots.
+"""`ompwire gateway ...`: start, update, remove, list and control the bots.
 
 `start` asks only what it does not know (platform, profile, credential, allow list, own
-settings) and is safe to run again; `remove` asks which gateway and how far. `_run` is what a
-gateway's systemd unit executes. The platform details come from `gateways.platform()`, so
-nothing here is specific to Telegram.
+settings) and is safe to run again; `update` changes an existing gateway (gateway_update.py);
+`remove` asks which gateway and how far. `_run` is what a gateway's systemd unit executes. The
+platform details come from `gateways.platform()`, so nothing here is specific to Telegram.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import shutil
 import sys
 
 from .config import load_config
+from .gateway_update import parse_groups
 
 
 def _run_gateway(config_path: str | None, name: str, force: bool) -> int:
@@ -136,6 +137,18 @@ def cmd_gateway(args: argparse.Namespace) -> int:
 
     if action == "start":
         return _gateway_start(args, gateways, service)
+    if action == "update":
+        from . import gateway_update
+
+        try:
+            return gateway_update.run(args, gateways, service)
+        except EOFError:
+            print("\nFAIL input ended before the change was saved; nothing was written. "
+                  "Without a terminal, pass the name and flags.", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("\n--   cancelled; nothing was written")
+            return 130
     if action == "status":
         return _gateway_status(args, gateways, service)
     if action == "logs":
@@ -530,7 +543,7 @@ def _start_groups(args: argparse.Namespace, gateway, is_new: bool
     given = getattr(args, "groups", None)
     mode = (getattr(args, "group_mode", "") or gateway.group_mode or "mention").lower()
     if given is not None:
-        groups, modes = _parse_groups(given, gateway.kind)
+        groups, modes = parse_groups(given, gateway.kind)
     elif not args.yes and (is_new or not groups) and sys.stdin.isatty():
         if gateway.kind == "whatsapp":
             from . import service
@@ -556,33 +569,11 @@ def _start_groups(args: argparse.Namespace, gateway, is_new: bool
     return groups, mode, {chat: value for chat, value in modes.items() if chat in groups}
 
 
-def _parse_groups(given: str, kind: str) -> tuple[list[str], dict[str, str]]:
-    """`-1001,-1002:all` or `1203...@g.us:read`: the chats, and the ones with a mode of their own."""
-    from .gateways import GROUP_MODES, chat_id
-
-    groups: list[str] = []
-    modes: dict[str, str] = {}
-    for part in (piece.strip() for piece in given.split(",")):
-        if not part:
-            continue
-        head, _, tail = part.rpartition(":")
-        chat, own = (head, tail) if head and tail.lower() in GROUP_MODES else (part, "")
-        if kind == "whatsapp" and "@" not in chat:
-            chat = f"{chat}@g.us"
-        chat = chat_id(chat)
-        if not chat:
-            continue
-        groups.append(chat)
-        if own:
-            modes[chat] = own.lower()
-    return groups, modes
-
-
 def _ask_telegram_chats(current: list[str]) -> tuple[list[str], dict[str, str]]:
     """Telegram has no call that lists a bot's chats, so the ids are typed in."""
     print("\ngroups and channels (optional): the bot answers only in chats listed here.\n"
-          "  1. Add the bot to the group or channel. Once it runs, it sends you that chat's id\n"
-          "     (a negative number, -100...). /whoami in a listed chat shows it too.\n"
+          "  1. Easiest: leave this blank, add the bot to the group or channel once it runs, then\n"
+          "     `ompwire gateway update` lists that chat by name. The bot also sends you its id.\n"
           "  2. In a group, to see an @mention of it, make the bot an admin, or turn privacy\n"
           "     mode off in @BotFather (/setprivacy) and add it again. A reply to the bot and\n"
           "     /command@the_bot reach it either way.\n"
@@ -592,7 +583,7 @@ def _ask_telegram_chats(current: list[str]) -> tuple[list[str], dict[str, str]]:
                    f"{'keep' if current else 'none'}): ").strip()
     if not answer:
         return current, {}
-    return _parse_groups(answer, "telegram")
+    return parse_groups(answer, "telegram")
 
 
 def _pick_groups(gateway, current: list[str]) -> list[str]:
@@ -680,13 +671,16 @@ _OWN_QUESTIONS = (
 def _start_settings(args: argparse.Namespace, gateway, is_new: bool) -> dict[str, dict]:
     """This gateway's own settings over config.toml. Flags set them; a new profile is asked
     whether to use the shared config; an existing one keeps what it has."""
+    from .gateway_update import UpdateError, apply_value, parse_value
+
     settings = {section: dict(values) for section, values in gateway.settings.items()}
-    flags = {("agent", "model"): getattr(args, "model", ""),
-             ("agent", "cwd"): getattr(args, "cwd", ""),
-             ("agent", "approval_mode"): getattr(args, "approval", "")}
-    for (section, key), value in flags.items():
-        if value:
-            settings.setdefault(section, {})[key] = value
+    flags = {field: getattr(args, field, "") or "" for field in ("model", "cwd", "approval")}
+    for field, raw in flags.items():
+        if raw:
+            try:
+                apply_value(settings, field, parse_value(field, raw))
+            except UpdateError as exc:
+                print(f"warn {exc}; not set")
     if not is_new or args.yes or any(flags.values()):
         return settings
     shared = load_config()

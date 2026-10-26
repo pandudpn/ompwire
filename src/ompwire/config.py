@@ -226,6 +226,19 @@ def save_override(section: str, key: str, value: Any, path: Path | None = None) 
     return target
 
 
+def clear_override(section: str, key: str, path: Path | None = None) -> bool:
+    """Drop a runtime setting, so the file underneath decides again. True when one was there."""
+    target = (path or OVERRIDES_PATH).expanduser()
+    data = load_overrides(target)
+    if key not in (data.get(section) or {}):
+        return False
+    del data[section][key]
+    if not data[section]:
+        del data[section]
+    target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return True
+
+
 DEFAULT_ENV_PATHS = (
     Path("~/.config/ompwire/.env"),
     Path("~/.ompwire/.env"),
