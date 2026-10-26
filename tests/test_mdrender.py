@@ -294,3 +294,79 @@ def test_an_ask_question_is_the_heading_of_the_options_card():
     labels = [button.text for row in sent["kb"].inline_keyboard for button in row]
     assert labels[:2] == ["1. teh", "2. kopi"]
     assert "teh" in sent["text"] and "kopi" in sent["text"]
+
+
+def test_telegram_counts_the_message_not_the_markup():
+    """The cap is on the text after entities are parsed: `&lt;` is one character there, and an
+    emoji outside the BMP is two. Counting the markup or the characters is what got it wrong."""
+    from ompwire.mdrender import visible_length
+
+    assert visible_length("a &lt; b") == 5
+    assert visible_length("<b>tebal</b>") == 5
+    assert visible_length("🔧") == 2
+    assert visible_length("") == 0
+
+
+def test_a_rendered_card_is_cut_into_messages_telegram_accepts():
+    """A plan card is rendered before the transport sees it, so nothing upstream keeps it short."""
+    from ompwire.mdrender import split_html, strip_html, visible_length
+
+    card = ("📋 <b>Todo</b> · 0/40 done\n"
+            + "\n".join(f"⬜ step {i}: port the memory records and check each one" for i in range(40)))
+    parts = split_html(card, 700)
+
+    assert len(parts) > 1
+    for part in parts:
+        assert visible_length(part) <= 700, part
+    assert strip_html("".join(parts)) == strip_html(card)  # nothing lost, nothing repeated
+
+
+def test_a_cut_inside_a_pre_block_closes_and_reopens_it():
+    """The second half of a tool trace must still be code, not bare lines of output."""
+    from ompwire.mdrender import split_html, visible_length
+
+    card = ("🔧 <code>bash</code>\n<pre>"
+            + "\n".join(f"line {i} of output & more" for i in range(120)) + "</pre>")
+    parts = split_html(card, 500)
+
+    assert len(parts) > 1
+    for part in parts:
+        assert visible_length(part) <= 500, part
+        assert part.count("<pre>") == part.count("</pre>") == 1, part[-60:]
+    assert "line 0 of output & more" in parts[0]
+    assert "line 119 of output & more" in parts[-1]
+
+
+def test_a_cut_never_lands_inside_a_tag_or_an_entity():
+    from ompwire.mdrender import split_html, visible_length
+
+    card = "<b>" + "&amp;" * 400 + "</b>"
+    parts = split_html(card, 64)
+
+    assert len(parts) > 1
+    for part in parts:
+        assert visible_length(part) <= 64, part
+        assert part.count("&") == part.count("&amp;"), part  # no half an entity
+        assert part.count("<b>") == part.count("</b>") == 1, part
+
+
+def test_a_markdown_answer_is_fitted_to_what_telegram_counts():
+    """split_markdown counts characters; a message dense in emoji renders twice as wide."""
+    from ompwire.mdrender import fit_markdown, to_html, visible_length
+
+    text = "🔧" * 3000 + "\n\n```bash\n" + "\n".join(f"line {i}" for i in range(200)) + "\n```"
+    parts = fit_markdown(text, 4000)
+
+    assert len(parts) > 1
+    for part in parts:
+        assert visible_length(to_html(part)) <= 4000, part[:40]
+        html = to_html(part)
+        assert html.count("<pre") == html.count("</pre>")
+    assert sum(part.count("🔧") for part in parts) == 3000
+    assert any("line 199" in part for part in parts)
+
+
+def test_a_markdown_answer_that_already_fits_is_one_message():
+    from ompwire.mdrender import fit_markdown
+
+    assert fit_markdown("jawaban singkat", 4000) == ["jawaban singkat"]

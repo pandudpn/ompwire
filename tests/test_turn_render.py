@@ -11,17 +11,26 @@ import asyncio
 import types
 
 import pytest
+from telegram.error import BadRequest
 
-from ompwire import engine, telegram
+from ompwire import engine, mdrender, telegram
 from ompwire.config import load_config
 from ompwire.rpc import PromptResult, Update
 
+TELEGRAM_CAP = 4096  # what the Bot API refuses, counted after entities are parsed
+
 
 class FakeBot:
+    """Telegram, as far as the cap goes: a message over 4096 is refused, never truncated."""
+
     def __init__(self):
         self.messages: list[str] = []
 
     async def send_message(self, chat_id, text, **_kw):
+        if mdrender.visible_length(text) > TELEGRAM_CAP:
+            raise BadRequest("Message is too long")
+        if text.count("<pre>") != text.count("</pre>"):
+            raise BadRequest("can't parse entities: unclosed tag")
         self.messages.append(text)
 
         class Sent:
@@ -486,6 +495,28 @@ def test_a_long_answer_is_split_into_messages_once(rendered):
     messages = rendered([message("a" * 3700), message(" ekor")])
     answer = [body for body in messages if "aaaa" in body or "ekor" in body]
     assert len(answer) == 2
+
+
+def test_an_emoji_answer_arrives_in_messages_telegram_accepts(rendered):
+    """Telegram counts the message after parsing entities, in UTF-16 units, so 3000 emoji are
+    6000 of them while the markdown splitter only saw 3000 characters. The send was refused,
+    the plain fallback was refused the same way, and the turn died with the answer unsent."""
+    messages = rendered([message("🔧" * 3000)])
+    assert len(messages) > 1
+    assert "".join(mdrender.strip_html(body) for body in messages).count("🔧") == 3000
+
+
+def test_a_plan_card_too_long_for_one_message_still_arrives(rendered):
+    """A plan checklist is rendered before the transport sees it. Sixty todos were one HTML
+    string over the cap, and the plain fallback is exactly as long, so the card killed the
+    turn instead of arriving as two messages."""
+    items = [(f"step {i}: port the hermes memory records over and check each one is recallable",
+              "pending") for i in range(60)]
+    messages = rendered([plan(*items), message("selesai")])
+    steps = [body for body in messages if "⬜ step" in body]
+    assert len(steps) == 2
+    assert "step 0:" in steps[0]
+    assert "step 59:" in steps[1]
 
 
 def plan(*entries):

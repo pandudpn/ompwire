@@ -23,7 +23,7 @@ from .attachments import Outgoing
 from .delivery import Delivery
 from .engine import FloodWait, ToolTrace
 from .format import now_wib
-from .mdrender import strip_html, to_html, to_plain
+from .mdrender import fit_markdown, split_html, strip_html, to_html, to_plain
 from .tg_html import (
     advisor_block,
     card,
@@ -42,41 +42,35 @@ log = logging.getLogger("ompwire.telegram")
 TELEGRAM_LIMIT = 4000  # leave headroom under the 4096 hard cap
 
 
-def chunk_lines(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
-    """Cut a rendered message on line boundaries; one overlong line is cut as a last resort."""
-    parts: list[str] = []
-    current = ""
-    for line in text.splitlines(keepends=True):
-        if len(current) + len(line) > limit:
-            if current:
-                parts.append(current)
-            while len(line) > limit:
-                parts.append(line[:limit])
-                line = line[limit:]
-            current = line
-        else:
-            current += line
-    if current:
-        parts.append(current)
-    return parts or [""]
-
-
 async def send_html(bot, chat_id: int, body: str):
-    """Send pre-rendered Telegram HTML, falling back to plain text."""
-    try:
-        return await bot.send_message(chat_id, body, parse_mode=ParseMode.HTML)
-    except BadRequest as exc:
-        log.warning("html send rejected (%s); falling back to plain text", exc)
-        return await bot.send_message(chat_id, strip_html(body))
+    """Send pre-rendered Telegram HTML, cut into as many messages as the cap needs.
+
+    A card is rendered before the transport sees it, so nothing upstream can be trusted to
+    have kept it short: sixty todos in one plan card are one string over the limit, and the
+    plain-text fallback is just as long, which killed a whole turn on "Message is too long".
+    The fallback stays here, one part at a time, and a plain part is never longer than the
+    HTML it replaces.
+    """
+    sent = None
+    for part in split_html(body, TELEGRAM_LIMIT):
+        try:
+            sent = await bot.send_message(chat_id, part, parse_mode=ParseMode.HTML)
+        except BadRequest as exc:
+            log.warning("html send rejected (%s); falling back to plain text", exc)
+            sent = await bot.send_message(chat_id, strip_html(part))
+    return sent
 
 
 async def send_md(bot, chat_id: int, text: str):
-    """Send agent markdown as Telegram HTML, degrading to plain text on refusal."""
-    try:
-        return await bot.send_message(chat_id, to_html(text), parse_mode=ParseMode.HTML)
-    except BadRequest as exc:
-        log.warning("html send rejected (%s); falling back to plain text", exc)
-        return await bot.send_message(chat_id, to_plain(text))
+    """Send agent markdown as Telegram HTML, cut so every message fits what Telegram counts."""
+    sent = None
+    for part in fit_markdown(text, TELEGRAM_LIMIT):
+        try:
+            sent = await bot.send_message(chat_id, to_html(part), parse_mode=ParseMode.HTML)
+        except BadRequest as exc:
+            log.warning("html send rejected (%s); falling back to plain text", exc)
+            sent = await bot.send_message(chat_id, to_plain(part))
+    return sent
 
 
 def _retry_window(exc: Exception) -> float:
@@ -277,7 +271,7 @@ class TelegramDelivery(Delivery):
         body_html = f"<pre>{esc(error[:400])}</pre>" if error else to_html(body_markdown)
         run = run_card(title, when, run_status(ok, word), rows, body_html, footer)
         sent = 0
-        for chunk in chunk_lines(run):
+        for chunk in split_html(run, TELEGRAM_LIMIT):
             await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML,
                                    disable_web_page_preview=True)
             sent += 1

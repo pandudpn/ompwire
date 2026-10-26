@@ -253,6 +253,59 @@ def test_a_scheduled_result_is_delivered_as_a_card(monkeypatch):
     assert "pagi" in body and "<b>selesai</b>" in body
 
 
+
+def test_a_long_scheduled_report_arrives_in_messages_telegram_accepts(monkeypatch):
+    """A run's own report can outrun one message, and a card cut at a fixed number of
+    characters landed inside its code block: Telegram refused the markup, so the whole report
+    was lost hours after the run."""
+    import asyncio
+    import re
+
+    from telegram.error import BadRequest
+
+    from ompwire import gateways, mdrender, schedule_run, tg_surface
+
+    half_an_entity = re.compile(r"&(?!(?:amp|lt|gt|quot|#\d+);)")
+
+    def refuses(text: str) -> str:
+        """Telegram's two answers to a message it cannot take: too long, or not parseable."""
+        if mdrender.visible_length(text) > 4096:
+            return "Message is too long"
+        if half_an_entity.search(text):
+            return "can't parse entities: unmatched '&'"
+        if any(text.count(f"<{tag}") != text.count(f"</{tag}>")
+               for tag in ("b", "i", "s", "pre", "code", "blockquote")):
+            return "can't parse entities: unclosed tag"
+        return ""
+
+    sent: list[str] = []
+
+    class FakeBot:
+        def __init__(self, _token):
+            pass
+
+        async def send_message(self, chat_id, text, **_kw):
+            problem = refuses(text)
+            if problem:
+                raise BadRequest(problem)
+            sent.append(text)
+
+    monkeypatch.setattr(tg_surface, "Bot", FakeBot)
+    gateway = gateways.Gateway(name="telegram", kind="telegram", allowed=[42])
+    monkeypatch.setattr(schedule_run.gateways, "get", lambda _name: gateway)
+    monkeypatch.setattr(schedule_run.gateways, "token", lambda _gw: "t")
+    item = schedules.Schedule(name="pagi", cron="0 7 * * *", prompt="ringkas", gateway="telegram")
+    report = ("## ringkasan\n\n```bash\n"
+              + "\n".join(f"2026-10-26 07:{i % 60:02d}:00 ERROR <nilai> & gagal" for i in range(300))
+              + "\n```")
+
+    count = asyncio.run(schedule_run._deliver(item, report, [], [], {"ok": True}))
+
+    assert count == len(sent) > 1
+    assert "<b>pagi</b>" in sent[0] and "07:00:00" in sent[0]
+    assert any("07:59:00" in body and "ERROR" in body for body in sent)
+    assert sent[-1].endswith("pagi</i>")  # the footer still closes the card
+
 def test_a_gateway_kind_without_a_delivery_is_refused():
     from ompwire import delivery, gateways
 

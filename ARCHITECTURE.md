@@ -91,6 +91,11 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
    `stream.min_gap` apart; tool traces that finish while it waits (the gap, or a flood window)
    go out together as one message, and a trace dropped after flood control is named in the
    chat ("… N tool call(s) not shown") instead of disappearing.
+   A message is cut to what the platform accepts before it is sent. Telegram counts the text
+   after entities are parsed, in UTF-16 units (an emoji outside the BMP is two, `&lt;` is one),
+   and refuses anything over 4096: `TELEGRAM_LIMIT` keeps 96 under it, markdown is fitted by
+   that count before it is rendered, and a card rendered upstream is split on its line breaks,
+   closing every tag still open and reopening it in the next message.
 6. An approval arrives as an `extension_ui_request` `select` (`Approve` / `Deny`) and becomes an
    inline keyboard. The answer is the label omp offered, plus a persisted override so the same
    tool is not asked twice.

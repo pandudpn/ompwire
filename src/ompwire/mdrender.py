@@ -271,6 +271,99 @@ def strip_html(text: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", text))
 
 
+# What Telegram counts is the message after entities are parsed, in UTF-16 units: `&lt;` is one
+# character there, and an emoji outside the BMP is two. A message over 4096 dies on
+# "Message is too long" whether it was sent as HTML or as plain text.
+RENDERED_TOKEN_RE = re.compile(r"<[^>]+>|&#?[0-9a-zA-Z]+;|.", re.DOTALL)
+RENDERED_TAG_RE = re.compile(r"<(/?)([a-zA-Z][\w-]*)[^>]*?(/?)>")
+
+
+def visible_length(html_text: str) -> int:
+    """The size Telegram measures: the text the reader gets, in UTF-16 units."""
+    return len(strip_html(html_text).encode("utf-16-le")) // 2
+
+
+def _token_units(token: str) -> int:
+    """What one token of rendered HTML adds to the message Telegram measures."""
+    if token.startswith("<"):
+        return 0  # markup is not text
+    if len(token) > 2 and token.startswith("&") and token.endswith(";"):
+        return 1  # an entity is one character once Telegram parses it
+    return 2 if ord(token) > 0xFFFF else 1
+
+
+def split_html(text: str, limit: int) -> list[str]:
+    """Cut pre-rendered Telegram HTML into messages of at most `limit` visible characters.
+
+    A card (a plan checklist, a tool block) is rendered before the transport sees it, so no
+    splitter upstream can be trusted to have kept it short. The cut lands just after a line
+    break where one is within reach, never inside a tag or an entity, and every tag still open
+    at the cut is closed here and reopened in the next message, so each message is valid HTML.
+    """
+    limit = max(2, limit)  # two units is one emoji: below that a message could not advance
+    if visible_length(text) <= limit:
+        return [text]
+    tokens = RENDERED_TOKEN_RE.findall(text)
+    out: list[str] = []
+    prefix: list[tuple[str, str]] = []  # the tags open at this message's start, outermost first
+    start = 0
+    while start < len(tokens):
+        stack = list(prefix)
+        body: list[str] = []
+        used = 0
+        index = start
+        break_at, break_used, break_stack = -1, 0, list(prefix)
+        while index < len(tokens):
+            token = tokens[index]
+            units = _token_units(token)
+            if used + units > limit:
+                break
+            body.append(token)
+            used += units
+            if token.startswith("<"):
+                tag = RENDERED_TAG_RE.match(token)
+                if tag is not None:
+                    closing, name, empty = tag.group(1), tag.group(2), tag.group(3)
+                    if closing:
+                        for position in range(len(stack) - 1, -1, -1):
+                            if stack[position][0] == name:
+                                del stack[position:]
+                                break
+                    elif not empty:
+                        stack.append((name, token))
+            index += 1
+            if token == "\n":
+                break_at, break_used, break_stack = len(body), used, list(stack)
+        if break_at > 0 and break_used * 2 >= limit:  # a break too near the start is no break
+            index, stack, body = start + break_at, break_stack, body[:break_at]
+        out.append("".join(markup for _name, markup in prefix) + "".join(body)
+                   + "".join(f"</{name}>" for name, _markup in reversed(stack)))
+        prefix = stack
+        start = index
+    return out
+
+
+def fit_markdown(text: str, limit: int) -> list[str]:
+    """Split agent markdown so every rendered message fits `limit` visible characters.
+
+    split_markdown counts the markdown; the transport counts the rendered message, where an
+    emoji is two units and a padded table is longer than its source. A part that still renders
+    too long is split again with a budget scaled by how far over it went, which ends because
+    every round leaves a shorter part behind.
+    """
+    pending, out = [text], []
+    while pending:
+        part = pending.pop(0)
+        rendered = visible_length(to_html(part))
+        if rendered <= limit or len(part) < 2:
+            out.append(part)
+            continue
+        budget = max(1, len(part) * limit // rendered)
+        pieces = split_markdown(part, min(budget, len(part) - 1))
+        pending[:0] = pieces if len(pieces) > 1 else split_markdown(part, max(1, len(part) // 2))
+    return out
+
+
 # omp injects MCP connect failures into the agent's own message stream; they are
 # diagnostics for us, not something to read in the chat. A failure ends at its
 # line, or at the restart sentence, so the agent's own answer after it survives.
