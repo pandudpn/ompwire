@@ -125,9 +125,15 @@ Artifacts are attached, so the release page has the exact files that were checke
 A version with a suffix (`v1.5.0-rc.1`) is published as a prerelease. `install.sh` only resolves
 `^vX.Y.Z$`, so a prerelease is never what `curl … | bash` picks up.
 
-`gh workflow run release -f bump=patch` commits the bump and the tag itself. That push does not
-trigger a second run, which is why the same run also builds and publishes: the alternative is a
-version bump sitting on `main` with no release behind it.
+`gh workflow run release -f bump=patch` builds the bump commit and the tag inside the runner and
+pushes nothing at first. The other jobs test, install, and build that exact commit from a bundle
+artifact. Only the publish job pushes it, after every gate has passed, with one atomic push of
+the branch and the tag. A failed gate therefore leaves `main` and the tags as they were. The
+same run publishes because a tag pushed by `GITHUB_TOKEN` does not trigger a second run.
+
+A dispatch is refused before anything is staged when `main` moved after the button was pressed,
+or when `HEAD` already carries a release tag. Pressing the button twice therefore releases once.
+Re-releasing an existing tag is a dispatch with `bump=none`.
 
 ## Questions
 

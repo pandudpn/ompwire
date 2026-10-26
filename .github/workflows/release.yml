@@ -1,9 +1,12 @@
 name: release
 
 # A release starts either from a tag someone pushed, or from the Actions button that computes
-# the tag and commits the bump. Both paths run the same gates, in the same run: a tag pushed by
-# GITHUB_TOKEN does not trigger a second workflow, so a workflow that relied on that would leave
-# a bumped version with no release behind it.
+# the version. Both paths run the same gates, in the same run: a tag pushed by GITHUB_TOKEN does
+# not trigger a second workflow, so a workflow that relied on that would leave a bumped version
+# with no release behind it.
+#
+# The button stages the bump commit and its tag inside the runner and pushes nothing until every
+# gate has passed on that exact commit. A failed test or build leaves main and the tags untouched.
 #
 # The version is decided in one place, scripts/release/version.py, which writes pyproject.toml
 # and src/ompwire/__init__.py together. A tag that disagrees with either file is refused before
@@ -36,18 +39,17 @@ jobs:
     name: Resolve the version
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
-      # The commit the tag points at. A dispatch checks out the commit that existed when the
-      # button was pressed, which is not the bump commit this job just pushed, so every
-      # downstream job has to be told which ref to test.
-      commit: ${{ steps.resolve.outputs.commit }}
+      # true when this run created the bump commit or the tag, which then exist only in the
+      # release-ref artifact until publish pushes them
+      push: ${{ steps.resolve.outputs.push }}
     steps:
-      # No stored credentials: this job pushes, but the token belongs on the push command, not
-      # in the git config where every later step in the job inherits it.
+      # No stored credentials: nothing in this job pushes. Publish pushes the staged commit and
+      # tag, and only after every gate has passed.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           fetch-depth: 0
@@ -60,10 +62,25 @@ jobs:
         if: github.event_name == 'push'
         run: python -m scripts.release.version check "${GITHUB_REF_NAME}"
 
-      - name: Compute the next version, commit it, tag it
+      - name: Refuse a dispatch that is stale or has nothing to release
+        # Runs in the release concurrency group queue one after another, and a queued run still
+        # holds the commit that existed when its button was pressed. Without this, a second press
+        # bumps again on top of the first release.
+        if: github.event_name == 'workflow_dispatch' && (inputs.version != '' || inputs.bump != 'none')
+        run: |
+          tip=$(git rev-parse "refs/remotes/origin/${GITHUB_REF_NAME}")
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::error::${GITHUB_REF_NAME} moved since this run was dispatched (now ${tip}). Dispatch again."
+            exit 1
+          fi
+          if released=$(git describe --tags --exact-match HEAD 2>/dev/null); then
+            echo "::error::HEAD is already released as ${released}; nothing new to release."
+            exit 1
+          fi
+
+      - name: Stage the bump commit and the tag, without pushing
         if: github.event_name == 'workflow_dispatch' && (inputs.version != '' || inputs.bump != 'none')
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WANTED: ${{ inputs.version }}
           KIND: ${{ inputs.bump }}
         run: |
@@ -74,21 +91,19 @@ jobs:
           else
             version=$(python -m scripts.release.version bump "$KIND")
           fi
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "::error::tag v${version} already exists; dispatch without a bump to re-release it."
+            exit 1
+          fi
           git add pyproject.toml src/ompwire/__init__.py
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}"
           if git diff --cached --quiet; then
             echo "files already say ${version}, no bump commit needed"
           else
             git commit -m "chore(release): v${version}"
-            git push "$remote" "HEAD:${GITHUB_REF_NAME}"
           fi
-          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
-            echo "tag v${version} already exists, reusing it"
-          else
-            git tag -a "v${version}" -m "ompwire ${version}"
-            git push "$remote" "v${version}"
-          fi
+          git tag -a "v${version}" -m "ompwire ${version}"
           echo "TAG=v${version}" >> "$GITHUB_ENV"
+          echo "PUSH=true" >> "$GITHUB_ENV"
 
       - name: Report what this run releases
         id: resolve
@@ -119,9 +134,22 @@ jobs:
             echo "tag=$tag"
             echo "version=$version"
             echo "prerelease=$prerelease"
-            echo "commit=$commit"
+            echo "push=${PUSH:-false}"
           } >> "$GITHUB_OUTPUT"
-          echo "releasing ${tag} at ${commit} (prerelease=${prerelease})"
+          echo "releasing ${tag} at ${commit} (prerelease=${prerelease}, push=${PUSH:-false})"
+
+      - name: Bundle the release commit for the other jobs
+        # The staged commit and tag live only in this runner, so later jobs receive them as a
+        # bundle instead of fetching a ref that is not on GitHub yet.
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: git bundle create "$RUNNER_TEMP/release.bundle" "refs/tags/${TAG}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: release-ref
+          path: ${{ runner.temp }}/release.bundle
+          if-no-files-found: error
+          retention-days: 7
 
   verify:
     name: Tests and lint
@@ -130,9 +158,11 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/release-checkout
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
@@ -156,23 +186,23 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/release-checkout
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
       - name: install.sh resolves this tag
         # install.sh is the path every user takes, so it runs against the tag itself and not
-        # against HEAD. The repository may be private, so git gets the workflow token.
+        # against HEAD. The tag is not on GitHub yet, so the repository URL install.sh uses is
+        # rewritten to this checkout, which holds the staged tag.
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No checkout in this job: it only moves artifacts. gh still needs to know which
-          # repository it is talking about, and without a git dir it cannot infer one.
-          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global url."file://${GITHUB_WORKSPACE}".insteadOf "https://github.com/${GITHUB_REPOSITORY}.git"
           python -m pip install --quiet uv
           export UV_TOOL_DIR="$RUNNER_TEMP/tools" UV_TOOL_BIN_DIR="$RUNNER_TEMP/bin"
           export OMPWIRE_NO_PATH_EDIT=1 OMPWIRE_NO_SETUP=1 OMPWIRE_NO_OMP=1
@@ -190,8 +220,11 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/release-checkout
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
@@ -227,9 +260,11 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/release-checkout
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
@@ -237,6 +272,17 @@ jobs:
         with:
           name: dist
           path: dist
+      - name: Push the bump commit and the tag
+        # The first write this workflow makes, after every gate passed on this exact commit.
+        # Atomic: if the branch moved and the commit no longer fast-forwards it, neither the
+        # branch nor the tag is updated and the run fails with nothing half-published.
+        if: needs.prepare.outputs.push == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}"
+          git push --atomic "$remote" "refs/tags/${TAG}^{commit}:refs/heads/${GITHUB_REF_NAME}" "refs/tags/${TAG}"
       - name: Create or update the release
         # Generated notes come from the commits, so there is no hand-written summary to drift or
         # to mangle. Re-running replaces the assets instead of failing.
