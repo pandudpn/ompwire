@@ -12,8 +12,6 @@ import asyncio
 import contextlib
 import types
 
-from telegram.error import BadRequest, TelegramError
-
 from ompwire import cli, engine, tg_surface, wa_surface
 from ompwire.config import load_config
 from ompwire.format import TOOL_LINE_WIDTH
@@ -597,59 +595,19 @@ def running_card(**extra) -> engine.JobCard:
     return engine.JobCard(**data)
 
 
-def test_telegram_posts_a_job_card_once_then_edits_it():
+def test_telegram_posts_every_job_card_update_as_a_new_message():
+    """Asked for in chat: a card edited in place changed out of sight; each update is a message."""
     bot = FakeBot()
     surface = tg_surface_with(bot)
 
     async def go():
         await surface.job_card("job:1", "first")
         await surface.job_card("job:1", "second")
-        await surface.job_card("job:1", "third")
         await surface.job_card("job:2", "other")
 
     asyncio.run(go())
-    assert [message.text for message in bot.messages] == ["first", "other"]
-    assert bot.messages[0].edits == ["second", "third"]
-
-
-def test_telegram_ignores_an_edit_that_changes_nothing():
-    bot = FakeBot(refuses=BadRequest("Message is not modified: content is the same"))
-    surface = tg_surface_with(bot)
-
-    async def go():
-        await surface.job_card("job:1", "same")
-        await surface.job_card("job:1", "same")
-
-    asyncio.run(go())
-    assert len(bot.messages) == 1, "an unchanged card must not be posted again"
-
-
-def test_telegram_posts_again_when_the_edit_is_refused():
-    bot = FakeBot(refuses=BadRequest("Message to edit not found"))
-    surface = tg_surface_with(bot)
-
-    async def go():
-        await surface.job_card("job:1", "first")
-        await surface.job_card("job:1", "second")
-        await surface.job_card("job:1", "third")
-
-    asyncio.run(go())
-    assert [message.text for message in bot.messages] == ["first", "second"]
-    assert bot.messages[1].edits == ["third"]
-
-
-def test_telegram_keeps_the_card_when_the_edit_times_out():
-    bot = FakeBot(refuses=TelegramError("timed out"))
-    surface = tg_surface_with(bot)
-
-    async def go():
-        await surface.job_card("job:1", "first")
-        await surface.job_card("job:1", "second")
-        await surface.job_card("job:1", "third")
-
-    asyncio.run(go())
-    assert [message.text for message in bot.messages] == ["first"]
-    assert bot.messages[0].edits == ["third"], "the card stays where it was and moves on later"
+    assert [message.text for message in bot.messages] == ["first", "second", "other"]
+    assert all(message.edits == [] for message in bot.messages)
 
 
 def test_telegram_renders_the_job_card():
@@ -691,7 +649,7 @@ class WaTransport:
         self.edits.append((message_id, text))
 
 
-def test_whatsapp_posts_a_job_card_once_then_edits_it():
+def test_whatsapp_posts_every_job_card_update_as_a_new_message():
     transport = WaTransport()
     surface = wa_surface.WhatsAppSurface(transport, "6281234")
 
@@ -701,8 +659,8 @@ def test_whatsapp_posts_a_job_card_once_then_edits_it():
         await surface.job_card("job:2", "other")
 
     asyncio.run(go())
-    assert transport.sent == ["first", "other"]
-    assert transport.edits == [("msg1", "second")]
+    assert transport.sent == ["first", "second", "other"]
+    assert transport.edits == []
 
 
 def test_whatsapp_renders_the_card_in_its_own_markup():

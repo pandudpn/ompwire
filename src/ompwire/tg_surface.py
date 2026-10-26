@@ -98,9 +98,6 @@ class TelegramSurface(engine.Surface):
         self.limit = TELEGRAM_LIMIT
         # the card of the question still open, so its buttons can be taken away
         self.options_message: Any = None
-        # the message of each job card, keyed the way the engine keys its frames: the next
-        # progress frame of that job rewrites this message instead of posting another one
-        self.job_messages: dict[str, Any] = {}
         self.options_listed = ""
 
     async def post(self, body: str, *, kind: str):
@@ -135,27 +132,6 @@ class TelegramSurface(engine.Surface):
 
     def jobs(self, group: list[engine.JobCard], spawned: int) -> str:
         return job_group(group, spawned)
-
-    async def job_card(self, key: str, body: str) -> None:
-        message = self.job_messages.get(key)
-        if message is None:
-            sent = await send_html(self.app.bot, self.chat_id, body)
-            if sent is not None:
-                self.job_messages[key] = sent
-            return
-        try:
-            await message.edit_text(body, parse_mode=ParseMode.HTML)
-        except BadRequest as exc:
-            if "not modified" in str(exc).lower():
-                return
-            # the edit was refused for another reason (an unparsable body, an old message):
-            # post the current state as a new card and follow that one from here on
-            log.debug("job card edit refused (%s); posting it again", exc)
-            sent = await send_html(self.app.bot, self.chat_id, body)
-            if sent is not None:
-                self.job_messages[key] = sent
-        except TelegramError as exc:
-            log.debug("job card edit failed: %s", exc)
 
     @contextlib.asynccontextmanager
     async def typing(self):

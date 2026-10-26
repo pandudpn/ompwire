@@ -262,14 +262,15 @@ against a fake stream rather than the live model.
 `subagent_lifecycle` (started, completed, failed, aborted) and `subagent_progress` for every job.
 A progress frame carries the agent type, the resolved model, the last intent, the recent tool
 calls, the tool count and the duration. A verbose chat gets one summary card per `task` call and
-one card per job, edited in place: at most once a minute while it runs, plus a final edit at a
-terminal status. omp sends a dozen or more progress frames for even a short job, which is why
-the edits are throttled. A job waiting on a long tool call sends none, so while any job is still
-running the engine also asks omp's registry (`get_subagents`) once a minute and refreshes the
-cards from it; a job that left the registry without an end frame is closed as done. The summary
-waits 1.5 s before its first post, since a call's start frames arrive a moment apart and it
-should count every job. Background (`detached`) jobs outlive the turn, so their cards are kept
-per chat and still get the final edit after the turn ends.
+one card per job, each update posted as a new message like the rest of the chat, never an edit:
+at most once a minute while a job runs, plus one at a terminal status. omp sends a dozen or more
+progress frames for even a short job, which is why the updates are throttled. A job waiting on a
+long tool call sends none, so while any job is still running the engine also asks omp's registry
+(`get_subagents`) once a minute and posts the cards from it; a job that left the registry without
+an end frame is closed as done. The summary waits 1.5 s before its first post, since a call's
+start frames arrive a moment apart and it should count every job. Background (`detached`) jobs
+outlive the turn, so their cards are kept per chat and still post the final state after the turn
+ends.
 
 ## Storage
 

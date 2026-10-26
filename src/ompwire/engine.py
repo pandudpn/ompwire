@@ -501,7 +501,7 @@ class Surface(abc.ABC):
     `post` sends one message: kind "text" carries raw agent markdown the surface converts,
     the other kinds arrive already rendered by this surface. `trace`, `reasoning`, `dropped`
     and `join` are the renderers the engine calls before posting; `job` and `jobs` render the
-    subagent cards, which a surface with editable messages rewrites instead of reposting.
+    subagent cards, each update posted as a message of its own like the rest of the chat.
     """
 
     label: str
@@ -569,7 +569,8 @@ class Surface(abc.ABC):
     async def notice(self, text: str) -> Any | None: ...
 
     # The cards for the subagents a `task` call spawned. The engine keeps their order and their
-    # pacing; a surface only has to show one card per key, editing the first message it sent.
+    # pacing (at most one update a minute per card, the end at once); every update is a new
+    # message, so the chat reads top to bottom instead of an old card changing out of sight.
     @abc.abstractmethod
     def job(self, card: JobCard) -> str:
         """One subagent as a card of its own: what it is, what it last did, how it is doing."""
@@ -579,8 +580,7 @@ class Surface(abc.ABC):
         """The card that opens a `task` call: one line per job it spawned."""
 
     async def job_card(self, key: str, body: str) -> Any | None:
-        """Show one job card under `key`: a surface that can edit keeps the message it posted
-        first and rewrites it; one that cannot (a terminal) posts every update as a new one."""
+        """Show one job card update as a new message."""
         return await self.post(body, kind="job")
 
 class ChatAgent:
@@ -1105,11 +1105,9 @@ class ChatAgent:
                                                       "agent": job.agent, "status": "completed"}}))
 
     def _job_write(self, key: str, body: str, *, force: bool) -> None:
-        """Queue one card under `key`, at most once a minute unless `force`. A card that would
-        say exactly what it already says is not sent again: Telegram answers an unchanged edit
-        with an error, and a terminal would print the same block twice. Cards go out in the
-        order their frames arrived: the summary stays above the jobs it names, and an edit
-        never overtakes the send of the message it means to change."""
+        """Queue one card under `key`, at most once a minute unless `force`. Each card is a new
+        message, so one that would say exactly what the last said is not sent again. Cards go
+        out in the order their frames arrived: the summary stays above the jobs it names."""
         if self._job_body.get(key) == body:
             return
         now = self._clock()

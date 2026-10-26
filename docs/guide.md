@@ -195,9 +195,10 @@ enters the conversation.
 
 When the agent runs subagents through its `task` tool, a verbose chat gets one summary message
 for the call (`🤖 subagent (spawned 2 background agents)`) and one card per job with its agent
-type, model, status and last action. Until every job has finished, the cards are refreshed once
-a minute, even while a job sits on one long command, and once more when a job ends, so a
-background job that outlives the turn still reports how it finished. A quiet chat (a group, or
+type, model, status and last action. Each update is a new message, like the rest of the chat:
+until every job has finished, a card is posted again at most once a minute, even while a job
+sits on one long command, and once more when a job ends, so a background job that outlives the
+turn still reports how it finished. A quiet chat (a group, or
 `/verbose` off) shows none of them.
 
 ### Questions
