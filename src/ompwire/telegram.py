@@ -1362,6 +1362,12 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         builder = Application.builder().token(self.token)
         self.app = builder.build()
         app = self.app
+        self.register(app)
+        await self._serve(app)
+
+    def register(self, app) -> None:
+        """Every command in the menu gets its handler here; one listed but not registered fell
+        through to the agent's forwarder and nothing answered."""
         # block=False where a handler waits on omp: PTB processes updates one at a time, so a
         # /btw answering for a minute would hold back every other chat, an approval tap included.
         app.add_handler(CommandHandler("new", self.cmd_new))
@@ -1387,6 +1393,8 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         app.add_handler(CommandHandler("approve", self.cmd_approve))
         app.add_handler(CommandHandler("busy", self.cmd_busy))
         app.add_handler(CommandHandler("verbose", self.cmd_verbose))
+        app.add_handler(CommandHandler("reasoning", self.cmd_reasoning))
+        app.add_handler(CommandHandler("schedule", self.cmd_schedule))
         app.add_handler(CommandHandler("btw", self.cmd_btw, block=False))
         app.add_handler(CommandHandler("yolo", self.cmd_yolo))
         app.add_handler(CommandHandler("kill", self.cmd_kill))
@@ -1409,6 +1417,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                                        self.on_document))
         app.add_handler(MessageHandler(filters.ALL, self.log_update), group=-1)
 
+    async def _serve(self, app) -> None:
         await app.initialize()
         await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in _unique_commands()])
         me = await app.bot.get_me()

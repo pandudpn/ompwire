@@ -217,6 +217,17 @@ def test_a_long_message_is_cut_on_lines():
     assert all(len(part) <= 500 for part in parts)
     assert "\n".join(parts).split("\n") == [f"line {i}" for i in range(400)]
 
+def test_a_long_code_block_is_closed_and_reopened_across_messages():
+    code = "\n".join(f"line {i}" for i in range(400))
+    parts = chunks(to_whatsapp("Intro.\n\n```bash\n" + code + "\n```\n\nOutro."), 500)
+    assert len(parts) > 2 and all(len(part) <= 500 for part in parts)
+    for part in parts:
+        assert part.count("```") % 2 == 0, part[-40:]  # every message closes what it opens
+    joined = "\n".join(parts).replace("```", "")
+    assert [line for line in joined.split("\n") if line.startswith("line")] == \
+        [f"line {i}" for i in range(400)]
+
+
 
 def test_the_bots_own_mention_is_removed_and_others_are_kept():
     assert strip_mention(f"@{ME_LID} tanya @6281234 dong", {ME_LID}) == "tanya @6281234 dong"

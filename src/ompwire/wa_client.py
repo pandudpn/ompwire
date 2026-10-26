@@ -261,26 +261,47 @@ def to_whatsapp(text: str) -> str:
 
 
 def chunks(text: str, limit: int) -> list[str]:
-    """Cut on blank lines, then lines, so a code block is cut at a line, never mid-word."""
+    """Cut WhatsApp markup at line breaks. A cut inside a ``` block closes it in this message
+    and opens it again in the next, so the code after a cut is still code, not stray backticks."""
     if len(text) <= limit:
         return [text]
     parts: list[str] = []
-    current = ""
+    current: list[str] = []
+    size = 0
+    inside = False
+
+    def cut(open_block: bool) -> None:
+        nonlocal current, size
+        parts.append("\n".join(current) + ("\n```" if open_block else ""))
+        current, size = [], 0
+
     for line in text.split("\n"):
-        while len(line) > limit:
+        closes = inside and line.strip() == "```"
+        toggles = line.count("```") % 2 == 1
+        # after the first piece of a line that opens a block, the rest is inside it
+        after = inside != toggles if not closes else False
+        first = True
+        while True:
+            state = inside if first else (inside or after)
+            head = "```" if state and not current and not closes else ""
+            piece = head + line
+            # four characters stay free for the "\n```" that closes a block cut here
+            if closes or size + len(piece) + 4 <= limit:
+                current.append(piece)
+                size += len(piece) + 1
+                break
             if current:
-                parts.append(current)
-                current = ""
-            parts.append(line[:limit])
-            line = line[limit:]
-        candidate = f"{current}\n{line}" if current else line
-        if len(candidate) > limit:
-            parts.append(current)
-            current = line
-        else:
-            current = candidate
+                cut(state)
+                continue
+            room = max(1, limit - len(head) - 4)  # one line too long even alone
+            current.append(head + line[:room])
+            line = line[room:]
+            first = False
+            cut(inside or after)
+        if toggles:
+            inside = not inside
     if current:
-        parts.append(current)
+        parts.append("\n".join(current))
     return parts
 
 

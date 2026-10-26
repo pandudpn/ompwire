@@ -104,6 +104,18 @@ def test_the_menu_carries_the_new_commands_and_no_duplicates():
     assert not {"steer", "queue", "resume", "continue"} & set(names)
     assert all(description for description in dict(telegram.COMMANDS).values())
 
+def test_every_command_in_the_menu_has_its_own_handler(tmp_path):
+    """/reasoning was listed but its handler was dropped: the agent got it and nothing answered."""
+    from telegram.ext import Application, CommandHandler
+
+    transport = telegram.Transport(_config(tmp_path))
+    app = Application.builder().token("1:x").build()
+    transport.register(app)
+    handled = {name for group in app.handlers.values() for handler in group
+               if isinstance(handler, CommandHandler) for name in handler.commands}
+    assert {name for name, _ in telegram.COMMANDS} <= handled
+
+
 
 # ----------------------------------------------------------------------- /busy
 def test_busy_without_an_argument_offers_the_three_modes(tmp_path):
