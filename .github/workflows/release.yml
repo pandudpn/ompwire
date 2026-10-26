@@ -295,8 +295,8 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
-          # Notes are grouped from the commits, because --generate-notes only lists merged pull
-          # requests and this repository commits straight to main.
+          # Notes come from the main line: a merged pull request is one entry linked to it, a
+          # commit on main links the commit, and the authors are credited by GitHub login.
           python -m scripts.release.notes --to "$TAG" --write RELEASE_NOTES.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file RELEASE_NOTES.md

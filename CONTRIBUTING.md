@@ -105,17 +105,21 @@ git commit -am "chore(release): v$(python -m scripts.release.version show)"
 git tag -a v1.5.0 -m "ompwire 1.5.0" && git push origin v1.5.0
 ```
 
-The release body is not typed by hand either. `scripts/release/notes.py` reads the commits between
-the previous tag and this one, parses the conventional subjects, and groups them into Breaking
-changes, Features, Fixes, Performance, Refactoring, Documentation, Tests, Build and CI. Write
-commits worth reading, because they become the release page:
+The release body is not typed by hand either. `scripts/release/notes.py` walks the main line
+between the previous tag and this one. A merged pull request becomes one entry linked to it, with
+its own commits folded in; a commit made on main links the commit. Subjects are parsed as
+conventional commits and grouped into Breaking changes, Features, Fixes, Performance, Refactoring,
+Documentation, Tests, Build and CI. A Contributors section credits every author by GitHub login,
+and New contributors names anyone whose first commit ships in this release. Version bumps and
+their reverts are left out. Write commits and pull request titles worth reading, because they
+become the release page:
 
 ```bash
 python -m scripts.release.notes --to v1.5.0            # preview before tagging
 ```
 
-`--generate-notes` is not used: it lists merged pull requests, and this repository commits
-straight to main, so it would publish a body with nothing but a changelog link.
+`--generate-notes` is not used: it sees merged pull requests only, so every commit made straight
+on main would be missing.
 
 Either way one workflow run does the rest: refuse a tag that disagrees with `pyproject.toml` or
 `src/ompwire/__init__.py`, run lint and the suite, install from the tag with `install.sh` and

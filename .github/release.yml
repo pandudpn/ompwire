@@ -1,7 +1,7 @@
-# Categories for GitHub's own release notes, used by `--generate-notes` when a release is built
-# from merged pull requests. The workflow does not rely on this: ompwire commits straight to main,
-# and scripts/release/notes.py builds the body from the log and groups it by conventional type.
-# Keep the two in step so the body reads the same whichever path produced it.
+# Categories for GitHub's own release notes, used only by `--generate-notes`. The release
+# workflow does not call it: scripts/release/notes.py builds the body from the main line, so
+# commits made straight on main appear next to merged pull requests. Keep the headings in step
+# so the two read the same.
 changelog:
   exclude:
     labels: [skip-changelog, dependencies]
