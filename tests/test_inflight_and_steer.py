@@ -394,7 +394,9 @@ def test_the_banner_new_and_status_show_the_same_agent_rows(tmp_path):
         grid = re.search(r"<pre>(.*?)</pre>", body, re.DOTALL).group(1)
         return dict(re.match(r"(\S+)\s+(.*)", line).groups() for line in grid.splitlines())
 
-    shared = ("agent", "session", "model", "mode", "thinking", "approval", "trace", "mcp", "cwd")
+    # every banner row is on /new and /status with the same value, the clock aside
+    shared = [key for key in rows(banner) if key != "clock"]
+    assert {"agent", "session", "model", "users", "store"} <= set(shared)
     for key in shared:
         assert rows(banner).get(key) == rows(new).get(key) == rows(status).get(key), key
     assert rows(status)["approval"].startswith("always-ask")  # plan mode is what omp runs under

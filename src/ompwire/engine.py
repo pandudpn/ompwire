@@ -11,6 +11,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
@@ -174,10 +175,37 @@ def _pref(prefs: dict[str, str], name: str, default: bool) -> bool:
 
 
 def _chunks(text: str, limit: int) -> list[str]:
+    """Cut a long answer into messages at line breaks. A cut inside a code block closes the
+    block in this message and opens it again, same fence and language, in the next, so every
+    message renders its code as code instead of one unclosed block and bare lines after it."""
+    from .mdrender import FENCE_OPEN_RE
+
     out: list[str] = []
-    while text:
-        out.append(text[:limit])
-        text = text[limit:]
+    current: list[str] = []
+    size = 0
+    fence = ""  # the open fence line ("```bash"), or "" outside a code block
+    for line in text.split("\n"):
+        while len(line) > limit:  # a single line past the limit is cut where it must be
+            current.append(line[:limit])
+            out.append("\n".join(current))
+            current, size, line = [], 0, line[limit:]
+        closing = "\n" + fence.strip()[:3] if fence else ""
+        if current and size + len(line) + 1 + len(closing) > limit:
+            out.append("\n".join(current) + closing)
+            current, size = ([fence.strip()], len(fence.strip()) + 1) if fence else ([], 0)
+        current.append(line)
+        size += len(line) + 1
+        opened = FENCE_OPEN_RE.match(line)
+        stripped = line.strip()
+        if fence:
+            mark = fence.strip()[0]
+            width = len(fence.strip()) - len(fence.strip().lstrip(mark))
+            if stripped and set(stripped) == {mark} and len(stripped) >= width:
+                fence = ""
+        elif opened is not None:
+            fence = line
+    if current:
+        out.append("\n".join(current))
     return out or [""]
 
 
@@ -264,8 +292,9 @@ def agent_rows(agent: ChatAgent) -> list[tuple[str, str]]:
         ("mode", agent.mode),
         ("thinking", str((options.get("thinking") or {}).get("currentValue") or "-")),
         ("approval", approval_gate(agent)),
-        ("trace", ("verbose" if agent.verbose else "quiet")
-                  + (" · reasoning" if agent.reasoning else "")),
+        ("trace", "verbose" if agent.verbose else "quiet"),
+        # off by default; shown either way so a missing thinking block has a visible reason
+        ("reasoning", "on" if agent.reasoning else "off · /reasoning on"),
         ("busy", agent.busy_mode),
         ("mcp", mcp_label(servers)),
         ("cwd", agent.cwd),
@@ -349,6 +378,30 @@ class JobCard:
     current_since_ms: int = 0
     parent: str = ""  # the `task` call that spawned it: one summary card per call
     detached: bool = False  # a background agent, which can outlive the turn that spawned it
+    session_file: str = ""  # the job's own transcript; the reason it failed is written there
+    error: str = ""
+
+
+def job_error(session_file: str) -> str:
+    """Why a job failed, from its own transcript: omp's lifecycle frame says only `failed`,
+    while the last assistant message records the provider error (a 429 limit, an auth error)."""
+    if not session_file:
+        return ""
+    try:
+        with open(os.path.expanduser(session_file), encoding="utf-8") as handle:
+            lines = handle.readlines()[-50:]
+    except OSError:
+        return ""
+
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        message = entry.get("message") if isinstance(entry, dict) else None
+        if isinstance(message, dict) and message.get("errorMessage"):
+            return " ".join(str(message["errorMessage"]).split())[:240]
+    return ""
 
 
 def _as_int(value: Any) -> int:
@@ -375,7 +428,8 @@ def job_from_frame(raw: dict[str, Any]) -> JobCard | None:
                        agent=str(payload.get("agent") or ""),
                        status=str(payload.get("status") or ""),
                        parent=parent,
-                       detached=bool(payload.get("detached")))
+                       detached=bool(payload.get("detached")),
+                       session_file=str(payload.get("sessionFile") or ""))
     if frame != "subagent_progress":
         return None
     progress = payload.get("progress")
@@ -435,9 +489,11 @@ def job_duration(ms: int) -> str:
 
 
 def job_line(card: JobCard) -> str:
-    """The status line of a job card: running · 1m20s · 3 tools, or how it ended."""
+    """The status line of a job card: running · 1m20s · 3 tools, or how it ended, with the
+    reason when it failed (a "failed" with nothing after it sends the person digging)."""
     if card.status in JOB_FINAL:
-        return job_status(card.status)
+        status = job_status(card.status)
+        return f"{status} · {card.error}" if card.error else status
     parts = [job_status(card.status)]
     if card.duration_ms:
         parts.append(job_duration(card.duration_ms))
@@ -976,9 +1032,12 @@ class ChatAgent:
             job.last_tool = fresh.last_tool or job.last_tool
             job.tool_count = max(job.tool_count, fresh.tool_count)
             job.detached = job.detached or fresh.detached
+            job.session_file = fresh.session_file or job.session_file
             if raw.get("type") == "subagent_progress":
                 job.current_tool = fresh.current_tool
                 job.current_since_ms = fresh.current_since_ms
+        if job.status == "failed" and previous != "failed" and not job.error:
+            job.error = job_error(job.session_file)
         if job.status not in JOB_FINAL:
             elapsed = int((self._clock() - self._job_began[key]) * 1000)
             job.duration_ms = max(job.duration_ms, fresh.duration_ms, elapsed)

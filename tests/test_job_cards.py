@@ -296,6 +296,28 @@ def test_a_failed_job_says_so(tmp_path):
     surface = asyncio.run(go())
     assert "⛔ failed" in surface.bodies(f"job:{PARENT}:CountPy")[-1]
 
+def test_a_failed_job_says_why_from_its_transcript(tmp_path):
+    """Seen live: two cards said only "⛔ failed"; the job's transcript held a 429 limit."""
+    transcript = tmp_path / "CountPy.jsonl"
+    transcript.write_text(
+        '{"type": "session_init"}\n'
+        '{"type": "message", "message": {"role": "assistant", "stopReason": "error", '
+        '"errorMessage": "429 [zai/glm-5.3-flash] [429]: Usage limit reached for 5 hour."}}\n')
+
+    def started(status):
+        frame = lifecycle("CountPy", status)
+        frame.raw["payload"]["sessionFile"] = str(transcript)
+        return frame
+
+    async def go():
+        agent, surface = make_agent(tmp_path)
+        await feed(agent, started("started"), started("failed"))
+        return surface
+
+    card = asyncio.run(go()).bodies(f"job:{PARENT}:CountPy")[-1]
+    assert "⛔ failed · 429 [zai/glm-5.3-flash] [429]: Usage limit reached for 5 hour." in card
+
+
 
 def test_a_quiet_chat_shows_no_job_cards(tmp_path):
     async def go():
@@ -486,7 +508,8 @@ def test_a_background_job_that_ends_after_the_turn_still_reports(tmp_path):
 def test_a_frame_says_only_what_it_carries():
     started = engine.job_from_frame(lifecycle("CountPy").raw)
     assert started == engine.JobCard(name="CountPy", agent="task", status="started",
-                                    parent=PARENT, detached=True)
+                                    parent=PARENT, detached=True,
+                                    session_file="/tmp/omp/session.jsonl")
     running = engine.job_from_frame(progress("CountPy").raw)
     assert running.model == MODEL
     assert running.tool_count == 1 and running.duration_ms == 6562

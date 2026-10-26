@@ -517,8 +517,15 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         except TelegramError as exc:
             log.warning("ack failed: %s", exc)
 
+    def info_rows(self, agent: engine.ChatAgent) -> list[tuple[str, object]]:
+        """What the start banner, /new and /status all show, in that order, for this chat."""
+        return [*agent_rows(agent),
+                ("users", ", ".join(str(u) for u in sorted(self.allowed)) or "none"),
+                ("store", self.config.get("session", "store", "")),
+                ("clock", now_wib())]
+
     def session_card(self, agent: engine.ChatAgent, title: str, note: str = "") -> str:
-        return card(title, now_wib(), agent_rows(agent), note)
+        return card(title, "", self.info_rows(agent), note)
 
     async def _busy(self, update: Update, agent: engine.ChatAgent, command: str) -> bool:
         """These commands replace the agent process; doing that mid-turn cut the turn off with
@@ -561,13 +568,12 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         queue = self.queues.get(update.effective_chat.id)
         alive = agent.client is not None and agent.client.alive
         rows = [
-            *agent_rows(agent),
+            *self.info_rows(agent),
             ("process", f"{'alive' if alive else 'stopped'} · {fmt_uptime(time.time() - agent.started_at)}"),
             ("state", "busy" if agent.busy else "idle"),
             ("queue", queue.qsize() if queue else 0),
             ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
             *self._context_rows(agent, self._session_usage(agent)),
-            ("clock", now_wib()),
         ]
         await update.effective_message.reply_text(
             card("📊 status", "", rows), parse_mode=ParseMode.HTML
@@ -1490,12 +1496,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         except Exception as exc:
             rows.append(("error", f"agent failed to start: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
-        rows += [
-            *agent_rows(agent),
-            ("users", ", ".join(str(u) for u in sorted(self.allowed)) or "none"),
-            ("store", self.config.get("session", "store", "")),
-            ("clock", now_wib()),
-        ]
+        rows += self.info_rows(agent)
         body = card("🟢 ompwire", f"{__version__} · @{username}", rows,
                     "send /help for commands · /status for live state")
         log.info("startup banner: %s", " | ".join(f"{k}={v}" for k, v in rows))

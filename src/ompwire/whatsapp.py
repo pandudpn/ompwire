@@ -588,8 +588,17 @@ class Transport:
             await self.reply(incoming, text)
 
     # ------------------------------------------------------------ commands
+    def info_rows(self, agent: engine.ChatAgent) -> list[tuple[str, object]]:
+        """What the start banner, /new and /status all show, in that order, for this chat."""
+        return [*agent_rows(agent),
+                ("users", ", ".join(sorted(self.allowed)) or "none"),
+                ("groups", f"{len(self.audience.chats)} · mode {self.audience.default_mode}"
+                 if self.audience.chats else "none"),
+                ("store", self.config.get("session", "store", "")),
+                ("clock", now_wib())]
+
     def session_card(self, agent: engine.ChatAgent, title: str, note: str = "") -> str:
-        return card(title, now_wib(), agent_rows(agent), note)
+        return card(title, "", self.info_rows(agent), note)
 
     async def command(self, incoming: Incoming, name: str, args: list[str]) -> None:
         chat = incoming.chat
@@ -626,14 +635,13 @@ class Transport:
         queue = self.queues.get(incoming.chat)
         alive = agent.client is not None and agent.client.alive
         rows = [
-            *agent_rows(agent),
+            *self.info_rows(agent),
             ("process", f"{'alive' if alive else 'stopped'} · "
                         f"{fmt_uptime(time.time() - agent.started_at)}"),
             ("state", "busy" if agent.busy else "idle"),
             ("queue", queue.qsize() if queue else 0),
             ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
             *_context_rows(agent, _session_usage(agent)),
-            ("clock", now_wib()),
         ]
         await self.send_text(incoming.chat, card("📊 status", "", rows))
 
@@ -1056,11 +1064,7 @@ class Transport:
         except Exception as exc:
             rows.append(("error", f"agent failed to start: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
-        rows += [*agent_rows(agent),
-                 ("users", ", ".join(sorted(self.allowed)) or "none"),
-                 ("groups", f"{len(self.audience.chats)} · mode {self.audience.default_mode}"
-                  if self.audience.chats else "none"),
-                 ("clock", now_wib())]
+        rows += self.info_rows(agent)
         await self.send_text(chat, card("🟢 ompwire", f"{__version__} · whatsapp {self.name}", rows,
                                         "send /help for commands"))
 
