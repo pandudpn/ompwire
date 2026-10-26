@@ -45,3 +45,42 @@ def test_a_local_command_answers_in_its_own_turn(tmp_path):
         client.close()
     assert compact.text == "Compaction complete."
     assert "Compaction" not in after.text
+
+
+# Measured on omp 18.12.6: after a prompt_result whose session has not settled, background work
+# can wake the agent again. A plain prompt then fails with "Agent is already processing"; one
+# sent with streamingBehavior "followUp" is queued behind the run and still gets its result.
+BUSY_OMP = textwrap.dedent("""
+    import json, sys
+    def send(frame):
+        sys.stdout.write(json.dumps(frame) + "\\n"); sys.stdout.flush()
+    send({"type": "ready"})
+    for line in sys.stdin:
+        msg = json.loads(line)
+        if msg.get("type") != "prompt":
+            send({"type": "response", "id": msg.get("id"), "command": msg.get("type"),
+                  "success": True, "data": {}})
+            continue
+        if msg.get("streamingBehavior") != "followUp":
+            send({"type": "response", "id": msg["id"], "command": "prompt", "success": False,
+                  "error": "Agent is already processing. Use steer() or followUp() to queue "
+                           "messages, or wait for completion."})
+            continue
+        send({"type": "response", "id": msg["id"], "command": "prompt", "success": True})
+        send({"type": "message_update", "assistantMessageEvent":
+              {"type": "text_delta", "delta": "queued and answered"}})
+        send({"type": "prompt_result", "id": msg["id"], "status": "completed"})
+""")
+
+
+def test_a_prompt_while_omp_is_still_busy_waits_its_turn(tmp_path):
+    """Seen live: "Agent error: prompt failed: Agent is already processing" on a plain message,
+    because a background job had woken the agent after the last turn ended."""
+    script = tmp_path / "omp.py"
+    script.write_text(BUSY_OMP)
+    client = AgentClient(command=sys.executable, args=[str(script)], startup_timeout=10)
+    try:
+        result = client.prompt("continue", timeout=10)
+    finally:
+        client.close()
+    assert result.text == "queued and answered"

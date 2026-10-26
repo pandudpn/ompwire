@@ -508,7 +508,11 @@ class AgentClient:
         self._turn = turn
         slot: queue.Queue = queue.Queue(maxsize=1)
         self._pending[msg_id] = slot
-        params: dict[str, Any] = {"message": text}
+        # A turn can end while the session is not settled: a background job (an async `task`,
+        # an auto-backgrounded bash) wakes the agent again on its own. A plain prompt is then
+        # refused with "Agent is already processing"; followUp queues it behind that run instead,
+        # and on an idle agent it starts a turn like any prompt.
+        params: dict[str, Any] = {"message": text, "streamingBehavior": "followUp"}
         if images:
             params["images"] = images
         self._last_activity = time.monotonic()
