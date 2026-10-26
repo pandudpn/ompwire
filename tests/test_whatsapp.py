@@ -204,6 +204,13 @@ def test_a_heading_that_is_already_bold_stays_one_bold():
 def test_a_fence_keeps_its_body_and_loses_the_language_tag():
     assert to_whatsapp("```bash\nls **x**\n```") == "```ls **x**\n```"
 
+def test_a_fence_under_a_bullet_or_with_tildes_is_still_one_code_block():
+    assert to_whatsapp("- step\n  ```bash\n  ls\n  ```\n- two") == "• step\n```ls\n```\n• two"
+    assert to_whatsapp("~~~\nhello\n~~~") == "```hello\n```"
+    nested = to_whatsapp("````md\n```bash\nls **x**\n```\n````")
+    assert "ls **x**" in nested  # the inner fence is code: nothing in it is restyled
+
+
 
 def test_a_long_message_is_cut_on_lines():
     parts = chunks("\n".join(f"line {i}" for i in range(400)), 500)

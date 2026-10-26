@@ -215,7 +215,6 @@ def unlink(path: Path) -> bool:
 
 # ------------------------------------------------------------------ markup
 
-_FENCE_RE = re.compile(r"(```[^\n]*\n.*?(?:```|\Z))", re.DOTALL)
 _CODE_RE = re.compile(r"(`[^`\n]+`)")
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.DOTALL)
@@ -232,16 +231,17 @@ def to_whatsapp(text: str) -> str:
     Code spans and fences are left exactly as written; WhatsApp renders both. Everything else
     is rewritten outside them only, so a `**` inside a command is never touched.
     """
+    from .mdrender import segments
+
     out: list[str] = []
-    for part in _FENCE_RE.split(text):
-        if part.startswith("```"):
-            body = part[3:]
-            # WhatsApp shows a language tag after the fence as text; drop it
-            newline = body.find("\n")
-            if newline != -1 and re.fullmatch(r"[\w+-]*", body[:newline].strip()):
-                body = body[newline + 1:]
-            out.append("```" + body if body.endswith("```") else "```" + body + "\n```")
+    for kind, part, _language in segments(text.replace("\r\n", "\n")):
+        if kind == "code":
+            # WhatsApp shows a language tag after the fence as text, so it is dropped; the
+            # block keeps its own lines, the markdown indent and fence width taken off
+            out.append(("\n" if out else "") + "```" + part.rstrip("\n") + "\n```")
             continue
+        if out:
+            part = "\n" + part
         pieces = _CODE_RE.split(part)
         for index, piece in enumerate(pieces):
             if index % 2 == 1:

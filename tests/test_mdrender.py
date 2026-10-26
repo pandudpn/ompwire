@@ -17,6 +17,45 @@ def test_unterminated_fence_is_closed_not_swallowed():
     assert html.endswith("</code></pre>")
     assert "print(1)" in html
 
+def test_a_fence_inside_a_list_item_keeps_its_code_unindented():
+    """Models indent a fence under a bullet; the indent is markdown, not part of the code."""
+    html = to_html("- step one\n  ```bash\n  ls -la\n  ```\n- step two")
+    assert '<pre><code class="language-bash">ls -la</code></pre>' in html
+    assert "step two" in html
+
+
+def test_a_tilde_fence_is_code_not_strikethrough():
+    assert to_html("~~~\nhello\n~~~") == "<pre>hello</pre>"
+
+
+def test_a_longer_fence_can_hold_a_shorter_one():
+    html = to_html("````md\n```bash\nls\n```\n````")
+    assert html == '<pre><code class="language-md">```bash\nls\n```</code></pre>'
+
+
+def test_a_fence_with_windows_line_endings_is_code():
+    html = to_html("x\r\n```bash\r\nls\r\n```\r\n")
+    assert '<pre><code class="language-bash">ls</code></pre>' in html
+
+
+def test_a_long_answer_is_split_outside_its_code_blocks():
+    """A cut inside a fence left an unclosed block in one message and bare code in the next."""
+    from ompwire.engine import _chunks
+
+    code = "\n".join(f"line {i}" for i in range(400))
+    text = "Intro paragraph.\n\n```bash\n" + code + "\n```\n\nOutro."
+    parts = _chunks(text, 1000)
+    assert len(parts) > 1
+    for part in parts:
+        html = to_html(part)
+        assert html.count("<pre") == html.count("</pre>")
+        assert "```" not in html, part[:80]
+        # every code line still reads as code: inside a <pre> of its own message
+        outside = html
+        for block in html.split("<pre")[1:]:
+            outside = outside.replace("<pre" + block.split("</pre>", 1)[0] + "</pre>", "")
+        assert "line 2" not in outside and "line 3" not in outside, part[:80]
+
 
 def test_inline_code_and_escaping():
     html = to_html("use `parse_mode=HTML` for <b>raw</b> & safe")
