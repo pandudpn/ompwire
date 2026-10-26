@@ -54,12 +54,7 @@ from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
 from .audience import CHANNEL, GROUP, PRIVATE, Audience
 from .config import Config, approval_policy, save_override
-from .engine import (
-    PERMISSION_TIMEOUT,
-    RESUME_PROMPT,
-    mcp_label,
-    mcp_server_names,
-)
+from .engine import RESUME_PROMPT, agent_rows
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
 from .gateways import remember_chat
@@ -463,30 +458,8 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         except TelegramError as exc:
             log.warning("ack failed: %s", exc)
 
-    def _agent_gate(self, agent: engine.ChatAgent) -> str:
-        """What the agent itself was started with, which is what decides whether anything asks."""
-        if getattr(agent, "yolo", False):
-            return "yolo · no tool asks"
-        mode = str(self.config.get("agent", "approval_mode", "write") or "write")
-        if approval_policy(self.config) == "allow":
-            return f"{mode} · auto-allow · nothing asks"
-        if approval_policy(self.config) == "deny":
-            return f"{mode} · auto-deny"
-        timeout = float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
-        return f"{mode} · asks · {timeout:.0f}s"
-
     def session_card(self, agent: engine.ChatAgent, title: str, note: str = "") -> str:
-        options = getattr(agent, "options", {}) or {}
-        rows = [
-            ("session", agent.session_id[:8]),
-            ("model", (options.get("model") or {}).get("currentValue", "?")),
-            ("mode", (options.get("mode") or {}).get("currentValue", "?")),
-            ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
-            ("approval", self._agent_gate(agent)),
-            ("yolo", "on · nothing asks" if agent.yolo else "off"),
-            ("cwd", agent.cwd),
-        ]
-        return card(title, now_wib(), rows, note)
+        return card(title, now_wib(), agent_rows(agent), note)
 
     async def _busy(self, update: Update, agent: engine.ChatAgent, command: str) -> bool:
         """These commands replace the agent process; doing that mid-turn cut the turn off with
@@ -528,19 +501,11 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         agent = self.agent_for(update.effective_chat.id)
         queue = self.queues.get(update.effective_chat.id)
         alive = agent.client is not None and agent.client.alive
-        options = getattr(agent, "options", {}) or {}
         rows = [
-            ("session", agent.session_id[:8] or "-"),
+            *agent_rows(agent),
             ("process", f"{'alive' if alive else 'stopped'} · {fmt_uptime(time.time() - agent.started_at)}"),
             ("state", "busy" if agent.busy else "idle"),
             ("queue", queue.qsize() if queue else 0),
-            ("model", (options.get("model") or {}).get("currentValue", "?")),
-            ("mode", (options.get("mode") or {}).get("currentValue", "?")),
-            ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
-            ("cwd", agent.cwd),
-            ("approval", approval_policy(self.config)),
-            ("yolo", "on" if agent.yolo else "off"),
-            ("trace", "verbose" if agent.verbose else "quiet"),
             ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
             *self._context_rows(agent, self._session_usage(agent)),
             ("clock", now_wib()),
@@ -1324,32 +1289,14 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         if chat_id is None:
             return
         rows: list[tuple[str, object]] = []
+        agent = self.agent_for(chat_id)
         try:
-            agent = self.agent_for(chat_id)
             await agent.ensure()
-            options = getattr(agent, "options", {}) or {}
-            rows += [
-                ("agent", f"omp {agent.agent_version or '?'}"),
-                ("session", agent.session_id[:8]),
-                ("model", (options.get("model") or {}).get("currentValue", "?")),
-                ("mode", f"{(options.get('mode') or {}).get('currentValue', '?')}"
-                         f" · thinking {(options.get('thinking') or {}).get('currentValue', '-')}"),
-                ("cwd", agent.cwd),
-            ]
         except Exception as exc:
-            rows.append(("agent", f"failed: {exc}"))
+            rows.append(("error", f"agent failed to start: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
-        # omp loads these itself in RPC mode; the banner only names them
-        try:
-            servers = mcp_server_names()
-        except Exception as exc:
-            servers = []
-            log.warning("mcp list unreadable: %s", exc)
         rows += [
-            ("approval", self._agent_gate(agent)),
-            ("yolo", "on" if agent.yolo else "off"),
-            ("reasoning", "on" if agent.reasoning else "off"),
-            ("mcp", mcp_label(servers)),
+            *agent_rows(agent),
             ("users", ", ".join(str(u) for u in sorted(self.allowed)) or "none"),
             ("store", self.config.get("session", "store", "")),
             ("clock", now_wib()),

@@ -307,3 +307,41 @@ def test_a_restart_in_plan_mode_starts_the_agent_read_only(tmp_path):
         return agent._build_client().args
 
     assert "--approval-mode=always-ask" in asyncio.run(build())
+
+
+def test_the_banner_new_and_status_show_the_same_agent_rows(tmp_path):
+    """The banner said plan mode while /status said default; one set of rows feeds all three."""
+    import re
+
+    config = _config(tmp_path)
+    config.data["gateway"] = {"name": "t", "allowed_users": [7], "home_channel": 7}
+
+    async def go():
+        transport, _queued = _transport(config, Client(), False)
+        agent = transport.agents[7]
+        agent.options = {"model": {"currentValue": "a/one"}, "thinking": {"currentValue": "high"},
+                         "mode": {"currentValue": "plan"}}
+
+        async def ready(yolo=False):
+            return None
+
+        agent.ensure = ready
+        agent.new_session = ready
+        await transport.startup_banner("bot")
+        update = types.SimpleNamespace(effective_chat=types.SimpleNamespace(id=7, type="private"),
+                                       effective_user=types.SimpleNamespace(id=7),
+                                       effective_message=Msg("/new"), callback_query=None)
+        await transport.cmd_new(update, None)
+        await transport.cmd_status(update, None)
+        return transport.app.bot.messages + update.effective_message.replies
+
+    banner, new, status = asyncio.run(go())
+
+    def rows(body):
+        grid = re.search(r"<pre>(.*?)</pre>", body, re.DOTALL).group(1)
+        return dict(re.match(r"(\S+)\s+(.*)", line).groups() for line in grid.splitlines())
+
+    shared = ("agent", "session", "model", "mode", "thinking", "approval", "trace", "mcp", "cwd")
+    for key in shared:
+        assert rows(banner).get(key) == rows(new).get(key) == rows(status).get(key), key
+    assert rows(status)["approval"].startswith("always-ask")  # plan mode is what omp runs under

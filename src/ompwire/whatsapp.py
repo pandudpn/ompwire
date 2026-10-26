@@ -35,7 +35,7 @@ from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
 from .audience import GROUP, PRIVATE, Audience
 from .config import Config, approval_policy, save_override
-from .engine import RESUME_PROMPT, mcp_label, mcp_server_names
+from .engine import RESUME_PROMPT, agent_rows
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
 from .gateways import remember_chat, user_id
@@ -526,16 +526,7 @@ class Transport:
 
     # ------------------------------------------------------------ commands
     def session_card(self, agent: engine.ChatAgent, title: str, note: str = "") -> str:
-        options = getattr(agent, "options", {}) or {}
-        return card(title, now_wib(), [
-            ("session", agent.session_id[:8]),
-            ("model", (options.get("model") or {}).get("currentValue", "?")),
-            ("mode", (options.get("mode") or {}).get("currentValue", "?")),
-            ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
-            ("approval", approval_policy(self.config)),
-            ("yolo", "on" if agent.yolo else "off"),
-            ("cwd", agent.cwd),
-        ], note)
+        return card(title, now_wib(), agent_rows(agent), note)
 
     async def command(self, incoming: Incoming, name: str, args: list[str]) -> None:
         chat = incoming.chat
@@ -571,23 +562,14 @@ class Transport:
     async def cmd_status(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
         queue = self.queues.get(incoming.chat)
         alive = agent.client is not None and agent.client.alive
-        options = getattr(agent, "options", {}) or {}
-        seen = _session_usage(agent)
         rows = [
-            ("session", agent.session_id[:8] or "-"),
+            *agent_rows(agent),
             ("process", f"{'alive' if alive else 'stopped'} · "
                         f"{fmt_uptime(time.time() - agent.started_at)}"),
             ("state", "busy" if agent.busy else "idle"),
             ("queue", queue.qsize() if queue else 0),
-            ("model", (options.get("model") or {}).get("currentValue", "?")),
-            ("mode", (options.get("mode") or {}).get("currentValue", "?")),
-            ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
-            ("cwd", agent.cwd),
-            ("approval", approval_policy(self.config)),
-            ("yolo", "on" if agent.yolo else "off"),
-            ("trace", "verbose" if agent.verbose else "quiet"),
             ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
-            *_context_rows(agent, seen),
+            *_context_rows(agent, _session_usage(agent)),
             ("clock", now_wib()),
         ]
         await self.send_text(incoming.chat, card("📊 status", "", rows))
@@ -944,20 +926,10 @@ class Transport:
         agent = self.agent_for(chat)
         try:
             await agent.ensure()
-            options = getattr(agent, "options", {}) or {}
-            rows += [("agent", f"omp {agent.agent_version or '?'}"),
-                     ("session", agent.session_id[:8]),
-                     ("model", (options.get("model") or {}).get("currentValue", "?")),
-                     ("cwd", agent.cwd)]
         except Exception as exc:
-            rows.append(("agent", f"failed: {exc}"))
+            rows.append(("error", f"agent failed to start: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
-        try:
-            servers = mcp_server_names()
-        except Exception:
-            servers = []
-        rows += [("approval", approval_policy(self.config)),
-                 ("mcp", mcp_label(servers)),
+        rows += [*agent_rows(agent),
                  ("users", ", ".join(sorted(self.allowed)) or "none"),
                  ("groups", f"{len(self.audience.chats)} · mode {self.audience.default_mode}"
                   if self.audience.chats else "none"),

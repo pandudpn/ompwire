@@ -200,6 +200,44 @@ def mcp_label(names: Iterable[str]) -> str:
     return shown
 
 
+def approval_gate(agent: ChatAgent) -> str:
+    """What the agent was started with, which is what decides whether anything asks."""
+    if agent.yolo:
+        return "yolo · nothing asks"
+    approval_mode = str(agent.config.get("agent", "approval_mode", "write") or "write")
+    if agent.mode == "plan":
+        return "always-ask · reads only (plan mode)"
+    policy = approval_policy(agent.config)
+    if policy == "allow":
+        return f"{approval_mode} · auto-allow · nothing asks"
+    if policy == "deny":
+        return f"{approval_mode} · auto-deny"
+    timeout = float(agent.config.get("approval", "timeout", PERMISSION_TIMEOUT))
+    return f"{approval_mode} · asks · {timeout:.0f}s"
+
+
+def agent_rows(agent: ChatAgent) -> list[tuple[str, str]]:
+    """The agent's state as every card shows it: the start banner, /new and /status read the same
+    rows, so the three never disagree on what the chat is running."""
+    options = agent.options or {}
+    try:
+        servers = mcp_server_names()
+    except Exception:  # an unreadable mcp.json must not take a status card down with it
+        servers = []
+    return [
+        ("agent", f"omp {agent.agent_version or '?'}"),
+        ("session", agent.session_id[:8] or "-"),
+        ("model", str((options.get("model") or {}).get("currentValue") or "?")),
+        ("mode", agent.mode),
+        ("thinking", str((options.get("thinking") or {}).get("currentValue") or "-")),
+        ("approval", approval_gate(agent)),
+        ("trace", ("verbose" if agent.verbose else "quiet")
+                  + (" · reasoning" if agent.reasoning else "")),
+        ("mcp", mcp_label(servers)),
+        ("cwd", agent.cwd),
+    ]
+
+
 def context_line(used: int, size: int) -> str:
     """One readable row for /status and /usage, e.g. "124k / 1M (12%)"."""
     if size <= 0:

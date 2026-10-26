@@ -68,6 +68,18 @@ valkey
         assert options == []
         assert text == "write `<<options: a | b>>` on its own line"
 
+    def test_a_marker_that_ends_the_last_sentence_is_a_question(self):
+        """Seen live: the model asked inline and the marker reached the chat as raw text."""
+        text, options = extract(
+            "Open question satu: layanannya apa? <<options: Cuci biasa | Cuci + wax | Full interior>>")
+        assert options == ["Cuci biasa", "Cuci + wax", "Full interior"]
+        assert text == "Open question satu: layanannya apa?"
+
+    def test_a_marker_followed_by_more_text_on_its_line_is_a_mention(self):
+        text, options = extract("the <<options: a | b>> marker becomes buttons")
+        assert options == []
+        assert text == "the <<options: a | b>> marker becomes buttons"
+
 
 class TestHidePartial:
     def test_a_half_written_marker_is_hidden_while_streaming(self):
@@ -81,6 +93,9 @@ class TestHidePartial:
     def test_a_mentioned_marker_is_shown_while_streaming(self):
         assert hide_partial("use `<<options: a | b>>` like this", final=False) == \
             "use `<<options: a | b>>` like this"
+
+    def test_a_half_written_trailing_marker_is_hidden_while_streaming(self):
+        assert hide_partial("Mau yang mana? <<options: Cuci bi", final=False) == "Mau yang mana?"
 
     def test_final_text_drops_the_marker(self):
         assert hide_partial("""Choose
