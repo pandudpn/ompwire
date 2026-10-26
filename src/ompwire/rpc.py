@@ -61,10 +61,6 @@ class Update:
                 return content.get("text") or ""
         return ""
 
-    @property
-    def tool_title(self) -> str:
-        return str(self.raw.get("title") or self.raw.get("toolName") or "")
-
 
 @dataclass(slots=True)
 class PromptResult:

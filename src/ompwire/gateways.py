@@ -173,9 +173,6 @@ class Gateway:
         self.group_modes = {chat_id(key): str(value).lower() for key, value in self.group_modes.items()
                             if chat_id(key) and str(value).lower() in GROUP_MODES}
 
-    def mode_for(self, chat: str) -> str:
-        return self.group_modes.get(chat_id(chat), self.group_mode)
-
     @property
     def implemented(self) -> bool:
         return self.kind in IMPLEMENTED

@@ -80,7 +80,7 @@ class TestDefinitions:
                                         group_modes={"-1005678": "all"})])
         item = gateways.get("tg")
         assert (item.home, item.groups) == ("-1001234", ["-1001234", "-1005678"])
-        assert (item.mode_for("-1001234"), item.mode_for("-1005678")) == ("mention", "all")
+        assert (item.group_mode, item.group_modes) == ("mention", {"-1005678": "all"})
 
     def test_an_unknown_group_mode_falls_back_to_mention(self, sandbox):
         (sandbox / "gateways").mkdir()
