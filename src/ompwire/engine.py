@@ -382,14 +382,20 @@ class JobCard:
     error: str = ""
 
 
+JOB_ERROR_TAIL = 256 * 1024
+
+
 def job_error(session_file: str) -> str:
     """Why a job failed, from its own transcript: omp's lifecycle frame says only `failed`,
     while the last assistant message records the provider error (a 429 limit, an auth error)."""
     if not session_file:
         return ""
+    # Only the tail: this runs on the event loop and a long job's transcript runs to megabytes.
     try:
-        with open(os.path.expanduser(session_file), encoding="utf-8") as handle:
-            lines = handle.readlines()[-50:]
+        with open(os.path.expanduser(session_file), "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - JOB_ERROR_TAIL))
+            lines = handle.read().decode("utf-8", "replace").splitlines()[-50:]
     except OSError:
         return ""
 
