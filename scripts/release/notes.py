@@ -187,9 +187,14 @@ def render(commits: list[Commit], from_tag: str, to_tag: str, base: str,
             return f"[#{commit.pull}]({base}/pull/{commit.pull})"
         return f"[{commit.sha}]({base}/commit/{commit.sha})"
 
+    def who(author: Author) -> str:
+        login = logins.get(author.email.lower(), "")
+        return f"@{login}" if login else author.name
+
     def entry(commit: Commit, scoped: bool = True) -> str:
         text = f"**{commit.scope}**: {commit.text}" if scoped and commit.scope else commit.text
-        line = f"- {text} ({link(commit)})"
+        credit = "".join(f" {who(author)}" for author in commit.authors if not author.bot)
+        line = f"- {text} ({link(commit)}{credit})"
         for number in commit.references:
             line += f", #{number}"
         return line
@@ -220,10 +225,6 @@ def render(commits: list[Commit], from_tag: str, to_tag: str, base: str,
         for author in commit.authors:
             if not author.bot:
                 people.setdefault(author.email.lower(), (author, commit))
-
-    def who(author: Author) -> str:
-        login = logins.get(author.email.lower(), "")
-        return f"@{login}" if login else author.name
 
     if people:
         lines += ["### Contributors", ""]

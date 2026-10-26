@@ -107,10 +107,11 @@ git tag -a v1.5.0 -m "ompwire 1.5.0" && git push origin v1.5.0
 
 The release body is not typed by hand either. `scripts/release/notes.py` walks the main line
 between the previous tag and this one. A merged pull request becomes one entry linked to it, with
-its own commits folded in; a commit made on main links the commit. Subjects are parsed as
-conventional commits and grouped into Breaking changes, Features, Fixes, Performance, Refactoring,
-Documentation, Tests, Build and CI. A Contributors section credits every author by GitHub login,
-and New contributors names anyone whose first commit ships in this release. Version bumps and
+its own commits folded in; a commit made on main links the commit. Each entry names its authors by
+GitHub login, as in `(#9 @pandudpn)`. Subjects are parsed as conventional commits and grouped
+into Breaking changes, Features, Fixes, Performance, Refactoring, Documentation, Tests, Build and
+CI. A Contributors section lists everyone once, and New contributors names anyone whose first
+commit ships in this release. Version bumps and
 their reverts are left out. Write commits and pull request titles worth reading, because they
 become the release page:
 

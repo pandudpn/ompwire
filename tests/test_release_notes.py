@@ -43,13 +43,18 @@ def repo(tmp_path, monkeypatch):
     return git
 
 
-def test_a_merged_pull_request_is_one_entry_linked_to_it(repo):
+def test_a_merged_pull_request_is_one_entry_linked_to_it_and_its_author(repo):
     commits = release_notes.log("v1.0.0", "v1.1.0")
-    body = release_notes.render(commits, "v1.0.0", "v1.1.0", BASE)
-    assert "- **agent**: talk over rpc instead of acp ([#9](https://github.com/o/r/pull/9))" in body
+    body = release_notes.render(commits, "v1.0.0", "v1.1.0", BASE,
+                                logins={"budi@example.com": "budi-gh"})
+    assert ("- **agent**: talk over rpc instead of acp ([#9](https://github.com/o/r/pull/9) @budi-gh)"
+            in body)
     # the pull request's own commits are folded into its entry, not listed again
     assert "fix the rpc test" not in body
+    # a commit on main credits its author too; one GitHub cannot match keeps the git name, no @
     assert "**api**: keep the token out of the log ([" in body
+    api = next(line for line in body.splitlines() if "keep the token" in line)
+    assert api.endswith(" Ana)") and "@Ana" not in api
 
 
 def test_a_version_bump_and_its_revert_stay_out_of_the_notes(repo):
