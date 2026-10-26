@@ -183,27 +183,37 @@ def _chunks(text: str, limit: int) -> list[str]:
     out: list[str] = []
     current: list[str] = []
     size = 0
-    fence = ""  # the open fence line ("```bash"), or "" outside a code block
+    opener = marker = ""  # the open fence ("```bash", "```"), or "" outside a code block
+
+    def cut() -> None:
+        nonlocal current, size
+        if opener and current and current[-1] == opener and len(current) > 1:
+            current.pop()  # a fence that just opened moves with its code, not left empty here
+            out.append("\n".join(current).rstrip("\n"))
+        else:
+            out.append("\n".join(current + ([marker] if marker else [])))
+        current, size = ([opener], len(opener) + 1) if opener else ([], 0)
+
     for line in text.split("\n"):
-        while len(line) > limit:  # a single line past the limit is cut where it must be
-            current.append(line[:limit])
-            out.append("\n".join(current))
-            current, size, line = [], 0, line[limit:]
-        closing = "\n" + fence.strip()[:3] if fence else ""
-        if current and size + len(line) + 1 + len(closing) > limit:
-            out.append("\n".join(current) + closing)
-            current, size = ([fence.strip()], len(fence.strip()) + 1) if fence else ([], 0)
+        closing = len(marker) + 1 if marker else 0
+        while size + len(line) + closing > limit:
+            if current and current != [opener]:
+                cut()
+                continue
+            room = max(1, limit - size - closing)  # one line too long even alone
+            current.append(line[:room])
+            size += room + 1
+            line = line[room:]
+            cut()
         current.append(line)
         size += len(line) + 1
-        opened = FENCE_OPEN_RE.match(line)
         stripped = line.strip()
-        if fence:
-            mark = fence.strip()[0]
-            width = len(fence.strip()) - len(fence.strip().lstrip(mark))
-            if stripped and set(stripped) == {mark} and len(stripped) >= width:
-                fence = ""
-        elif opened is not None:
-            fence = line
+        if marker:
+            if stripped and set(stripped) == {marker[0]} and len(stripped) >= len(marker):
+                opener = marker = ""
+        elif (opened := FENCE_OPEN_RE.match(line)) is not None:
+            marker = opened.group("fence")
+            opener = marker + opened.group("info")
     if current:
         out.append("\n".join(current))
     return out or [""]

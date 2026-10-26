@@ -56,6 +56,25 @@ def test_a_long_answer_is_split_outside_its_code_blocks():
             outside = outside.replace("<pre" + block.split("</pre>", 1)[0] + "</pre>", "")
         assert "line 2" not in outside and "line 3" not in outside, part[:80]
 
+def test_a_split_inside_a_four_backtick_block_closes_it():
+    from ompwire.engine import _chunks
+
+    code = "\n".join(f"line {i}" for i in range(400))
+    for part in _chunks("````md\n" + code + "\n````", 1000):
+        html = to_html(part)
+        assert html.startswith("<pre") and html.endswith("</pre>"), part[-40:]
+        assert "`" not in html, part[-40:]
+
+
+def test_an_overlong_code_line_stays_code_in_every_message():
+    from ompwire.engine import _chunks
+
+    for part in _chunks("```text\n" + "x" * 2500 + "\n```", 1000):
+        html = to_html(part)
+        assert html.startswith("<pre") and html.endswith("</pre>"), part[:40]
+        assert len(part) <= 1000
+
+
 
 def test_inline_code_and_escaping():
     html = to_html("use `parse_mode=HTML` for <b>raw</b> & safe")
