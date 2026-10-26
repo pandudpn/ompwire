@@ -49,13 +49,14 @@ def tokens(count: object) -> str:
         return "?"
     if abs(n) < 1_000:
         return str(n)
-    if abs(n) < 1_000_000:
-        value, unit = n / 1_000, "k"
-    else:
-        value, unit = n / 1_000_000, "M"
-    digits = 2 if abs(value) < 10 else 1
-    text = f"{value:.{digits}f}".rstrip("0").rstrip(".")
-    return f"{text}{unit}"
+    value = n / 1_000
+    for unit in ("k", "M"):
+        text = f"{value:.{2 if abs(value) < 10 else 1}f}"
+        if abs(float(text)) < 1_000:
+            return f"{text.rstrip('0').rstrip('.')}{unit}"
+        value /= 1_000
+    text = f"{value:.{2 if abs(value) < 10 else 1}f}"
+    return f"{text.rstrip('0').rstrip('.')}G"
 
 
 # omp reports a compaction as "Tokens: 94611 -> 58555 (saved 36056)"; raw counts of that size

@@ -141,6 +141,8 @@ def test_token_counts_read_like_a_person_wrote_them():
 
     assert [tokens(n) for n in (0, 940, 1_234, 58_555, 94_611, 1_048_576, None)] == \
         ["0", "940", "1.23k", "58.6k", "94.6k", "1.05M", "?"]
+    assert [tokens(n) for n in (999_949, 999_950, 999_999, 999_950_000, -999_999)] == \
+        ["999.9k", "1M", "1M", "1G", "-1M"]
     assert humanize_token_report(
         "Compaction complete. Tokens: 94611 -> 58555 (saved 36056).") == \
         "Compaction complete. Tokens: 94.6k → 58.6k (saved 36.1k)."
