@@ -682,7 +682,6 @@ class ChatAgent:
         self.gateway_name = str(config.get("gateway", "name", "telegram") or "telegram")
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
         self.started_at = time.time()
-        self.pending_options: list[str] = []
         # an ask question the person owes an answer to: {"questions", "index", "answers"}
         self.pending_ask: dict[str, Any] | None = None
         # plan mode: a plan is waiting for Approve/Deny; "revise" means the next message is feedback
@@ -1333,9 +1332,13 @@ class ChatAgent:
         finally:
             self._ask_slots.pop(token, None)
             self.pending_ask = None
-            self.pending_options = []
-            self._loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(self.surface.retire_options(note)))
+
+            async def close() -> None:
+                # the store's sqlite connection belongs to the loop thread, not this one
+                self.pending_options = []
+                await self.surface.retire_options(note)
+
+            self._loop.call_soon_threadsafe(lambda: asyncio.create_task(close()))
 
     async def _show_ask_question(self, token: str) -> None:
         """Runs on the loop thread: the open question becomes the options card."""
@@ -2159,6 +2162,24 @@ class ChatAgent:
     async def list_sessions(self) -> list[dict[str, Any]]:
         """This cwd's omp transcripts, newest first: sessionId, updatedAt, size."""
         return omp_sessions.listing(self.cwd)
+
+    @property
+    def pending_options(self) -> list[str]:
+        """The answers on the open options card. Stored per chat: a restart between the
+        question and the tap used to answer the tap with "that option expired"."""
+        raw = self.store.prefs(self.key).get("pending_options") or ""
+        try:
+            options = json.loads(raw) if raw else []
+        except ValueError:
+            return []
+        return [str(option) for option in options] if isinstance(options, list) else []
+
+    @pending_options.setter
+    def pending_options(self, options: list[str]) -> None:
+        if options:
+            self.store.set_pref(self.key, "pending_options", json.dumps(list(options)))
+        else:
+            self.store.delete_pref(self.key, "pending_options")
 
     @property
     def mode(self) -> str:

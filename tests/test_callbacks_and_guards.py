@@ -94,6 +94,33 @@ def test_an_option_button_sends_the_option_text_as_the_next_prompt(tmp_path):
     assert "mysql" in query.edits[0]
 
 
+def test_an_option_offered_before_a_restart_still_answers_after_it(tmp_path):
+    """Seen live: the bot asked with options, the gateway restarted, and the tap said
+    "that option expired" because the choices lived only in memory."""
+    config = _config(tmp_path)
+
+    async def offer():
+        transport = _transport(config)
+        await transport.agent_for(7).offer_options(["postgres", "mysql"])
+
+    async def tap_after_restart():
+        transport = _transport(config)  # a new process: nothing in memory
+        sent: list[str] = []
+        transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or 1
+        query = Query("qo:1")
+        await transport.on_callback(_update(query)[0], None)
+        again = Query("qo:0")
+        await transport.on_callback(_update(again)[0], None)  # the card is spent once answered
+        return sent, query.answers, again.answers
+
+    asyncio.run(offer())
+    sent, answers, late = asyncio.run(tap_after_restart())
+    assert sent == ["mysql"]
+    assert answers == ["sent"]
+    assert late == ["that option expired"]
+
+
+
 def test_other_answer_removes_the_buttons(tmp_path):
     config = _config(tmp_path)
 
