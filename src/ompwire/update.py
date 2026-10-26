@@ -135,7 +135,7 @@ def install_mode() -> str:
                 return "pipx"
         except (OSError, subprocess.SubprocessError):
             pass
-    if (Path(_checkout_root()) / ".git").is_dir():
+    if (Path(_checkout_root()) / ".git").exists():  # a worktree's .git is a file
         return "checkout"
     return "unknown"
 

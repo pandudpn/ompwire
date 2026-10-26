@@ -6,8 +6,8 @@ import asyncio
 import types
 
 from ompwire import engine, telegram
-from ompwire.acp import PromptResult
 from ompwire.config import load_config
+from ompwire.rpc import PromptResult, Update
 from ompwire.store import SessionStore
 
 
@@ -32,20 +32,33 @@ class Bot:
 class Client:
     alive = True
 
-    def __init__(self, stop_reason="end_turn", steer_outcome="injected"):
+    def __init__(self, stop_reason="end_turn", steer_outcome="injected",
+                 follow_outcome="injected"):
         self.stop_reason = stop_reason
         self.steer_outcome = steer_outcome
+        self.follow_outcome = follow_outcome
         self.on_update = None
         self.steered: list[str] = []
+        self.followed: list[str] = []
+
+    def state(self):
+        return {}
 
     def prompt(self, *_a, **_k):
         return PromptResult(stop_reason=self.stop_reason, usage={}, text="", updates=[])
 
-    def steer(self, _sid, text, _images=None, _timeout=15.0):
+    def steer(self, text, images=None, timeout=30.0):
         self.steered.append(text)
         return self.steer_outcome, ""
 
-    def cancel(self, _sid):
+    def follow_up(self, text, images=None, timeout=30.0):
+        self.followed.append(text)
+        return self.follow_outcome, ""
+
+    def abort(self):
+        return None
+
+    def close(self):
         return None
 
 
@@ -189,6 +202,52 @@ def test_queue_mode_keeps_the_old_fifo(tmp_path):
     assert queued == ["wait your turn"]
 
 
+def _followup_config(tmp_path):
+    config = _config(tmp_path)
+    store = SessionStore(config.get("session", "store"))
+    try:
+        store.set_pref("tg:7", "busy", "followup")
+    finally:
+        store.close()
+    return config
+
+
+def test_followup_mode_hands_the_message_to_the_next_turn(tmp_path):
+    client = Client(follow_outcome="injected")
+    msg = Msg("and then run the tests")
+    queued = _submit(_followup_config(tmp_path), client, True, msg)
+    assert client.followed == ["and then run the tests"]
+    assert client.steered == []
+    assert queued == []
+    assert msg.replies and msg.replies[0].startswith("📥 follow-up queued")
+
+
+def test_a_followup_the_agent_declines_falls_back_to_the_queue(tmp_path):
+    client = Client(follow_outcome="failed")
+    msg = Msg("later")
+    queued = _submit(_followup_config(tmp_path), client, True, msg)
+    assert queued == ["later"]
+    assert msg.replies == ["📥 queued #1 · runs after the current turn"]
+
+
+def test_a_turn_that_ended_before_the_followup_becomes_a_prompt(tmp_path):
+    client = Client(follow_outcome="promptRequired")
+    msg = Msg("next thing")
+    queued = _submit(_followup_config(tmp_path), client, True, msg)
+    assert queued == ["next thing"]
+    assert msg.replies == []
+
+
+def test_the_chat_preference_beats_the_old_busy_message_setting(tmp_path):
+    config = _followup_config(tmp_path)
+    config.data.setdefault("telegram", {})["busy_message"] = "steer"
+    client = Client()
+    queued = _submit(config, client, True, Msg("after this turn"))
+    assert client.followed == ["after this turn"]
+    assert client.steered == []
+    assert queued == []
+
+
 def test_an_idle_evicted_chat_still_works_on_the_next_message(tmp_path):
     config = _config(tmp_path)
 
@@ -225,3 +284,119 @@ def test_schedule_lists_without_crashing(tmp_path, monkeypatch):
 
     asyncio.run(go())
     assert any("no schedules yet" in body for body in sent)
+
+
+class Planner(Client):
+    """Answers every prompt with a plan and records what the agent was actually sent."""
+
+    def __init__(self):
+        super().__init__()
+        self.prompts: list[str] = []
+
+    def prompt(self, text, *_a, **_k):
+        self.prompts.append(text)
+        if self.on_update is not None:  # the answer streams, as omp's does
+            self.on_update(Update(kind="agent_message_chunk", session_id="s",
+                                  raw={"content": {"type": "text", "text": "1. do it"}}))
+        return PromptResult(stop_reason="end_turn", usage={}, text="1. do it", updates=[])
+
+
+def _planning(config):
+    planner = Planner()
+    agent = _agent(config, planner)
+    planner.on_update = agent._on_update
+    agent.options = {"mode": {"currentValue": "plan"}}
+
+    async def respawn():
+        agent.client = planner  # a new omp process resuming the same session
+
+    agent.ensure = respawn
+    return agent
+
+
+def test_plan_mode_ends_with_review_buttons_and_approve_implements(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        agent = _planning(config)
+        await agent.ask("add a readme")
+        offered = list(agent.pending_options)
+        await agent.ask(engine.PLAN_OPTIONS[0])
+        return agent, offered
+
+    agent, offered = asyncio.run(go())
+    assert offered == list(engine.PLAN_OPTIONS)
+    first, second = agent.client.prompts
+    assert "Plan mode is on" in first and "add a readme" in first
+    assert second == engine.PLAN_APPROVED
+    assert agent.mode == "default"
+
+
+def test_deny_takes_the_next_message_as_feedback_and_stays_in_plan_mode(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        agent = _planning(config)
+        await agent.ask("add a readme")
+        await agent.ask(engine.PLAN_OPTIONS[1])  # Deny: no turn, it asks what to change
+        await agent.ask("also add a license")
+        return agent
+
+    agent = asyncio.run(go())
+    _first, revised = agent.client.prompts
+    assert "also add a license" in revised and "Revise the plan" in revised
+    assert agent.mode == "plan"
+    assert agent.plan_review == "pending"  # the revised plan is up for review again
+
+
+def test_a_restart_in_plan_mode_starts_the_agent_read_only(tmp_path):
+    """After a restart the options are empty until omp answers; the stored mode must decide."""
+    config = _config(tmp_path)
+
+    async def build():
+        agent = _agent(config, Client())
+        agent.store.set_pref(agent.key, "mode", "plan")
+        agent.options = {}
+        return agent._build_client().args
+
+    assert "--approval-mode=always-ask" in asyncio.run(build())
+
+
+def test_the_banner_new_and_status_show_the_same_agent_rows(tmp_path):
+    """The banner said plan mode while /status said default; one set of rows feeds all three."""
+    import re
+
+    config = _config(tmp_path)
+    config.data["gateway"] = {"name": "t", "allowed_users": [7], "home_channel": 7}
+
+    async def go():
+        transport, _queued = _transport(config, Client(), False)
+        agent = transport.agents[7]
+        agent.options = {"model": {"currentValue": "a/one"}, "thinking": {"currentValue": "high"},
+                         "mode": {"currentValue": "plan"}}
+
+        async def ready(yolo=False):
+            return None
+
+        agent.ensure = ready
+        agent.new_session = ready
+        await transport.startup_banner("bot")
+        update = types.SimpleNamespace(effective_chat=types.SimpleNamespace(id=7, type="private"),
+                                       effective_user=types.SimpleNamespace(id=7),
+                                       effective_message=Msg("/new"), callback_query=None)
+        await transport.cmd_new(update, None)
+        await transport.cmd_status(update, None)
+        return transport.app.bot.messages + update.effective_message.replies
+
+    banner, new, status = asyncio.run(go())
+
+    def rows(body):
+        grid = re.search(r"<pre>(.*?)</pre>", body, re.DOTALL).group(1)
+        return dict(re.match(r"(\S+)\s+(.*)", line).groups() for line in grid.splitlines())
+
+    # every banner row is on /new and /status with the same value, the clock aside
+    shared = [key for key in rows(banner) if key != "clock"]
+    assert {"agent", "session", "model", "users", "store"} <= set(shared)
+    for key in shared:
+        assert rows(banner).get(key) == rows(new).get(key) == rows(status).get(key), key
+    assert rows(status)["approval"].startswith("always-ask")  # plan mode is what omp runs under

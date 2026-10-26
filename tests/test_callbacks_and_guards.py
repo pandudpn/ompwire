@@ -6,8 +6,8 @@ import asyncio
 import types
 
 from ompwire import allowlist, telegram
-from ompwire.acp import PromptResult, Update
 from ompwire.config import load_config
+from ompwire.rpc import PromptResult, Update
 from ompwire.store import SessionStore
 
 
@@ -92,6 +92,57 @@ def test_an_option_button_sends_the_option_text_as_the_next_prompt(tmp_path):
     assert sent == ["mysql"]
     assert left == []  # a second tap on the same card cannot send it again
     assert "mysql" in query.edits[0]
+
+
+def test_an_option_offered_before_a_restart_still_answers_after_it(tmp_path):
+    """Seen live: the bot asked with options, the gateway restarted, and the tap said
+    "that option expired" because the choices lived only in memory."""
+    config = _config(tmp_path)
+
+    async def offer():
+        transport = _transport(config)
+        await transport.agent_for(7).offer_options(["postgres", "mysql"])
+
+    async def tap_after_restart():
+        transport = _transport(config)  # a new process: nothing in memory
+        sent: list[str] = []
+        transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or 1
+        query = Query("qo:1")
+        await transport.on_callback(_update(query)[0], None)
+        again = Query("qo:0")
+        await transport.on_callback(_update(again)[0], None)  # the card is spent once answered
+        return sent, query.answers, again.answers
+
+    asyncio.run(offer())
+    sent, answers, late = asyncio.run(tap_after_restart())
+    assert sent == ["mysql"]
+    assert answers == ["sent"]
+    assert late == ["that option expired"]
+
+
+def test_an_ask_card_does_not_outlive_the_restart_that_ended_its_ask(tmp_path):
+    """omp's ask lives in the process a restart kills; its card must not hold the next message
+    or turn a tap into a fresh prompt. A reply's own options still survive (test above)."""
+    config = _config(tmp_path)
+
+    async def ask_open():
+        agent = _transport(config).agent_for(7)
+        agent.pending_ask = {"token": "ask-1", "questions": [{"id": "q"}], "index": 0}
+        agent.pending_options = ["red", "blue"]
+
+    async def after_restart():
+        transport = _transport(config)
+        sent: list[str] = []
+        transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or 1
+        message = _Typed("something new")
+        await transport.submit(7, message, message)
+        return sent, message.replies, transport.agent_for(7).pending_options
+
+    asyncio.run(ask_open())
+    sent, replies, left = asyncio.run(after_restart())
+    assert sent == ["something new"], "the message ran instead of waiting on a dead question"
+    assert not any(reply.startswith("⏸️ held") for reply in replies)
+    assert left == []
 
 
 def test_other_answer_removes_the_buttons(tmp_path):
@@ -189,6 +240,144 @@ def test_skip_releases_what_was_held(tmp_path):
     sent, left = asyncio.run(go())
     assert sent == ["do this instead"]
     assert left == []
+
+
+def _asking(transport, options):
+    """The transport's view of an agent with omp's ask open: a real ChatAgent, a fake answer.
+
+    omp's reader thread clears `pending_ask` once it has the answer, so the fake does the same.
+    """
+    agent = transport.agent_for(7)
+    agent.pending_ask = {"token": "ask-1", "questions": [{"id": "q", "question": "Minum apa?"}],
+                         "index": 0}
+    agent.pending_options = list(options)
+    taken: list[tuple[str | None, int | None, bool]] = []
+
+    async def answer_ask(text, *, option_index=None, skip=False):
+        taken.append((text, option_index, skip))
+        agent.pending_ask = None
+        agent.pending_options = []
+        return True
+
+    agent.answer_ask = answer_ask
+    sent: list[str] = []
+    transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or len(sent)
+    return agent, taken, sent
+
+
+def test_an_ask_option_button_answers_the_question_instead_of_sending_its_label(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent, taken, sent = _asking(transport, ["teh", "kopi"])
+        query = Query("qo:1")
+        await transport.on_callback(_update(query)[0], None)
+        return taken, sent, agent.pending_ask
+
+    taken, sent, pending = asyncio.run(go())
+    assert taken == [(None, 1, False)]  # the index omp chose, not "kopi" as a prompt
+    assert sent == []
+    assert pending is None
+
+
+def test_an_ask_skip_cancels_the_question(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent, taken, sent = _asking(transport, ["teh", "kopi"])
+        query = Query("qo:skip")
+        await transport.on_callback(_update(query)[0], None)
+        return taken, sent, agent.pending_ask
+
+    taken, sent, pending = asyncio.run(go())
+    assert taken == [(None, None, True)]
+    assert sent == []
+    assert pending is None
+
+
+def test_a_typed_message_answers_the_open_ask(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        _agent, taken, sent = _asking(transport, ["teh", "kopi"])
+        typed = _Typed("es teh tanpa gula")
+        await transport.submit(7, typed, typed)
+        return taken, sent
+
+    taken, sent = asyncio.run(go())
+    assert taken == [("es teh tanpa gula", None, False)]
+    assert sent == []
+
+
+def test_a_message_typed_after_the_answer_becomes_a_prompt_again(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        _agent, taken, sent = _asking(transport, ["teh"])
+        first = _Typed("teh")
+        await transport.submit(7, first, first)
+        second = _Typed("lanjut yang tadi")
+        await transport.submit(7, second, second)
+        return taken, sent
+
+    taken, sent = asyncio.run(go())
+    assert taken == [("teh", None, False)]
+    assert sent == ["lanjut yang tadi"]
+
+
+def test_what_was_held_goes_out_only_after_the_ask_closes(tmp_path):
+    """A multi-question ask keeps `pending_ask` set: releasing early would run a second turn."""
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent, taken, sent = _asking(transport, ["pagi", "sore"])
+        held = _Typed("abaikan, jawab pertanyaan tadi")
+        transport.held[7] = [(held, held)]
+
+        async def answer_ask(text, *, option_index=None, skip=False):
+            taken.append((text, option_index, skip))
+            return True  # the ask stays open: omp moved on to its next question
+
+        agent.answer_ask = answer_ask
+        query = Query("qo:0")
+        await transport.on_callback(_update(query)[0], None)
+        released_while_open = list(sent)
+        agent.pending_ask = None  # the last answer lands
+        await asyncio.sleep(2 * telegram.ASK_POLL_INTERVAL)
+        return released_while_open, sent
+
+    released_while_open, sent = asyncio.run(go())
+    assert released_while_open == []
+    assert sent == ["abaikan, jawab pertanyaan tadi"]
+
+
+def test_an_ask_that_closed_before_the_tap_reports_the_stale_card(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent = transport.agent_for(7)
+        agent.pending_ask = {"token": "ask-1", "questions": [{"id": "q"}], "index": 0}
+        agent.pending_options = ["teh"]
+
+        async def answer_ask(text, *, option_index=None, skip=False):
+            return False
+
+        agent.answer_ask = answer_ask
+        sent: list[str] = []
+        transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or 1
+        query = Query("qo:0")
+        await transport.on_callback(_update(query)[0], None)
+        return sent, query.answers
+
+    sent, answers = asyncio.run(go())
+    assert sent == []
+    assert answers == ["that option expired"]
 
 
 def test_a_stale_option_button_says_so_instead_of_sending(tmp_path):
@@ -318,6 +507,7 @@ def test_two_answers_in_one_turn_stay_two_messages(tmp_path):
     class Client:
         alive = True
         on_update = None
+        state = staticmethod(dict)
 
         def prompt(self, *_a, **_k):
             for update in updates:

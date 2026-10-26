@@ -13,8 +13,8 @@ import sys
 from typing import Any
 
 from . import engine, omp_config
-from .acp import AcpError
 from .config import Config
+from .rpc import AgentError
 
 OUTPUT_LINES = 3  # a tool's output here is a hint that it worked, not the report
 HELP = ("/new  fresh session · /stop  cancel turn · /model <id> · /mode <default|plan> · "
@@ -71,6 +71,9 @@ class TerminalSurface(engine.Surface):
     def reasoning(self, text: str) -> str:
         return _dim(f"… reasoning\n{text}")
 
+    def advisor(self, notes: list[dict[str, str]]) -> str:
+        return "\n".join(["[advisor]", *(f"  {note['severity']}: {note['note']}" for note in notes)])
+
     def plan(self, items: list[engine.PlanItem]) -> str:
         marks = {"completed": "[x]", "in_progress": "[>]"}
         done = sum(1 for item in items if item.status == "completed")
@@ -82,6 +85,24 @@ class TerminalSurface(engine.Surface):
 
     def join(self, blocks: list[str]) -> str:
         return "\n".join(blocks)
+
+    def job(self, card: engine.JobCard) -> str:
+        lines = [f"[job] {card.name} · {engine.job_line(card)}"]
+        lines += [f"  {label.lower()}: {value}" for label, value in engine.job_details(card)]
+        return "\n".join(lines)
+
+    def jobs(self, group: list[engine.JobCard], spawned: int) -> str:
+        word = "agent" if spawned == 1 else "agents"
+        background = "background " if any(card.detached for card in group) else ""
+        lines = [f"[jobs] {spawned} {background}{word} spawned"]
+        for card in group:
+            lines.append(f"  {engine.job_row(card)}")
+            if card.task:
+                lines.append(f"    {card.task}")
+        totals = engine.group_totals(group)
+        if totals:
+            lines.append(f"  {totals}")
+        return "\n".join(lines)
 
     # ----------------------------------------------------------------- posting
     async def post(self, body: str, *, kind: str) -> Any | None:
@@ -107,12 +128,36 @@ class TerminalSurface(engine.Surface):
         yield
 
     # ---------------------------------------------------------------- buttons
-    async def offer_options(self, options: list[str]) -> None:
-        """Number the answers and remember them: the next line typed is the answer."""
+    async def offer_options(self, options: list[str], question: str = "") -> None:
+        """Number the answers and remember them.
+
+        An `ask` question blocks the turn on the agent side, so the terminal answers it right
+        here: the REPL is inside ask() and cannot read a line while the turn runs. The
+        `<<options:>>` marker card is not an ask; its answer is the next line the REPL reads.
+        """
         self.offered = list(options)
+        if question:
+            print(question, flush=True)
         for index, option in enumerate(options, 1):
             print(f"{index}. {option}")
-        print("answer with a number, or type your own reply", flush=True)
+        agent = self.agent
+        if agent is None or agent.pending_ask is None:
+            print("answer with a number, or type your own reply", flush=True)
+            return
+        print("answer with a number, type your own reply, or 0 to skip", flush=True)
+        try:
+            line = (await asyncio.to_thread(input, "> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            await agent.answer_ask(None, skip=True)
+            return
+        if line.lower() in {"0", "skip"}:
+            await agent.answer_ask(None, skip=True)
+        elif line.isdigit() and 0 < int(line) <= len(options):
+            await agent.answer_ask(None, option_index=int(line) - 1)
+        elif line:
+            await agent.answer_ask(line)
+        else:
+            await agent.answer_ask(None, skip=True)
 
     def pick_option(self, line: str) -> str | None:
         """The option a numbered line stands for; the offer is spent either way."""
@@ -180,8 +225,6 @@ async def _repl(agent: engine.ChatAgent, surface: TerminalSurface) -> int:
             return 0
         if not line:
             continue
-        # the offer a turn made is spent by the next line, whatever that line turns out to be
-        answer = surface.pick_option(line)
         if line in {"/exit", "/quit"}:
             return 0
         if line == "/new":
@@ -224,13 +267,24 @@ async def _repl(agent: engine.ChatAgent, surface: TerminalSurface) -> int:
             try:
                 await agent.ensure()
                 await agent.set_option(config_id, value)
-            except AcpError as exc:
+            except AgentError as exc:
                 print(f"error: {exc}", file=sys.stderr)
             continue
+        if agent.pending_ask is not None:
+            # an ask question is open: a number picks its option, "skip" cancels, anything
+            # else is free text
+            if line.strip().lower() in {"skip", "0"}:
+                await agent.answer_ask(None, skip=True)
+            elif line.isdigit() and 0 < int(line) <= len(agent.pending_options):
+                await agent.answer_ask(None, option_index=int(line) - 1)
+            else:
+                await agent.answer_ask(line)
+            continue
+        answer = surface.pick_option(line)
         text = answer or line
         try:
             await agent.ask(text)
-        except AcpError as exc:
+        except AgentError as exc:
             print(f"error: {exc}", file=sys.stderr)
 
 
@@ -239,7 +293,7 @@ async def _chat(agent: engine.ChatAgent, surface: TerminalSurface,
     if query:
         try:
             await agent.ask(query)
-        except AcpError as exc:
+        except AgentError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         return 0

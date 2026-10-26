@@ -10,7 +10,8 @@ import html
 from collections.abc import Iterable
 from typing import Any
 
-from .format import TOOL_LINE_WIDTH, _clip
+from . import engine
+from .format import TOOL_LINE_WIDTH, _clip, tokens
 
 
 def esc(value: object) -> str:
@@ -44,6 +45,34 @@ def change(label: str, old: object, new: object, note: str = "") -> str:
     """Config-change notice: one line, old value struck through to the new one."""
     line = f"⚙️ <b>{esc(label)}</b>  <s>{esc(old)}</s> → <code>{esc(new)}</code>"
     return f"{line}\n<i>{esc(note)}</i>" if note else line
+
+
+def stats_rows(stats: dict[str, Any]) -> list[tuple[str, str]]:
+    """omp's SessionStats as card rows: messages, tool calls, tokens, cost, context."""
+    counts = stats.get("tokens") or {}
+    rows = [
+        ("messages", f"{stats.get('userMessages', 0)} you · "
+                     f"{stats.get('assistantMessages', 0)} agent · "
+                     f"{stats.get('totalMessages', 0)} total"),
+        ("tools", f"{stats.get('toolCalls', 0)} calls"),
+        ("tokens", f"in {tokens(counts.get('input'))} · out {tokens(counts.get('output'))}"),
+        ("cache", f"{tokens(counts.get('cacheRead'))} read · "
+                  f"{tokens(counts.get('cacheWrite'))} written"),
+        ("total", tokens(counts.get("total"))),
+    ]
+    cost = stats.get("cost")
+    if isinstance(cost, (int, float)):
+        rows.append(("cost", f"${cost:.4f}"))
+    premium = stats.get("premiumRequests")
+    if premium:
+        rows.append(("premium", f"{premium} requests"))
+    usage = stats.get("contextUsage") or {}
+    window = usage.get("contextWindow")
+    if window:
+        used = int(usage.get("tokens") or 0)
+        rows.append(("context", f"{tokens(used)} / {tokens(window)} "
+                                f"({used * 100 // int(window)}%)"))
+    return rows
 
 
 # What the tool is for, at a glance; anything not listed is a plugin or MCP tool
@@ -119,6 +148,41 @@ def plan_card(items: Iterable[Any]) -> str:
             text = f"<b>{text}</b>"
         lines.append(f"{PLAN_MARKS.get(item.status, '⬜')} {text}")
     return "\n".join(lines)
+
+
+def job_group(group: Iterable[engine.JobCard], spawned: int) -> str:
+    """The card that opens a `task` call: one row per job with its task, then the totals."""
+    group = list(group)
+    word = "agent" if spawned == 1 else "agents"
+    background = "background " if any(card.detached for card in group) else ""
+    lines: list[str] = []
+    for card in group:
+        lines.append(engine.job_row(card))
+        if card.task:
+            lines.append(f"  {card.task}")
+    totals = engine.group_totals(group)
+    if totals:
+        lines += ["", totals]
+    return (f"🤖 <b>subagent</b> (spawned {spawned} {background}{word})\n"
+            f"<pre>{esc(chr(10).join(lines))}</pre>")
+
+
+def job_block(card: engine.JobCard) -> str:
+    """One subagent as a card of its own: what it is, what it last did, how it is doing."""
+    details = engine.job_details(card)
+    width = max((len(label) for label, _ in details), default=0)
+    body = "\n".join(f"{label.ljust(width)}  {value}" for label, value in details)
+    return (f"🤖 <b>subagent</b> - {esc(card.name)} · <i>{esc(engine.job_line(card))}</i>\n"
+            f"<pre>{esc(body)}</pre>")
+
+
+def advisor_block(notes: list[dict[str, str]]) -> str:
+    """The advisor model's notes on the turn, one block each with its severity."""
+    parts = ["⚖️ <b>advisor</b>"]
+    for note in notes:
+        parts.append(f"{engine.severity_mark(note['severity'])} <i>{esc(note['severity'])}</i>\n"
+                     f"<pre>{esc(note['note'])}</pre>")
+    return "\n".join(parts)
 
 
 def help_sections(sections: Iterable[tuple[str, Iterable[tuple[str, str]]]]) -> str:

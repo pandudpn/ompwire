@@ -88,7 +88,7 @@ are the ones implemented today.
 - A `<<file:>>` path that escapes the working directory or the limits.
 - A harness secret that reaches the agent process.
 - Command injection or path traversal through configured values: `cwd`, `home_channel`, gateway
-  names, MCP hub entries, schedule names.
+  names, MCP entries in omp's `mcp.json` written by setup, schedule names.
 - Markup the agent did not intend that renders as HTML or a link usable against the reader.
 - A dependency or install-script flaw that gives remote code execution.
 

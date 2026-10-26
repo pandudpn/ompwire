@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from ompwire import config as config_module
-from ompwire import gateways, lock, omp_config, omp_sessions, service
+from ompwire import gateways, lock, omp_config, omp_sessions, service, setup
 
 
 @pytest.fixture(autouse=True)
@@ -45,4 +45,6 @@ def isolate_real_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(omp_sessions, "SESSIONS_DIR", tmp_path / "omp-sessions")
     monkeypatch.setattr(omp_sessions, "_cache", {})
     monkeypatch.setattr(omp_config, "CONFIG_PATH", tmp_path / "omp-config.yml")
+    # omp's MCP file: the banner lists the developer's servers from it, and setup writes into it
+    monkeypatch.setattr(setup, "OMP_MCP_FILE", tmp_path / "omp-mcp.json")
     return tmp_path

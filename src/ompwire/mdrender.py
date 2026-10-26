@@ -16,7 +16,10 @@ from __future__ import annotations
 import html
 import re
 
-FENCE_RE = re.compile(r"(```[^\n]*\n.*?(?:```|\Z))", re.DOTALL)
+# A fence opens on its own line: up to three spaces of indent (more under a list item), then three
+# or more backticks or tildes and an optional language. It closes on a line of the same character
+# at least as long, so a ```` block can show a ``` one inside it.
+FENCE_OPEN_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})(?P<info>[^`\n]*)$")
 INLINE_CODE_RE = re.compile(r"(`[^`\n]+`)")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.DOTALL)
@@ -39,19 +42,47 @@ def _escape_url(url: str) -> str:
     return html.escape(url, quote=True)
 
 
-def _fence(block: str) -> str:
-    body = block[3:]
-    language = ""
-    first_line, _, rest = body.partition("\n")
-    if first_line.strip() and " " not in first_line.strip() and not first_line.strip().startswith("```"):
-        language = first_line.strip()
-        body = rest
-    if body.endswith("```"):
-        body = body[:-3]
-    body = body.rstrip("\n")
+def _fence(language: str, body: str) -> str:
+    language = language.strip().split()[0] if language.strip() else ""
     tag = f'<pre><code class="language-{_escape(language)}">' if language else "<pre>"
     closing = "</code></pre>" if language else "</pre>"
-    return f"{tag}{_escape(body)}{closing}"
+    return f"{tag}{_escape(body.rstrip(chr(10)))}{closing}"
+
+
+def segments(text: str) -> list[tuple[str, str, str]]:
+    """Split text into ("text", body, "") and ("code", body, language) runs.
+
+    The fence's own indent is taken off every line of its body: a fence under a bullet is
+    indented as markdown, not as code. An unterminated fence (a reply still streaming) runs to
+    the end of the text, so the HTML stays valid."""
+    out: list[tuple[str, str, str]] = []
+    prose: list[str] = []
+    lines = text.split("\n")
+    index = 0
+    while index < len(lines):
+        opened = FENCE_OPEN_RE.match(lines[index])
+        if opened is None:
+            prose.append(lines[index])
+            index += 1
+            continue
+        if prose:
+            out.append(("text", "\n".join(prose), ""))
+            prose = []
+        indent, fence = opened.group("indent"), opened.group("fence")
+        body: list[str] = []
+        index += 1
+        while index < len(lines):
+            line = lines[index]
+            stripped = line.strip()
+            if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+                index += 1
+                break
+            body.append(line[len(indent):] if line.startswith(indent) else line.lstrip(" \t"))
+            index += 1
+        out.append(("code", "\n".join(body), opened.group("info")))
+    if prose:
+        out.append(("text", "\n".join(prose), ""))
+    return out
 
 
 def _plain_cell(cell: str) -> str:
@@ -145,16 +176,63 @@ def to_html(text: str) -> str:
     """Convert agent markdown to Telegram-safe HTML."""
     if not text:
         return ""
-    text = _tables_to_fences(text)
+    text = _tables_to_fences(text.replace("\r\n", "\n"))
     parts: list[str] = []
-    for chunk in FENCE_RE.split(text):
-        if not chunk:
-            continue
-        if chunk.startswith("```"):
-            parts.append(_fence(chunk))
+    for kind, body, language in segments(text):
+        if kind == "code":
+            # the newlines around a block are layout, already given by <pre>
+            if parts and parts[-1].endswith("\n"):
+                parts[-1] = parts[-1][:-1]
+            parts.append(_fence(language, body))
         else:
-            parts.append(_inline(chunk))
+            parts.append(_inline(body if not parts else "\n" + body))
     return "".join(parts)
+
+
+def split_markdown(text: str, limit: int) -> list[str]:
+    """Cut a long answer into messages at line breaks. A cut inside a code block closes the
+    block in this message and opens it again, same fence and language, in the next, so every
+    message renders its code as code instead of one unclosed block and bare lines after it.
+    Splitting happens on the markdown, before any transport converts it."""
+
+    out: list[str] = []
+    current: list[str] = []
+    size = 0
+    opener = marker = ""  # the open fence ("```bash", "```"), or "" outside a code block
+
+    def cut() -> None:
+        nonlocal current, size
+        if opener and current and current[-1] == opener and len(current) > 1:
+            current.pop()  # a fence that just opened moves with its code, not left empty here
+            out.append("\n".join(current).rstrip("\n"))
+        else:
+            out.append("\n".join(current + ([marker] if marker else [])))
+        current, size = ([opener], len(opener) + 1) if opener else ([], 0)
+
+    for line in text.split("\n"):
+        closing = len(marker) + 1 if marker else 0
+        while size + len(line) + closing > limit:
+            if current and current != [opener]:
+                cut()
+                continue
+            room = max(1, limit - size - closing)  # one line too long even alone
+            current.append(line[:room])
+            size += room + 1
+            line = line[room:]
+            cut()
+        current.append(line)
+        size += len(line) + 1
+        stripped = line.strip()
+        if marker:
+            if stripped and set(stripped) == {marker[0]} and len(stripped) >= len(marker):
+                opener = marker = ""
+        elif (opened := FENCE_OPEN_RE.match(line)) is not None:
+            marker = opened.group("fence")
+            opener = marker + opened.group("info")
+    if current:
+        out.append("\n".join(current))
+    return out or [""]
+
 
 
 def split_blocks(text: str, limit: int = 3200) -> list[str]:
@@ -210,5 +288,5 @@ def strip_agent_noise(text: str) -> str:
 
 def to_plain(text: str) -> str:
     """Strip the markdown markers that look like noise in a plain-text fallback."""
-    text = FENCE_RE.sub(lambda m: m.group(0).strip("`"), text)
+    text = "\n".join(body for _kind, body, _language in segments(text.replace("\r\n", "\n")))
     return re.sub(r"\*\*|~~|`", "", text)

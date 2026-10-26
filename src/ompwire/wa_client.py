@@ -215,7 +215,6 @@ def unlink(path: Path) -> bool:
 
 # ------------------------------------------------------------------ markup
 
-_FENCE_RE = re.compile(r"(```[^\n]*\n.*?(?:```|\Z))", re.DOTALL)
 _CODE_RE = re.compile(r"(`[^`\n]+`)")
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.DOTALL)
@@ -232,16 +231,17 @@ def to_whatsapp(text: str) -> str:
     Code spans and fences are left exactly as written; WhatsApp renders both. Everything else
     is rewritten outside them only, so a `**` inside a command is never touched.
     """
+    from .mdrender import segments
+
     out: list[str] = []
-    for part in _FENCE_RE.split(text):
-        if part.startswith("```"):
-            body = part[3:]
-            # WhatsApp shows a language tag after the fence as text; drop it
-            newline = body.find("\n")
-            if newline != -1 and re.fullmatch(r"[\w+-]*", body[:newline].strip()):
-                body = body[newline + 1:]
-            out.append("```" + body if body.endswith("```") else "```" + body + "\n```")
+    for kind, part, _language in segments(text.replace("\r\n", "\n")):
+        if kind == "code":
+            # WhatsApp shows a language tag after the fence as text, so it is dropped; the
+            # block keeps its own lines, the markdown indent and fence width taken off
+            out.append(("\n" if out else "") + "```" + part.rstrip("\n") + "\n```")
             continue
+        if out:
+            part = "\n" + part
         pieces = _CODE_RE.split(part)
         for index, piece in enumerate(pieces):
             if index % 2 == 1:
@@ -261,7 +261,8 @@ def to_whatsapp(text: str) -> str:
 
 
 def chunks(text: str, limit: int) -> list[str]:
-    """Cut on blank lines, then lines, so a code block is cut at a line, never mid-word."""
+    """Cut already-converted WhatsApp text at line breaks (a card, a report header). Agent
+    markdown goes through `markdown_messages` instead, which knows where its code blocks are."""
     if len(text) <= limit:
         return [text]
     parts: list[str] = []
@@ -282,6 +283,19 @@ def chunks(text: str, limit: int) -> list[str]:
     if current:
         parts.append(current)
     return parts
+
+
+def markdown_messages(markdown: str, limit: int) -> list[str]:
+    """Agent markdown as WhatsApp messages. The cut happens on the markdown, where a fence is
+    known for what it is, and each part is converted on its own, so a code block cut across
+    messages is closed in one and opened again in the next. Conversion can lengthen a line
+    (a bullet, a link's url in brackets), so the parts are cut a little short of the limit."""
+    from .mdrender import split_markdown
+
+    out: list[str] = []
+    for part in split_markdown(markdown, max(1, limit - 64)):
+        out.extend(chunks(to_whatsapp(part), limit))
+    return out
 
 
 def strip_mention(text: str, ids: set[str]) -> str:

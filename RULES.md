@@ -23,7 +23,7 @@ is shaped this way; this file says what to do and what not to do.
   running the test.
 - A user-visible change is exercised for real: against the bot, `ompwire chat`, or the real
   `omp` binary. Passing tests are not proof that a chat works.
-- A claim about the ACP wire is measured against `omp`, then written into ARCHITECTURE.md
+- A claim about omp's RPC wire is measured against `omp`, then written into ARCHITECTURE.md
   with the version it was measured on.
 
 ## Tests never touch the machine
@@ -54,7 +54,8 @@ sessions, overrides, log and lock), OMP's transcript directory and OMP's `config
   compatibility re-exports.
 - The engine (`engine.py`) speaks `Surface` and never a platform. Telegram details stay in
   `telegram.py` and the `tg_*.py` modules, WhatsApp details in `whatsapp.py` and `wa_*.py`.
-- Markers (`<<options:>>`, `<<file:>>`, `<<schedule:>>`) count only at the start of a line.
+- Markers (`<<file:>>`, `<<schedule:>>`) count only at the start of a line. `<<options:>>` also
+  counts at the very end of a reply, after the last sentence on the same line.
 - Comments explain what is not obvious from the code: a measured agent behaviour, a failure
   that happened. Plain voice, no narration of the change.
 - Anything the person reads (token counts, times) goes through `format.py`: `58.6k`, WIB.

@@ -6,8 +6,8 @@ import asyncio
 import builtins
 
 from ompwire import cli, engine
-from ompwire.acp import PromptResult, Update
 from ompwire.config import load_config
+from ompwire.rpc import PromptResult, Update
 
 
 class FakeClient:
@@ -20,7 +20,10 @@ class FakeClient:
         self.prompts: list[str] = []
         self.options: dict[str, str] = {}
 
-    def prompt(self, _session_id, text, images=None, timeout=900.0, collect=True):
+    def state(self):
+        return {}
+
+    def prompt(self, text, images=None, timeout=900.0):
         self.prompts.append(text)
         for update in self.turns.pop(0) if self.turns else []:
             if self.on_update is not None:

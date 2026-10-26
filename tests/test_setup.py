@@ -94,13 +94,13 @@ def test_config_is_written_and_parses(monkeypatch, tmp_path):
 
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert data["acp"]["command"] == "omp"
-    assert data["acp"]["args"] == ["--mode", "acp"]
+    assert data["acp"]["args"] == ["--mode", "rpc-ui"]
     assert "gateway" not in data and "telegram" not in data
     assert data["agent"]["mode"] == "default"
     assert data["agent"]["thinking"] == "xhigh"
     assert data["agent"]["yolo"] is False  # approvals stay on unless someone asks for yolo
     assert "telegram" not in data
-    assert data["mcp"]["source"] == "none"      # omp owns its servers; no hub merge by default
+    assert "mcp" not in data  # omp owns its servers in its own mcp.json
     assert "fenced code" in data["agent"]["append_system_prompt"]
 
 
@@ -436,3 +436,14 @@ def test_the_default_approval_mode_reaches_a_human():
     agent = DEFAULTS["agent"]
     assert agent["yolo"] is False
     assert agent["approval_mode"] == "write"
+
+
+def test_the_banner_names_mcp_servers_from_the_isolated_file_only(tmp_path):
+    """Review finding: the banner read the developer's ~/.omp/agent/mcp.json, so a test's
+    result depended on the machine. The suite's copy is empty until a test writes it."""
+    from ompwire import engine
+
+    assert tmp_path / "omp-mcp.json" == setup.OMP_MCP_FILE
+    assert engine.mcp_server_names() == []
+    setup.add_mcp_server("probe", "/bin/true", [])
+    assert engine.mcp_server_names() == ["probe"]

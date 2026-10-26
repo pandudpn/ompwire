@@ -17,13 +17,14 @@ from . import engine
 from .engine import PlanItem, ToolTrace
 from .format import TOOL_LINE_WIDTH, _clip, now_wib
 from .tg_html import tool_icon, tool_label
-from .wa_client import chunks, to_whatsapp
+from .wa_client import chunks, markdown_messages
 
 log = logging.getLogger("ompwire.whatsapp")
 
 WHATSAPP_LIMIT = 4000  # WhatsApp takes ~65k; past a screen a phone stops being readable
 
 STEERED = "↪️ steered · the agent reads this at its next step"
+FOLLOWED_UP = "📥 follow-up queued · it runs right after this turn"
 SKIP_WORDS = {"0", "skip", "lewati"}
 
 
@@ -96,9 +97,10 @@ class WhatsAppSurface(engine.Surface):
         self.options_listed = ""
 
     async def post(self, body: str, *, kind: str) -> Any | None:
-        text = to_whatsapp(body) if kind == "text" else body
+        # an answer is cut on its markdown, so a code block split across messages stays code
+        parts = markdown_messages(body, self.limit) if kind == "text" else chunks(body, self.limit)
         sent = None
-        for part in chunks(text, self.limit):
+        for part in parts:
             sent = await self.transport.send_text(self.chat, part)
         return sent
 
@@ -119,15 +121,38 @@ class WhatsAppSurface(engine.Surface):
         return "\n".join(lines)
 
     def reasoning(self, text: str) -> str:
-        # no collapsible block on WhatsApp: a quote keeps it visibly apart from the answer
-        quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in text.splitlines())
-        return f"🧠 _reasoning_\n{quoted}"
+        return f"🧠 *reasoning*\n```{text}```"
+
+    def advisor(self, notes: list[dict[str, str]]) -> str:
+        body = "\n\n".join(f"{engine.severity_mark(note['severity'])} {note['severity']}\n"
+                           f"{note['note']}" for note in notes)
+        return f"⚖️ *advisor*\n```{body}```"
 
     def dropped(self, count: int) -> str:
         return f"_… {count} tool call(s) not shown_"
 
     def join(self, blocks: list[str]) -> str:
         return "\n\n".join(blocks)
+
+    def job(self, card: engine.JobCard) -> str:
+        details = engine.job_details(card)
+        width = max((len(label) for label, _ in details), default=0)
+        body = "\n".join(f"{label.ljust(width)}  {value}" for label, value in details)
+        return f"🤖 *subagent* - {card.name} · _{engine.job_line(card)}_\n```{body}```"
+
+    def jobs(self, group: list[engine.JobCard], spawned: int) -> str:
+        word = "agent" if spawned == 1 else "agents"
+        background = "background " if any(card.detached for card in group) else ""
+        lines: list[str] = []
+        for card in group:
+            lines.append(engine.job_row(card))
+            if card.task:
+                lines.append(f"  {card.task}")
+        totals = engine.group_totals(group)
+        if totals:
+            lines += ["", totals]
+        return f"🤖 *subagent* (spawned {spawned} {background}{word})\n```" + \
+            "\n".join(lines) + "```"
 
     @contextlib.asynccontextmanager
     async def typing(self):
@@ -150,10 +175,12 @@ class WhatsAppSurface(engine.Surface):
             task.cancel()
             await self.transport.presence(self.chat, typing=False)
 
-    async def offer_options(self, options: list[str]) -> None:
+    async def offer_options(self, options: list[str], question: str = "") -> None:
+        """The question (omp's ask tool sends one) and its numbered answers."""
         listed = numbered(options)
         self.options_listed = listed
-        body = (card("❓ pick an answer", "reply with a number, your own words, or 0 to skip")
+        title = "❓ " + (question.strip() or "pick an answer")
+        body = (card(title, "reply with a number, your own words, or 0 to skip")
                 + f"\n\n{listed}\n\n_messages sent before you answer wait for it_")
         self.options_message = await self.transport.send_text(self.chat, body)
         self.transport.open_question(self.chat, len(options))

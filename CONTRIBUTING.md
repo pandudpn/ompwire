@@ -14,8 +14,9 @@ make install              # uv venv + editable install + dev extras
 ln -sfn "$PWD/.venv/bin/ompwire" ~/.local/bin/ompwire
 ```
 
-You also need `omp` on `PATH`. The contract tests use the real binary and skip themselves when
-it is absent, so a machine without an agent can still run everything else.
+You also need `omp` on `PATH`. The RPC contract tests (`tests/test_rpc_contract.py`) run the
+real `omp --mode rpc-ui` and skip themselves when it is absent, so a machine without an agent can
+still run everything else. Two of them run a short turn, so they need a configured model.
 
 ## Before you open a PR
 

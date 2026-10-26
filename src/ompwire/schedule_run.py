@@ -23,10 +23,10 @@ import time
 from typing import Any
 
 from . import attachments, delivery, gateways, schedules
-from .acp import AcpClient, AcpError
 from .config import PROTOCOL_HINT, load_config
-from .engine import child_env
+from .engine import agent_args, child_env
 from .format import now_wib, tokens
+from .rpc import AgentClient, AgentError
 
 log = logging.getLogger("ompwire.schedule")
 
@@ -35,20 +35,20 @@ class Interrupted(Exception):
     """The unit was stopped mid-turn, most likely by the systemd timeout."""
 
 
-def _client(item: schedules.Schedule, config: Any) -> AcpClient:
-    args = list(config.get("acp", "args") or ["--mode", "acp"])
+def _client(item: schedules.Schedule, config: Any) -> AgentClient:
+    args = agent_args(config)
     if item.ephemeral and "--no-session" not in args:
         args.append("--no-session")
-    # omp accepts always-ask | always-ask-cached | write | yolo. This client installs no
-    # permission handler, so acp answers "cancelled" to every request it cannot answer: whatever
-    # the mode still asks for is refused at once instead of waiting for a human who is asleep.
+    # omp accepts always-ask | always-ask-cached | write | yolo. This client answers no dialog,
+    # so whatever the mode still asks for is cancelled at once instead of waiting for a human
+    # who is asleep.
     args.append(f"--approval-mode={schedules.agent_approval(item.approval)}")
     hint = str(config.get("agent", "append_system_prompt", "") or "").strip()
     args += ["--append-system-prompt", f"{hint}\n\n{PROTOCOL_HINT}".strip()]
     cwd = str(config.get("agent", "cwd", "") or "") or "~"
     from pathlib import Path
 
-    return AcpClient(
+    return AgentClient(
         command=str(config.get("acp", "command", "omp")),
         args=args,
         cwd=str(Path(cwd).expanduser()),
@@ -139,16 +139,21 @@ def run(name: str) -> int:
     run_meta: dict[str, Any] = {"ok": True}
     started = time.monotonic()
     try:
-        client.initialize()
         working_dir = str(client.cwd or ".")
-        session = client.new_session(working_dir, [])
-        session_id = str(session.get("sessionId") or session.get("session_id") or "")
-        options = {str(option.get("id")): option.get("currentValue")
-                   for option in (session.get("configOptions") or [])}
-        run_meta["model"] = options.get("model") or config.get("agent", "model") or ""
-        run_meta["thinking"] = options.get("thinking") or config.get("agent", "thinking") or ""
+        wanted_model = str(config.get("agent", "model", "") or "")
+        if "/" in wanted_model:
+            provider, _, model_id = wanted_model.partition("/")
+            client.set_model(provider, model_id)
+        wanted_thinking = str(config.get("agent", "thinking", "") or "")
+        if wanted_thinking:
+            client.set_thinking(wanted_thinking)
+        state = client.state()
+        model = state.get("model") or {}
+        run_meta["model"] = (f"{model.get('provider')}/{model.get('id')}" if model.get("id")
+                             else config.get("agent", "model") or "")
+        run_meta["thinking"] = state.get("thinkingLevel") or config.get("agent", "thinking") or ""
         client.on_update = _collector(run_meta)
-        result = client.prompt(session_id, item.prompt, timeout=item.timeout)
+        result = client.prompt(item.prompt, timeout=item.timeout)
         run_meta["duration"] = time.monotonic() - started
         run_meta["usage"] = getattr(result, "usage", {}) or {}
         text = getattr(result, "text", "") or ""
@@ -160,7 +165,7 @@ def run(name: str) -> int:
         schedules.mark(name, status)
         log.info("schedule %s: %s", name, status)
         return 0
-    except AcpError as exc:
+    except AgentError as exc:
         run_meta.update(ok=False, word="agent failed", error=str(exc),
                         duration=time.monotonic() - started)
         log.error("schedule %s: agent failed: %s", name, exc)

@@ -1,6 +1,6 @@
 """The platform-neutral agent engine: one ChatAgent per conversation.
 
-This module owns everything a turn needs that is not platform I/O: the ACP subprocess and its
+This module owns everything a turn needs that is not platform I/O: the omp RPC subprocess and its
 session, the drain of updates into traces, the pacing of outgoing messages, permission asking,
 schedules, files and usage. A platform implements `Surface` and gets a working agent; nothing
 here knows Telegram.
@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import abc
 import asyncio
-import contextlib
+import inspect
+import json
 import logging
 import os
 import re
@@ -19,27 +20,29 @@ import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, ClassVar
 
 from . import allowlist, gateways, omp_sessions
 from . import schedules as schedule_lib
-from .acp import AcpClient, AcpError, AcpTimeout, pick_permission_option
-from .acp import Update as AcpUpdate
 from .attachments import extract as extract_files
 from .attachments import hide_partial as hide_file_partial
 from .config import Config, approval_policy
-from .format import humanize_token_report, tokens, wib_time
-from .mcp_hub import hub_servers, normalize
-from .mcp_hub import merge_entry as merge_mcp_entry
-from .mdrender import strip_agent_noise
+from .format import TOOL_LINE_WIDTH, _clip, humanize_token_report, tokens, wib_time
+from .mdrender import split_markdown, strip_agent_noise
 from .omp_sessions import plausible_context
 from .questions import extract as extract_options
 from .questions import hide_partial
+from .rpc import APPROVE, DENY, AgentClient, AgentError, AgentTimeout, approval_detail, is_approval
+from .rpc import Update as AgentUpdate
 from .store import SessionStore
 
 log = logging.getLogger("ompwire.engine")
 
 REASONING_CHARS = 1200  # the tail matters; the beginning usually restates the question
+ADVISOR_CHARS = 1500  # per note; the advisor writes a paragraph, not a report
+# Tools whose call changes what the agent knows next time; the trace names the skill touched.
+SKILL_TOOLS = frozenset({"manage_skill", "learn"})
 PERMISSION_TIMEOUT = 120.0
 # One more try after a restart is worth it; a turn that keeps dying with the gateway is the cause.
 RESUME_LIMIT = 2
@@ -64,12 +67,40 @@ def child_env() -> dict[str, str]:
     return env
 
 
-def _acp_args(config: Config) -> list[str]:
-    """`[acp] args`, accepting the one-string form the environment override produces."""
-    raw = config.get("acp", "args") or ["--mode", "acp"]
-    if isinstance(raw, str):
-        return shlex.split(raw)
-    return [str(part) for part in raw]
+def agent_args(config: Config) -> list[str]:
+    """`[acp] args` as omp RPC-UI arguments. The section keeps its name so existing configs load;
+    `--mode acp` and plain `--mode rpc` are read as `--mode rpc-ui`, the only mode whose `ask`
+    tool works over the wire."""
+    raw = config.get("acp", "args") or ["--mode", "rpc-ui"]
+    args = shlex.split(raw) if isinstance(raw, str) else [str(part) for part in raw]
+    if args[:1] == ["acp"]:
+        args = args[1:]  # the `omp acp` subcommand form
+    for index, part in enumerate(args):
+        if part == "--mode" and index + 1 < len(args) and args[index + 1] in {"acp", "rpc"}:
+            args[index + 1] = "rpc-ui"
+        elif part == "--mode=acp" or part == "--mode=rpc":
+            args[index] = "--mode=rpc-ui"
+    if not any(part == "--mode" or part.startswith("--mode=") for part in args):
+        args = ["--mode", "rpc-ui", *args]
+    return args
+
+
+_VERSIONS: dict[str, str] = {}
+
+
+def _omp_version(command: str) -> str:
+    """`omp --version` once per process ("omp/18.12.6" -> "18.12.6"); RPC has no handshake that
+    reports it."""
+    if command not in _VERSIONS:
+        import subprocess
+
+        try:
+            out = subprocess.run([command, "--version"], capture_output=True, text=True,
+                                 timeout=10, check=False).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        _VERSIONS[command] = out.split("/", 1)[-1].split()[0] if out else ""
+    return _VERSIONS[command]
 
 
 def resume_plan(store_path: str, prefix: str) -> tuple[list[tuple[str, str, int]],
@@ -112,13 +143,13 @@ def _is_waiting(title: str) -> bool:
     return bool(WAITING_RE.match(title.strip()))
 
 
-# ACP gives each tool call a coarse kind and files most of omp's tools under "other". The
-# transcript names the real tool; until it does, only the kinds that stand for one tool are named.
+# omp names the tool on every RPC event. A call without a name falls back to its kind, and only
+# the kinds that stand for one tool are named.
 _KIND_TOOL = {"think": "todo", "fetch": "web_search"}
 
 
 def tool_name(kind: str, raw_input: dict[str, Any], named: str = "") -> str:
-    """The tool behind a call: omp's own name when the transcript has it, else a safe guess."""
+    """The tool behind a call: omp's own name when it sent one, else a safe guess."""
     path = str(raw_input.get("path") or "")
     if path.startswith("xd://"):
         # a device runs through read or write; the device says what happened, "write" does not
@@ -146,35 +177,42 @@ def _pref(prefs: dict[str, str], name: str, default: bool) -> bool:
     return default if value is None else value == "on"
 
 
-def _chunks(text: str, limit: int) -> list[str]:
-    out: list[str] = []
-    while text:
-        out.append(text[:limit])
-        text = text[limit:]
-    return out or [""]
+def mcp_server_names() -> list[str]:
+    """The MCP servers omp loads on its own, from its `mcp.json`. In RPC mode the agent reads that
+    file itself, so this only names them for the banner; nothing is passed to the session."""
+    from .setup import read_mcp_servers
+
+    return sorted(read_mcp_servers())
 
 
-def resolve_mcp_servers(config: Any) -> list[dict[str, Any]]:
-    """The servers a session is opened with.
 
-    One resolver, because the banner lives on a different class than the session: a copy of this
-    logic in the banner reported "none" while the hub was supplying twenty-four servers.
-    """
-    source = str(config.get("mcp", "source", "inline") or "inline").lower()
-    if source == "none":
-        return []
-    if source == "mcp-hub":
-        entries = hub_servers(
-            config.get("mcp", "hub_path", "~/mcp-hub/servers.yaml"),
-            include=config.get("mcp", "include", []) or [],
-            exclude=config.get("mcp", "exclude", []) or [],
-        )
-        overrides = config.get("mcp", "overrides", {}) or {}
-        for entry in entries:
-            patch = overrides.get(entry.get("name")) or {}
-            merge_mcp_entry(entry, patch)
-        return normalize(entries)
-    return normalize(config.get("mcp", "servers", []) or [])
+def _event_text(update: AgentUpdate) -> str:
+    """The one notice line for a retry/notice/compaction event, or "" to say nothing."""
+    raw = update.raw
+    kind = str(raw.get("type") or update.kind)
+    if kind == "auto_retry_start":
+        delay = int(raw.get("delayMs") or 0) / 1000
+        return (f"🔁 retry {raw.get('attempt')}/{raw.get('maxAttempts')} in {delay:.0f}s"
+                f" · {raw.get('errorMessage')}")
+    if kind == "auto_retry_end":
+        return "🔁 retry ok" if raw.get("success") else f"🔁 retry gave up: {raw.get('finalError')}"
+    if kind == "retry_fallback_applied":
+        return f"↪️ fallback {raw.get('from')} → {raw.get('to')}" + (
+            f" ({raw.get('reason')})" if raw.get("reason") else "")
+    if kind == "retry_fallback_succeeded":
+        return f"↪️ fallback {raw.get('model')} works"
+    if kind == "notice":
+        return f"⚠️ {raw.get('message')}"
+    if kind == "extension_error":
+        return f"⚠️ extension error: {raw.get('error') or raw.get('message')}"
+    if kind == "auto_compaction_start":
+        return f"🗜️ compacting ({raw.get('reason')})…"
+    if kind == "auto_compaction_end":
+        # the transcript notice already reports before→after; only a failure is news here
+        if raw.get("aborted") or raw.get("errorMessage"):
+            return f"🗜️ compaction failed: {raw.get('errorMessage') or 'aborted'}"
+        return ""
+    return ""
 
 
 MCP_LABEL_MAX = 6
@@ -191,6 +229,47 @@ def mcp_label(names: Iterable[str]) -> str:
     return shown
 
 
+def approval_gate(agent: ChatAgent) -> str:
+    """What the agent was started with, which is what decides whether anything asks."""
+    if agent.yolo:
+        return "yolo · nothing asks"
+    approval_mode = str(agent.config.get("agent", "approval_mode", "write") or "write")
+    if agent.mode == "plan":
+        return "always-ask · reads only (plan mode)"
+    policy = approval_policy(agent.config)
+    if policy == "allow":
+        return f"{approval_mode} · auto-allow · nothing asks"
+    if policy == "deny":
+        return f"{approval_mode} · auto-deny"
+    timeout = float(agent.config.get("approval", "timeout", PERMISSION_TIMEOUT))
+    return f"{approval_mode} · asks · {timeout:.0f}s"
+
+
+def agent_rows(agent: ChatAgent) -> list[tuple[str, str]]:
+    """The agent's state as every card shows it: the start banner, /new and /status read the same
+    rows, so the three never disagree on what the chat is running."""
+    options = agent.options or {}
+    try:
+        servers = mcp_server_names()
+    except Exception:  # an unreadable mcp.json must not take a status card down with it
+        servers = []
+    return [
+        ("agent", f"omp {agent.agent_version or '?'}"),
+        ("session", agent.session_id[:8] or "-"),
+        ("model", str((options.get("model") or {}).get("currentValue") or "?")),
+        ("mode", agent.mode),
+        ("thinking", str((options.get("thinking") or {}).get("currentValue") or "-")),
+        ("approval", approval_gate(agent)),
+        ("trace", "verbose" if agent.verbose else "quiet"),
+        # off by default; shown either way so a missing thinking block has a visible reason
+        ("reasoning", "on" if agent.reasoning else "off · /reasoning on"),
+        ("advisor", "on" if agent.advisor else "off · /advisor on"),
+        ("busy", agent.busy_mode),
+        ("mcp", mcp_label(servers)),
+        ("cwd", agent.cwd),
+    ]
+
+
 def context_line(used: int, size: int) -> str:
     """One readable row for /status and /usage, e.g. "124k / 1M (12%)"."""
     if size <= 0:
@@ -198,8 +277,29 @@ def context_line(used: int, size: int) -> str:
     return f"{tokens(used)} / {tokens(size)} ({used * 100 // size}%)"
 
 
-# Choices that belong to the chat, not to one ACP session: /new must not reset them.
+# Choices that belong to the chat, not to one agent session: /new must not reset them.
 PREF_KEYS = ("model", "mode", "thinking")
+
+# Tools plan mode lets through without a button: they only look. Everything else is refused.
+PLAN_READ_TOOLS = frozenset({"read", "grep", "glob", "find", "lsp", "web_search", "todo"})
+
+# Plan mode is ompwire's: omp's own plan review lives in its terminal UI, not over RPC. The
+# turn is told to plan; the answer ends with Approve/Deny buttons; Deny takes feedback next.
+PLAN_PROMPT = (
+    "Plan mode is on. Investigate read-only: you may read, search and run read-only commands; "
+    "any write, edit or other side effect will be refused. Do not implement anything. Reply with "
+    "a concise numbered plan for the request below: the files you would change, how, and how you "
+    "would verify it. Do not ask whether to proceed; the person approves or rejects the plan with "
+    "buttons.\n\nRequest:\n{prompt}"
+)
+PLAN_APPROVED = (
+    "The plan above is approved. Plan mode is off: implement it now, then verify the result."
+)
+PLAN_FEEDBACK = (
+    "The plan above was rejected with this feedback. Revise the plan accordingly; stay in plan "
+    "mode and do not implement anything yet.\n\nFeedback:\n{feedback}"
+)
+PLAN_OPTIONS = ("✅ Approve plan", "✏️ Deny & revise")
 
 
 @dataclass
@@ -214,7 +314,7 @@ class ToolTrace:
     subagent: str = ""
     steps: list[str] = field(default_factory=list)
     brief: str = ""
-    tool: str = ""  # omp's name for it (bash, wait, todo, …); kind is ACP's coarse class
+    tool: str = ""  # omp's name for it (bash, wait, todo, …); kind is the fallback class
 
 
 @dataclass(frozen=True)
@@ -223,6 +323,249 @@ class PlanItem:
 
     content: str
     status: str
+
+
+JOB_FINAL = frozenset({"completed", "failed", "aborted"})
+JOB_EDIT_GAP = 60.0  # a running job's card moves at most this often; its last state always does
+JOB_OPEN_DELAY = 1.5  # the summary waits this long for the rest of a call's start frames
+
+
+@dataclass
+class JobCard:
+    """One subagent the `task` tool spawned, as the chat's own card shows it."""
+
+    name: str
+    agent: str = "task"
+    model: str = ""
+    status: str = ""
+    last_intent: str = ""
+    last_tool: str = ""
+    tool_count: int = 0
+    duration_ms: int = 0
+    # the call in flight and when it began: omp's durationMs stops while one long call runs
+    current_tool: str = ""
+    current_since_ms: int = 0
+    parent: str = ""  # the `task` call that spawned it: one summary card per call
+    detached: bool = False  # a background agent, which can outlive the turn that spawned it
+    session_file: str = ""  # the job's own transcript; the reason it failed is written there
+    error: str = ""
+    task: str = ""  # what the parent asked it to do: the assignment, else the task description
+    thinking: str = ""
+    requests: int = 0
+    tokens: int = 0
+    cost: float = 0.0
+
+
+JOB_ERROR_TAIL = 256 * 1024
+
+
+def job_error(session_file: str) -> str:
+    """Why a job failed, from its own transcript: omp's lifecycle frame says only `failed`,
+    while the last assistant message records the provider error (a 429 limit, an auth error)."""
+    if not session_file:
+        return ""
+    # Only the tail: this runs on the event loop and a long job's transcript runs to megabytes.
+    try:
+        with open(os.path.expanduser(session_file), "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - JOB_ERROR_TAIL))
+            lines = handle.read().decode("utf-8", "replace").splitlines()[-50:]
+    except OSError:
+        return ""
+
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        message = entry.get("message") if isinstance(entry, dict) else None
+        if isinstance(message, dict) and message.get("errorMessage"):
+            return " ".join(str(message["errorMessage"]).split())[:240]
+    return ""
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def job_from_frame(raw: dict[str, Any]) -> JobCard | None:
+    """The job one `subagent_lifecycle` or `subagent_progress` frame reports on.
+
+    omp splits a job over two frame types: lifecycle says it started or ended, progress says
+    what it is doing. Each frame carries the job id and the call that spawned it; the fields a
+    frame does not carry stay empty and the engine keeps what the earlier frames said.
+    """
+    payload = raw.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    frame = raw.get("type")
+    parent = str(payload.get("parentToolCallId") or "")
+    if frame == "subagent_lifecycle":
+        return JobCard(name=str(payload.get("id") or ""),
+                       agent=str(payload.get("agent") or ""),
+                       status=str(payload.get("status") or ""),
+                       parent=parent,
+                       detached=bool(payload.get("detached")),
+                       session_file=str(payload.get("sessionFile") or ""),
+                       task=_one_line(payload.get("description")))
+    if frame != "subagent_progress":
+        return None
+    progress = payload.get("progress")
+    if not isinstance(progress, dict):
+        return None
+    recent = [tool for tool in (progress.get("recentTools") or []) if isinstance(tool, dict)]
+    last = recent[-1] if recent else {}
+    last_tool = ""
+    if last.get("tool"):
+        args = _clip(" ".join(str(last.get("args") or "").split()), lines=1,
+                     width=TOOL_LINE_WIDTH - 20)
+        last_tool = f"{last['tool']}: {args}" if args else str(last["tool"])
+    current_tool = ""
+    if progress.get("currentTool"):
+        args = _clip(" ".join(str(progress.get("currentToolArgs") or "").split()), lines=1,
+                     width=TOOL_LINE_WIDTH - 20)
+        current_tool = f"{progress['currentTool']}: {args}" if args else str(progress["currentTool"])
+    intent = progress.get("currentToolIntent") if current_tool else None
+    return JobCard(
+        name=str(progress.get("id") or ""),
+        agent=str(progress.get("agent") or payload.get("agent") or ""),
+        model=str(progress.get("resolvedModel") or progress.get("resolvedModelIdentity") or ""),
+        status=str(progress.get("status") or ""),
+        last_intent=_clip(" ".join(str(intent or progress.get("lastIntent") or "").split()),
+                          lines=1, width=TOOL_LINE_WIDTH),
+        last_tool=current_tool or last_tool,
+        tool_count=_as_int(progress.get("toolCount")),
+        duration_ms=_as_int(progress.get("durationMs")),
+        current_tool=current_tool,
+        current_since_ms=_as_int(progress.get("currentToolStartMs")) if current_tool else 0,
+        parent=parent,
+        detached=bool(payload.get("detached")),
+        session_file=str(payload.get("sessionFile") or ""),
+        task=_one_line(payload.get("assignment") or payload.get("task")),
+        thinking=str(progress.get("resolvedThinkingLevel") or ""),
+        requests=_as_int(progress.get("requests")),
+        tokens=_as_int(progress.get("tokens")),
+        cost=_as_float(progress.get("cost")),
+    )
+
+
+def _one_line(value: Any, width: int = 160) -> str:
+    return _clip(" ".join(str(value or "").split()), lines=1, width=width)
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def job_status(status: str) -> str:
+    """The word a card shows for a job's state."""
+    if status in {"", "started"}:
+        return "running"
+    return {"completed": "✅ done", "failed": "⛔ failed", "aborted": "⛔ aborted"}.get(
+        status, status)
+
+
+def job_duration(ms: int) -> str:
+    """How long a job has run, in the shape a card shows it: 42s, 1m20s, 1h05m."""
+    elapsed = max(0, int(ms))
+    if elapsed < 1000:
+        # a job that has just started reports a few hundred ms; "0s" reads like a bug
+        return "<1s" if elapsed else "0s"
+    total = elapsed // 1000
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{seconds:02d}s"
+    return f"{seconds}s"
+
+
+def job_line(card: JobCard) -> str:
+    """The status line of a job card: running · 1m20s · 3 tools, or how it ended, with the
+    reason when it failed (a "failed" with nothing after it sends the person digging)."""
+    if card.status in JOB_FINAL:
+        status = job_status(card.status)
+        return f"{status} · {card.error}" if card.error else status
+    parts = [job_status(card.status)]
+    if card.duration_ms:
+        parts.append(job_duration(card.duration_ms))
+    if card.tool_count:
+        parts.append(f"{card.tool_count} tool{'s' if card.tool_count > 1 else ''}")
+    return " · ".join(parts)
+
+
+def job_action(card: JobCard) -> str:
+    """What the job last did: what it was for, then the call behind it. A job that has not
+    called a tool yet says so, so every card has the line the person looks for."""
+    done = " · ".join(part for part in (card.last_intent, card.last_tool) if part)
+    if done:
+        return done
+    return "none" if card.status in JOB_FINAL else "starting…"
+
+
+def job_row(card: JobCard) -> str:
+    """One line of the summary card: name · agent type · status, how long, how many tools."""
+    parts = [card.name, card.agent or "task", job_line(card)]
+    if card.status in JOB_FINAL and card.tool_count:
+        parts.append(f"{card.tool_count} tool{'s' if card.tool_count > 1 else ''}")
+    return " · ".join(parts)
+
+
+SEVERITY_MARKS = {"blocker": "🛑", "concern": "⚠️", "nit": "💡"}
+
+
+def severity_mark(severity: str) -> str:
+    """The mark an advisor note carries in the chat, by how much it should weigh."""
+    return SEVERITY_MARKS.get(severity, "📝")
+
+
+def job_usage(card: JobCard) -> str:
+    """What a job has spent so far: requests, tokens, cost. Empty until omp reports any."""
+    parts = []
+    if card.requests:
+        parts.append(f"{card.requests} request{'s' if card.requests > 1 else ''}")
+    if card.tokens:
+        parts.append(f"{tokens(card.tokens)} tokens")
+    if card.cost:
+        parts.append(f"${card.cost:.2f}")
+    return " · ".join(parts)
+
+
+def job_details(card: JobCard) -> list[tuple[str, str]]:
+    """The labelled lines of a job card, below its title and status. A line with nothing to
+    say is left out, so a job that has just started does not show empty labels."""
+    model = card.model or "?"
+    if card.thinking and card.thinking not in model:
+        model += f" · thinking {card.thinking}"
+    rows = [("Task", card.task), ("Type", card.agent or "task"), ("Model", model),
+            ("Usage", job_usage(card)), ("Last action", job_action(card))]
+    return [(label, value) for label, value in rows if value]
+
+
+def group_totals(group: list[JobCard]) -> str:
+    """The summary card's footer: how many jobs run, ended, failed, and what they spent."""
+    running = sum(1 for card in group if card.status not in JOB_FINAL)
+    done = sum(1 for card in group if card.status == "completed")
+    failed = len(group) - running - done
+    parts = [f"{running} running"] if running else []
+    if done:
+        parts.append(f"{done} done")
+    if failed:
+        parts.append(f"{failed} failed")
+    used = sum(card.tool_count for card in group)
+    if used:
+        parts.append(f"{used} tool{'s' if used > 1 else ''}")
+    spent = sum(card.tokens for card in group)
+    if spent:
+        parts.append(f"{tokens(spent)} tokens")
+    return " · ".join(parts)
 
 
 class FloodWait(Exception):
@@ -238,7 +581,8 @@ class Surface(abc.ABC):
 
     `post` sends one message: kind "text" carries raw agent markdown the surface converts,
     the other kinds arrive already rendered by this surface. `trace`, `reasoning`, `dropped`
-    and `join` are the renderers the engine calls before posting.
+    and `join` are the renderers the engine calls before posting; `job` and `jobs` render the
+    subagent cards, each update posted as a message of its own like the rest of the chat.
     """
 
     label: str
@@ -268,6 +612,10 @@ class Surface(abc.ABC):
     def reasoning(self, text: str) -> str: ...
 
     @abc.abstractmethod
+    def advisor(self, notes: list[dict[str, str]]) -> str:
+        """The advisor model's notes on the turn: each a severity and the note itself."""
+
+    @abc.abstractmethod
     def plan(self, items: list[PlanItem]) -> str:
         """The agent's todo list, posted again whenever it changes."""
 
@@ -281,7 +629,7 @@ class Surface(abc.ABC):
     def typing(self): ...  # async context manager
 
     @abc.abstractmethod
-    async def offer_options(self, options: list[str]) -> None: ...
+    async def offer_options(self, options: list[str], question: str = "") -> None: ...
 
     async def retire_options(self, note: str) -> None:
         """The open question was answered; surfaces with buttons take them away."""
@@ -305,8 +653,23 @@ class Surface(abc.ABC):
     @abc.abstractmethod
     async def notice(self, text: str) -> Any | None: ...
 
+    # The cards for the subagents a `task` call spawned. The engine keeps their order and their
+    # pacing (at most one update a minute per card, the end at once); every update is a new
+    # message, so the chat reads top to bottom instead of an old card changing out of sight.
+    @abc.abstractmethod
+    def job(self, card: JobCard) -> str:
+        """One subagent as a card of its own: what it is, what it last did, how it is doing."""
+
+    @abc.abstractmethod
+    def jobs(self, group: list[JobCard], spawned: int) -> str:
+        """The card that opens a `task` call: one line per job it spawned."""
+
+    async def job_card(self, key: str, body: str) -> Any | None:
+        """Show one job card update as a new message."""
+        return await self.post(body, kind="job")
+
 class ChatAgent:
-    """One chat's ACP agent: subprocess, session id, queue and counters."""
+    """One chat's omp agent: subprocess, session id, queue and counters."""
 
     def __init__(self, config: Config, key: str, surface: Surface, *, shared: bool = False) -> None:
         self.config = config
@@ -317,7 +680,7 @@ class ChatAgent:
         self.shared = shared
         self.label = surface.label
         self.store = SessionStore(config.get("session", "store"))
-        self.client: AcpClient | None = None
+        self.client: AgentClient | None = None
         self.session_id = ""
         # /cwd is stored with the session; without reading it back a restart silently moved the
         # chat to the configured directory while still loading the session from the other one
@@ -329,13 +692,24 @@ class ChatAgent:
         prefs = self.store.prefs(key)
         self.reasoning = _pref(prefs, "reasoning",
                                not shared and bool(config.get("stream", "show_reasoning", False)))
+        # the advisor's notes: on by default in a direct chat, since omp only sends them when
+        # its advisor is enabled, and a correction the agent got is one the person should see
+        self.advisor = _pref(prefs, "advisor",
+                             not shared and bool(config.get("stream", "show_advisor", True)))
         # the todo list last shown; omp repeats it as a reminder, and a repeat is not news
         self._last_plan: list[PlanItem] = []
         # the bot that receives a scheduled result defaults to the bot being talked to
         self.gateway_name = str(config.get("gateway", "name", "telegram") or "telegram")
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
         self.started_at = time.time()
-        self.pending_options: list[str] = []
+        # an ask question the person owes an answer to: {"questions", "index", "answers"}
+        self.pending_ask: dict[str, Any] | None = None
+        if self._stored_options()[1] == "ask":
+            # the ask died with the omp process that asked it; a card left from it would hold
+            # every new message and turn a tap into a fresh prompt instead of an answer
+            self.pending_options = []
+        # plan mode: a plan is waiting for Approve/Deny; "revise" means the next message is feedback
+        self.plan_review: str = ""
         # when this chat last got a message; the pacing gap is measured from it across turns
         self._last_post = 0.0
         self.last_used = time.time()
@@ -352,17 +726,20 @@ class ChatAgent:
             self.yolo = stored_yolo == "on"
         self.turns = 0
         self.tools_used = 0
+        # the agent's choices in one shape for every picker: {"model": {"currentValue",
+        # "options": [{"value", "name"}]}, "thinking": …}, rebuilt from get_state after each change
         self.options: dict[str, dict[str, Any]] = {}
-        # values ompwire itself asked for; omp echoes them as config_option_update, which must
-        # not be reported back as a change made from omp's side
+        # values ompwire itself asked for; omp reports them back as model_changed and
+        # thinking_level_changed, which must not be announced as a change made from omp's side
         self._asked: set[tuple[str, str]] = set()
+        self._models: list[dict[str, Any]] = []
         # set while a turn runs: posts a notice in order with the turn's own messages
         self._turn_notice: Callable[[str], None] | None = None
         self.info: dict[str, Any] = {}
         self.agent_version = ""
         self.advertised_commands: list[str] = []
-        # context window from usage_update; the size is remembered per chat, because after a
-        # restart /usage is asked before omp has sent its first report
+        # context window from get_state; the size is remembered per chat, because after a
+        # restart /usage is asked before omp has been asked
         self.context = {"used": 0, "size": int(self.store.prefs(key).get("context_size") or 0)}
         # compactions already in the transcript; a higher count after a turn is a new one
         self._compactions_seen: int | None = None
@@ -372,15 +749,39 @@ class ChatAgent:
         self._compact_turn = False
         # last context report that looked real; outlives a process restart, not a session change
         self._context_good: int | None = None
-        self._updates: asyncio.Queue[AcpUpdate | None] = asyncio.Queue()
+        self._updates: asyncio.Queue[AgentUpdate | None] = asyncio.Queue()
         self._pending_perm: dict[str, dict[str, Any]] = {}
         self._loop = asyncio.get_running_loop()
         self._lock = asyncio.Lock()
+        self._btw_waiters: dict[str, asyncio.Future] = {}
+        self._ask_slots: dict[str, dict[str, Any]] = {}
+        self._btw_records: dict[str, dict[str, Any]] = {}
+        # the subagents the `task` tool spawned, by (call that spawned it, job name): one card
+        # each, plus one summary card per call. A detached job outlives the turn that made it,
+        # so its last frame still lands here after the turn is over.
+        self._jobs: dict[tuple[str, str], JobCard] = {}
+        self._job_groups: dict[str, list[str]] = {}
+        # how many jobs each `task` call asked for, by its tool call id, read from its arguments
+        self._job_spawned: dict[str, int] = {}
+        self._job_began: dict[tuple[str, str], float] = {}  # per job, on the engine's clock
+        self._job_written: dict[str, float] = {}
+        self._job_body: dict[str, str] = {}  # what each card says, so a repeat is not sent
+        self._job_queue: list[list[str]] = []
+        self._job_flush: asyncio.Task | None = None
+        # one poll per chat while any job runs: omp's registry, read once a minute
+        self._job_poll: asyncio.Task | None = None
+        self._job_opening: set[str] = set()  # calls whose summary is about to open
+        self._job_open_delay = JOB_OPEN_DELAY
+        self._clock: Callable[[], float] = time.monotonic
+        self._sleep: Callable[[float], Any] = asyncio.sleep
 
     # ------------------------------------------------------------------ setup
-    def _build_client(self, yolo: bool = False) -> AcpClient:
-        args = _acp_args(self.config)
+    def _build_client(self, yolo: bool = False, resume: str = "") -> AgentClient:
+        args = agent_args(self.config)
         approval = "yolo" if (yolo or self.yolo) else str(self.config.get("agent", "approval_mode", ""))
+        if self.mode == "plan":
+            # every tool call asks, and _on_permission refuses each write: plan mode only reads
+            approval = "always-ask"
         hint = str(self.config.get("agent", "append_system_prompt", "") or "").strip()
         from .config import PROTOCOL_HINT
 
@@ -390,59 +791,49 @@ class ChatAgent:
             args.append(f"--approval-mode={approval}")
         if hint:
             args += ["--append-system-prompt", hint]
-        return AcpClient(
+        if resume:
+            args += ["--resume", resume]
+        return AgentClient(
             command=str(self.config.get("acp", "command", "omp")),
             args=args,
             cwd=self.cwd,
             env=child_env(),
             on_update=self._on_update,
-            on_permission=self._on_permission,
+            on_dialog=self._on_dialog,
             startup_timeout=float(self.config.get("acp", "startup_timeout", 60.0)),
         )
 
     async def ensure(self, yolo: bool = False) -> None:
         if self.client is not None and self.client.alive:
             return
-        self.client = self._build_client(yolo=yolo)
-        info = await asyncio.to_thread(self.client.initialize)
-        agent = info.get("agentInfo") or {}
-        self.agent_version = str(agent.get("version") or "")
-        self.info = info
-        log.info("agent up for %s: %s %s (approval=%s, mcp=%d)", self.label,
-                 agent.get("name"), agent.get("version"),
-                 "yolo" if self.yolo else self.config.get("agent", "approval_mode", "write"),
-                 len(self._mcp_servers()))
         record = self.store.get(self.key)
-        previous = self.client.on_update
-        self.client.on_update = None  # session/load replays the transcript
+        resume = record.session_id if record is not None else ""
+        self.client = self._build_client(yolo=yolo, resume=resume)
         try:
-            if record is not None:
-                try:
-                    result = await asyncio.to_thread(
-                        self.client.load_session, record.session_id, self.cwd, self._mcp_servers()
-                    )
-                    self.session_id = record.session_id
-                except AcpError:
-                    result = await asyncio.to_thread(self.client.new_session, self.cwd, self._mcp_servers())
-                    self.session_id = str(result.get("sessionId") or "")
-            else:
-                result = await asyncio.to_thread(self.client.new_session, self.cwd, self._mcp_servers())
-                self.session_id = str(result.get("sessionId") or "")
-        except AcpError as exc:
-            if not self._mcp_servers():
+            state = await asyncio.to_thread(self.client.state)
+        except AgentError as exc:
+            if not resume:
                 raise
-            log.warning("session/new with mcp servers failed (%s); retrying without them", exc)
-            result = await asyncio.to_thread(self.client.new_session, self.cwd, [])
-            self.session_id = str(result.get("sessionId") or "")
-        finally:
-            self.client.on_update = previous
-        self.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
+            # the transcript is gone (deleted, or another machine's): start fresh, say so
+            log.warning("resume %s failed for %s (%s); starting a new session", resume[:8],
+                        self.label, exc)
+            self.client = self._build_client(yolo=yolo)
+            state = await asyncio.to_thread(self.client.state)
+        self.session_id = str(state.get("sessionId") or "")
+        self.agent_version = self.agent_version or _omp_version(
+            str(self.config.get("acp", "command", "omp")))
+        self.info = {"agentInfo": {"name": "omp", "version": self.agent_version}}
+        log.info("agent up for %s: omp %s (approval=%s, session=%s%s)", self.label,
+                 self.agent_version or "?",
+                 "yolo" if self.yolo else self.config.get("agent", "approval_mode", "write"),
+                 self.session_id[:8], ", resumed" if resume == self.session_id else "")
         self.store.put(self.key, self.session_id, self.cwd)
+        await self._refresh_options(state)
         self._seed_context()
         await self._apply_preferences()
 
     def _seed_context(self) -> None:
-        """The first usage_update after a restart can be an unanchored sliver; the transcript
+        """The first context read after a restart can be an unanchored sliver; the transcript
         knows what the last real call carried, so that is the reference to hold it against."""
         seen = self._transcript()
         if seen is None:
@@ -460,8 +851,8 @@ class ChatAgent:
             return None
 
     async def _report_compaction(self) -> None:
-        """omp logs each compaction in its transcript, and that log is the only place it shows:
-        no event crosses ACP, and the context number alone cannot tell a compaction apart from a
+        """omp logs each compaction in its transcript, and that log is the source used here: it
+        survives restarts, and the context number alone cannot tell a compaction apart from a
         report omp could not anchor. A new entry since the last turn gets one notice."""
         seen = self._transcript()
         if seen is None:
@@ -476,29 +867,95 @@ class ChatAgent:
         await self._context_notice(f"🗜️ omp compacted the context at {wib_time(latest.at)} · "
                                    f"{tokens(latest.before)} → {tokens(latest.after)}")
 
-    def _mcp_servers(self) -> list[dict[str, Any]]:
-        return resolve_mcp_servers(self.config)
+    async def _refresh_options(self, state: dict[str, Any] | None = None) -> None:
+        """Rebuild `options` from what the agent reports: model and thinking from get_state, the
+        choices from the model catalog. ompwire's own `mode` (default | plan) rides along."""
+        client = self.client
+        if client is None:
+            return
+        if state is None:
+            state = await asyncio.to_thread(client.state)
+        if not self._models:
+            try:
+                self._models = await asyncio.to_thread(client.models)
+            except AgentError as exc:
+                log.warning("model list unavailable for %s: %s", self.label, exc)
+        try:
+            levels = await asyncio.to_thread(client.thinking_levels)
+        except AgentError:
+            levels = []
+        model = state.get("model") or {}
+        current_model = f"{model.get('provider')}/{model.get('id')}" if model.get("id") else ""
+        model_values = [{"value": f"{entry.get('provider')}/{entry.get('id')}",
+                         "name": str(entry.get("name") or entry.get("id") or "")}
+                        for entry in self._models if entry.get("id")]
+        mode = str((self.options.get("mode") or {}).get("currentValue")
+                   or self.prefs().get("mode") or "default")
+        self.options = {
+            "model": {"id": "model", "currentValue": current_model, "options": model_values},
+            "thinking": {"id": "thinking", "currentValue": str(state.get("thinkingLevel") or ""),
+                         "options": [{"value": level, "name": level} for level in levels]},
+            "mode": {"id": "mode", "currentValue": mode,
+                     "options": [{"value": "default", "name": "default"},
+                                 {"value": "plan", "name": "plan"}]},
+        }
+        usage = state.get("contextUsage") or {}
+        if usage.get("contextWindow"):
+            self._on_usage(int(usage.get("tokens") or 0), int(usage.get("contextWindow") or 0))
+
+    async def _read_context(self) -> None:
+        """RPC sends no usage event: the context meter and its warning read get_state per turn."""
+        client = self.client
+        if client is None or not client.alive:
+            return
+        try:
+            state = await asyncio.to_thread(client.state)
+        except AgentError as exc:
+            log.info("context read failed chat=%s: %s", self.label, exc)
+            return
+        usage = state.get("contextUsage") or {}
+        if usage.get("contextWindow"):
+            self._on_usage(int(usage.get("tokens") or 0), int(usage.get("contextWindow") or 0))
 
     def prefs(self) -> dict[str, str]:
         """Per-chat choices that must outlive a session (/new used to reset them)."""
         return self.store.prefs(self.key)
 
     async def set_option(self, config_id: str, value: str) -> dict[str, Any]:
-        """Set one session option and keep `options` current; every setter goes through here."""
+        """Set one option and keep `options` current; every setter goes through here.
+
+        model and thinking go to the agent; `mode` is ompwire's own (plan mode, see ask()).
+        """
+        if config_id == "mode":
+            if value not in {"default", "plan"}:
+                raise AgentError(f"unknown mode {value!r}; choose default or plan")
+            changed = value != self.mode
+            self.options.setdefault("mode", {"id": "mode", "options": []})["currentValue"] = value
+            self.store.set_pref(self.key, "mode", value)
+            if changed and self.client is not None and not self.busy:
+                # the approval mode is a process argument: the same session resumes under it
+                await self.stop_process()
+                await self.ensure()
+            return self.options
+        if self.client is None:
+            raise AgentError("the agent is not running")
         self._asked.add((config_id, value))
         try:
-            result = await asyncio.to_thread(
-                self.client.set_config_option, self.session_id, config_id, value)
+            if config_id == "model":
+                provider, _, model_id = value.partition("/")
+                if not model_id:
+                    raise AgentError(f"model {value!r} is not provider/id")
+                await asyncio.to_thread(self.client.set_model, provider, model_id)
+            elif config_id == "thinking":
+                await asyncio.to_thread(self.client.set_thinking, value)
+            else:
+                raise AgentError(f"unknown option {config_id!r}")
         finally:
-            # the echo, if omp sends one, arrives before the reply; once the reply is in, a
-            # later update carrying the same value is someone else's change
+            # the echo arrives before the reply; once the reply is in, a later report carrying
+            # the same value is someone else's change
             self._loop.call_soon(self._asked.discard, (config_id, value))
-        # the reply carries the authoritative option set; without this the pickers keep
-        # showing the previous value after a restart or /new
-        updated = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
-        if updated:
-            self.options = updated
-        return result
+        await self._refresh_options()
+        return self.options
 
     async def _apply_preferences(self) -> None:
         stored = self.prefs()
@@ -506,42 +963,284 @@ class ChatAgent:
             value = stored.get(config_id) or str(self.config.get("agent", config_id, "") or "")
             if not value or self.client is None:
                 continue
+            if config_id == "model" and "/" not in value:
+                continue  # an ACP-era id without its provider; the agent's default stands
+            if value == (self.options.get(config_id) or {}).get("currentValue"):
+                continue
             try:
                 await self.set_option(config_id, value)
                 log.info("preference applied %s=%s (session=%s, source=%s, effective=%s)",
                          config_id, value, self.session_id[:8],
                          "store" if stored.get(config_id) else "config",
                          (self.options.get(config_id) or {}).get("currentValue"))
-            except AcpError as exc:
+            except AgentError as exc:
                 log.warning("set %s=%s failed: %s", config_id, value, exc)
 
     # ------------------------------------------------------- thread -> loop
-    def _on_update(self, update: AcpUpdate) -> None:
+    def _on_update(self, update: AgentUpdate) -> None:
         if update.kind == "available_commands_update":
-            names = [f"/{c.get('name')}" for c in (update.raw.get("availableCommands") or [])]
+            names = [f"/{c.get('name')}" for c in (update.raw.get("commands") or [])]
             self._loop.call_soon_threadsafe(self.advertised_commands.__setitem__, slice(None), names)
             return
-        if update.kind == "session_info_update":
+        if update.kind == "btw":
+            # a side question runs next to the turn; its frames must not touch the turn queue
+            self._loop.call_soon_threadsafe(self._on_btw, update)
             return
-        if update.kind in {"config_option_update", "current_mode_update"} and not self.busy:
+        if update.kind == "subagent":
+            # a subagent runs next to the turn and can outlive it; its frames are cards of their
+            # own, never part of the turn's outbox
+            self._loop.call_soon_threadsafe(self._on_subagent, update)
+            return
+        if update.kind == "tool_call":
+            tasks = (update.raw.get("rawInput") or {}).get("tasks")
+            if isinstance(tasks, list) and tasks:
+                # the jobs' own frames overtake the turn's drain, so how many the call spawns
+                # is noted here, in arrival order, before the first job reports
+                call_id = str(update.raw.get("toolCallId") or "")
+                spawned = sum(isinstance(task, dict) for task in tasks)
+                self._loop.call_soon_threadsafe(self._job_spawned.__setitem__, call_id, spawned)
+        if update.kind in {"retry", "notice", "compaction"} and not self.busy:
+            # outside a turn nothing reads the turn queue; a straight notice keeps its place.
+            # Mid-turn they fall through to _updates, so drain() renders them in order.
+            if self.verbose:
+                text = _event_text(update)
+                if text:
+                    self._loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(self._context_notice(text)))
+            return
+        if update.kind in {"queue_update", "session_settled", "agent_end"}:
+            return
+        if update.kind == "advisor" and not self.busy:
+            # a card can land after the turn yielded; nothing reads the turn queue then
+            body = self._advisor_body(update)
+            if body:
+                self._loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._post_between_turns(body, "advisor")))
+            return
+        if update.kind == "config_option_update" and not self.busy:
             # between turns nothing reads the turn queue; mid-turn they take it, so a notice
             # lands after the messages that came before it
             self._loop.call_soon_threadsafe(self._on_option_update, update)
             return
-        if update.kind == "usage_update":
-            raw = update.raw
-            try:
-                used = int(raw.get("used") or 0)
-                size = int(raw.get("size") or 0)
-            except (TypeError, ValueError):
-                return
-            self._loop.call_soon_threadsafe(self._on_usage, used, size)
-            return
         self._loop.call_soon_threadsafe(self._updates.put_nowait, update)
+
+    BTW_FINAL = frozenset({"complete", "error", "cancelled"})
+
+    def _on_btw(self, update: AgentUpdate) -> None:
+        """Runs on the loop thread. Every btw_record is kept by record id; a waiter is settled
+        only by a final one, since omp announces the record as `running` before it answers.
+        btw_delta streams text nobody renders, so it is dropped."""
+        if update.raw.get("type") != "btw_record":
+            return
+        record = update.raw.get("record") or {}
+        record_id = str(record.get("id") or "")
+        if not record_id:
+            return
+        self._btw_records[record_id] = record
+        if str(record.get("status") or "") not in self.BTW_FINAL:
+            return
+        waiter = self._btw_waiters.pop(record_id, None)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(record)
+
+    async def btw(self, question: str) -> str:
+        """Ask omp's side question: it does not enter the session context and runs while the
+        main turn runs. Returns the answer, or a short failure line."""
+        client = self.client
+        if client is None or not client.alive:
+            await self.ensure()
+            client = self.client
+        assert client is not None
+        record = await asyncio.to_thread(client.btw, question)
+        record_id = str((record.get("record") or record).get("id") or "")
+        waiter: asyncio.Future = self._loop.create_future()
+        landed = self._btw_records.get(record_id) if record_id else None
+        if landed is not None and str(landed.get("status") or "") in self.BTW_FINAL:
+            # a fast answer can land before the waiter exists; its record is already kept
+            waiter.set_result(landed)
+        else:
+            self._btw_waiters[record_id] = waiter
+        try:
+            done = await asyncio.wait_for(waiter, 120.0)
+        except TimeoutError:
+            self._btw_waiters.pop(record_id, None)
+            return "the side question timed out"
+        finally:
+            self._btw_records.pop(record_id, None)
+        status = str(done.get("status") or "")
+        if status == "error":
+            return "the side question failed"
+        return str(done.get("answer") or "").strip() or "no answer came back"
+
+    # ------------------------------------------------------------ job cards
+    def _on_subagent(self, update: AgentUpdate, *, polled: bool = False) -> None:
+        """Runs on the loop thread. omp reports every subagent the `task` tool spawns: a
+        lifecycle frame when it starts and one when it ends, and progress frames in between.
+        Each job becomes a card of its own under one summary card per `task` call; a chat that
+        shows no tool calls shows none of this. `polled` marks the minute's registry read,
+        which is already paced, so it always moves the card."""
+        if not self.verbose:
+            return
+        raw = update.raw or {}
+        fresh = job_from_frame(raw)
+        if fresh is None or not fresh.name:
+            return
+        key = (fresh.parent, fresh.name)
+        job = self._jobs.get(key)
+        previous = job.status if job is not None else None
+        if job is None:
+            job = self._jobs[key] = fresh
+            self._job_groups.setdefault(fresh.parent, []).append(fresh.name)
+            # when this chat first heard of the job, minus what omp says it already ran:
+            # the card's age keeps counting while omp's durationMs stands still
+            self._job_began[key] = self._clock() - fresh.duration_ms / 1000
+        else:
+            job.agent = fresh.agent or job.agent
+            job.model = fresh.model or job.model
+            job.status = fresh.status or job.status
+            job.last_intent = fresh.last_intent or job.last_intent
+            job.last_tool = fresh.last_tool or job.last_tool
+            job.tool_count = max(job.tool_count, fresh.tool_count)
+            job.detached = job.detached or fresh.detached
+            job.session_file = fresh.session_file or job.session_file
+            job.task = fresh.task or job.task
+            job.thinking = fresh.thinking or job.thinking
+            job.requests = max(job.requests, fresh.requests)
+            job.tokens = max(job.tokens, fresh.tokens)
+            job.cost = max(job.cost, fresh.cost)
+            if raw.get("type") == "subagent_progress":
+                job.current_tool = fresh.current_tool
+                job.current_since_ms = fresh.current_since_ms
+        if job.status == "failed" and previous != "failed" and not job.error:
+            job.error = job_error(job.session_file)
+        if job.status not in JOB_FINAL:
+            elapsed = int((self._clock() - self._job_began[key]) * 1000)
+            job.duration_ms = max(job.duration_ms, fresh.duration_ms, elapsed)
+        if previous != job.status:
+            log.info("subagent %s job=%s status=%s tools=%s", self.label, job.name,
+                     job.status or "-", job.tool_count)
+            if f"group:{job.parent}" in self._job_body or job.status in JOB_FINAL:
+                self._write_group(job.parent)
+            elif job.parent not in self._job_opening:
+                # omp starts a call's jobs one frame apart; the summary waits a moment so its
+                # first post already counts all of them instead of "spawned 1"
+                self._job_opening.add(job.parent)
+                self._loop.call_later(self._job_open_delay, self._open_group, job.parent)
+        # A lifecycle start frame only says the job exists. Its card opens on the first frame
+        # that shows the work (or on the end of a job that never reported any), so nobody is
+        # left looking at a card whose last action is nothing.
+        reported = previous is not None or raw.get("type") == "subagent_progress"
+        if job.status not in JOB_FINAL and (self._job_poll is None or self._job_poll.done()):
+            self._job_poll = self._loop.create_task(self._poll_jobs())
+        if job.parent in self._job_opening:
+            # the summary goes first; this card follows when it opens (_open_group)
+            return
+        if reported or job.status in JOB_FINAL:
+            # the end of a job goes out at once: the minute between edits is for the steps in
+            # between, and the frame that ends a job is the one a person is waiting for
+            self._job_write(f"job:{job.parent}:{job.name}", self.surface.job(job),
+                            force=polled or job.status in JOB_FINAL)
+
+    def _has_job_cards(self, call_id: str) -> bool:
+        """Whether job cards account for this `task` call. A call's trace can finish before
+        its jobs' first frame arrives, so an omp that took the subagent subscription counts as
+        covered; one that refused it (or a call with no jobs reported, in a test) keeps the
+        trace. parentToolCallId carries the call id before a `|`."""
+        if not self.verbose:
+            return False
+        if getattr(self.client, "subagent_frames", False):
+            return True
+        return any(parent.split("|", 1)[0] == call_id for parent in self._job_groups)
+
+    def _open_group(self, parent: str) -> None:
+        self._job_opening.discard(parent)
+        self._write_group(parent)
+        # the cards held while the summary waited, in the order their jobs started
+        for name in self._job_groups.get(parent, []):
+            job = self._jobs[(parent, name)]
+            if job.model or job.last_intent or job.status in JOB_FINAL:
+                self._job_write(f"job:{parent}:{name}", self.surface.job(job), force=True)
+
+    def _write_group(self, parent: str) -> None:
+        group = [self._jobs[(parent, name)] for name in self._job_groups.get(parent, [])]
+        if not group:
+            return
+        # omp's parentToolCallId is "<call id>|fc_<call id>"; the trace knows the first part
+        spawned = self._job_spawned.get(parent.split("|", 1)[0], 0)
+        self._job_write(f"group:{parent}", self.surface.jobs(group, max(spawned, len(group))),
+                        force=True)
+
+    async def _poll_jobs(self) -> None:
+        """Until every job has ended, ask omp for its subagents once a minute and refresh their
+        cards. Progress frames stop while a job waits on a long tool call; the card still has to
+        show that it is alive and what it is on, so the poll does not wait for omp to speak."""
+        while any(job.status not in JOB_FINAL for job in self._jobs.values()):
+            await self._sleep(JOB_EDIT_GAP)
+            client = self.client
+            if client is None or not client.alive:
+                return
+            try:
+                rows = await asyncio.to_thread(client.subagents)
+            except AgentError as exc:
+                log.info("subagent poll failed chat=%s: %s", self.label, exc)
+                continue
+            listed = set()
+            for row in rows:
+                progress = dict(row.get("progress") or {})
+                progress.setdefault("id", row.get("id"))
+                progress.setdefault("agent", row.get("agent"))
+                progress.setdefault("status", row.get("status"))
+                frame = {"type": "subagent_progress",
+                         "payload": {"parentToolCallId": row.get("parentToolCallId"),
+                                     "agent": row.get("agent"), "progress": progress}}
+                job = job_from_frame(frame)
+                if job is not None and job.name:
+                    listed.add((job.parent, job.name))
+                    self._on_subagent(AgentUpdate(kind="subagent", session_id=self.session_id,
+                                                  raw=frame), polled=True)
+            # omp lists only running subagents; one that left the list without an end frame
+            # (the process restarted, a frame was lost) ended without saying how
+            for key, job in list(self._jobs.items()):
+                if job.status not in JOB_FINAL and key not in listed:
+                    log.info("subagent %s job=%s gone from omp's list", self.label, job.name)
+                    self._on_subagent(AgentUpdate(kind="subagent", session_id=self.session_id,
+                                                  raw={"type": "subagent_lifecycle", "payload": {
+                                                      "id": job.name, "parentToolCallId": job.parent,
+                                                      "agent": job.agent, "status": "completed"}}))
+
+    def _job_write(self, key: str, body: str, *, force: bool) -> None:
+        """Queue one card under `key`, at most once a minute unless `force`. Each card is a new
+        message, so one that would say exactly what the last said is not sent again. Cards go
+        out in the order their frames arrived: the summary stays above the jobs it names."""
+        if self._job_body.get(key) == body:
+            return
+        now = self._clock()
+        last = self._job_written.get(key)
+        if last is not None and not force and now - last < JOB_EDIT_GAP:
+            return
+        self._job_written[key] = now
+        self._job_body[key] = body
+        for queued in self._job_queue:
+            if queued[0] == key:
+                queued[1] = body  # the newest state wins, and still goes out in its own place
+                break
+        else:
+            self._job_queue.append([key, body])
+        if self._job_flush is None or self._job_flush.done():
+            self._job_flush = self._loop.create_task(self._flush_jobs())
+
+    async def _flush_jobs(self) -> None:
+        while self._job_queue:
+            key, body = self._job_queue.pop(0)
+            try:
+                await self.surface.job_card(key, body)
+            except Exception:
+                # a card is a progress report; a platform refusing one must not stop the work
+                log.warning("job card failed chat=%s key=%s", self.label, key, exc_info=True)
 
     def _on_usage(self, used: int, size: int) -> None:
         """Runs on the loop thread. Tracks the context window, the warning crossing and
-        compaction drops; usage_update never enters the turn queue."""
+        compaction drops; a context read never enters the turn queue."""
         good = self._context_good
         if good and not self._compact_turn and not plausible_context(used, good):
             # omp anchors the number on the last assistant message; a turn resumed after a
@@ -571,6 +1270,24 @@ class ChatAgent:
             return f"⚠️ context at {pct}% · omp compacts at {threshold}%"
         return f"⚠️ context at {pct}% ({line})"
 
+    def _advisor_body(self, update: AgentUpdate) -> str:
+        """The advisor's notes as this surface shows them, or "" when the chat hides them."""
+        if not (self.verbose and self.advisor):
+            return ""
+        notes = [{"severity": str(note.get("severity") or "note"),
+                  "note": _clip(str(note.get("note") or "").strip(), lines=40,
+                                width=ADVISOR_CHARS)}
+                 for note in (update.raw.get("notes") or []) if isinstance(note, dict)]
+        notes = [note for note in notes if note["note"]]
+        return self.surface.advisor(notes) if notes else ""
+
+    async def _post_between_turns(self, body: str, kind: str) -> None:
+        """A rendered card that lands after the turn yielded, posted as-is."""
+        try:
+            await self.surface.post(body, kind=kind)
+        except Exception:
+            log.warning("%s card failed chat=%s", kind, self.label, exc_info=True)
+
     async def _context_notice(self, text: str) -> None:
         """A notice outside a turn: surface.notice goes straight to the platform, so it is
         safe to call while ask() is not running. A quiet chat gets the answer and nothing else."""
@@ -582,12 +1299,11 @@ class ChatAgent:
             log.warning("context notice failed chat=%s", self.label, exc_info=True)
 
     # Option changes the chat should hear about when omp makes them on its own: a model falling
-    # back, plan mode ending once a plan is approved. Thinking is left out; it moves with the model.
-    WATCHED_OPTIONS = ("model", "mode")
+    # back to another. Thinking is left out; it moves with the model.
+    WATCHED_OPTIONS = ("model",)
 
-    def _on_options(self, raw: list[Any]) -> None:
+    def _on_options(self, updated: dict[str, dict[str, Any]]) -> None:
         """Runs on the loop thread. Keeps `options` current and names a change ompwire did not ask for."""
-        updated = {opt.get("id"): opt for opt in raw if isinstance(opt, dict)}
         if not updated:
             return
         changes = []
@@ -611,75 +1327,164 @@ class ChatAgent:
             else:
                 self._loop.create_task(self._context_notice(text))
 
-    def _on_option_update(self, update: AcpUpdate) -> None:
-        if update.kind == "config_option_update":
-            self._on_options(update.raw.get("configOptions") or [])
-        else:
-            self._on_mode(str(update.raw.get("currentModeId") or ""))
+    def _on_option_update(self, update: AgentUpdate) -> None:
+        """model_changed or thinking_level_changed: fold the reported value into `options`."""
+        raw = update.raw
+        updated = {key: dict(value) for key, value in self.options.items()}
+        if raw.get("event") == "thinking_level_changed" and raw.get("thinkingLevel"):
+            updated.setdefault("thinking", {"id": "thinking", "options": []})[
+                "currentValue"] = str(raw["thinkingLevel"])
+        model = raw.get("model") if isinstance(raw.get("model"), dict) else {}
+        if raw.get("event") == "model_changed" and model.get("id"):
+            updated.setdefault("model", {"id": "model", "options": []})[
+                "currentValue"] = f"{model.get('provider')}/{model.get('id')}"
+        self._on_options(updated)
 
-    def _on_mode(self, mode: str) -> None:
-        """current_mode_update carries only the id; fold it into `options` like the full update."""
-        current = self.options.get("mode")
-        if not mode or current is None:
+    def _on_dialog(self, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """A dialog the agent opened (reader thread). Tool approvals become buttons, an `ask`
+        becomes a question card; any other dialog is cancelled and the agent carries on."""
+        if frame.get("method") == "ask":
+            return self._on_ask(frame)
+        if not is_approval(frame):
+            log.info("dialog cancelled chat=%s method=%s title=%r", self.label, frame.get("method"),
+                     str(frame.get("title") or "")[:120])
+            return None
+        option = self._on_permission(frame)
+        return {"value": option} if option else {"cancelled": True}
+
+    def _on_ask(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """The ask tool's questions (reader thread, blocking like _on_permission). Questions go
+        to the chat one at a time through the options card. An ask is a question, not an
+        approval: it always reaches a person, whatever the approval policy says."""
+        questions = [q for q in (frame.get("questions") or []) if isinstance(q, dict)]
+        if not questions:
+            return {"cancelled": True}
+        slot: dict[str, Any] = {"answer": None}
+        token = f"ask-{uuid.uuid4().hex[:12]}"
+        state = {"questions": questions, "index": 0, "answers": [], "slot": slot,
+                 "token": token}
+        self._ask_slots[token] = state
+        self.pending_ask = {"token": token, "questions": questions, "index": 0}
+        timeout = float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(self._show_ask_question(token)))
+        deadline = time.time() + timeout
+        note = "answered"
+        try:
+            while time.time() < deadline:
+                if slot["answer"] is not None:
+                    return slot["answer"]
+                time.sleep(0.2)
+            log.warning("ask timed out chat=%s (%.0fs)", self.label, timeout)
+            note = "timed out"
+            return {"cancelled": True, "timedOut": True}
+        finally:
+            self._ask_slots.pop(token, None)
+            self.pending_ask = None
+
+            async def close() -> None:
+                # the store's sqlite connection belongs to the loop thread, not this one
+                self.pending_options = []
+                await self.surface.retire_options(note)
+
+            self._loop.call_soon_threadsafe(lambda: asyncio.create_task(close()))
+
+    async def _show_ask_question(self, token: str) -> None:
+        """Runs on the loop thread: the open question becomes the options card."""
+        state = self._ask_slots.get(token)
+        if state is None:
             return
-        self._on_options([*(opt for key, opt in self.options.items() if key != "mode"),
-                          {**current, "currentValue": mode}])
+        question = state["questions"][state["index"]]
+        labels = [str(o.get("label") or "") for o in (question.get("options") or [])]
+        text = str(question.get("question") or question.get("header") or "")
+        self.pending_ask = {"token": token, "questions": state["questions"],
+                            "index": state["index"]}
+        self.pending_options = labels
+        await self.offer_options(labels, question=text)
 
-    def _on_permission(self, params: dict[str, Any]) -> str | None:
+    async def answer_ask(self, text: str | None, *, option_index: int | None = None,
+                         skip: bool = False) -> bool:
+        """Consume a chat answer for the open ask question. True when it was ours to take."""
+        state = next(iter(self._ask_slots.values()), None)
+        if state is None:
+            return False
+        question = state["questions"][state["index"]]
+        options = [str(o.get("label") or "") for o in (question.get("options") or [])]
+        if skip:
+            # a bare `cancelled` makes omp abort the whole turn (measured on 18.12.6); with
+            # `timedOut` it answers every question with its recommended option, else the first,
+            # and the agent carries on, which is what Skip promises
+            state["slot"]["answer"] = {"cancelled": True, "timedOut": True}
+            return True
+        answer: dict[str, Any] | None = None
+        if option_index is not None and 0 <= option_index < len(options):
+            answer = {"answers": [{"id": question.get("id"),
+                                   "selectedOptions": [options[option_index]]}]}
+        elif text:
+            answer = {"answers": [{"id": question.get("id"), "selectedOptions": [],
+                                   "customInput": text}]}
+        if answer is None:
+            return False
+        state["answers"].append(answer)
+        if state["index"] + 1 < len(state["questions"]):
+            state["index"] += 1
+            await self.surface.retire_options("answered")
+            self._loop.create_task(self._show_ask_question(state["token"]))
+            return True
+        state["slot"]["answer"] = (answer if len(state["questions"]) == 1
+                                   else {"answers": [a["answers"][0] for a in state["answers"]]})
+        return True
+
+    def _on_permission(self, frame: dict[str, Any]) -> str | None:
+        """The option to answer an approval with: "Approve", "Deny", or None to cancel."""
+        tool, command = approval_detail(frame)
+        # The strictest rule wins: a "deny" policy refuses everything; plan mode promises the
+        # chat only reads, so an "allow" policy must not turn that into writes. Plan mode runs
+        # with always-ask, so its reads come here too.
         policy = approval_policy(self.config)
-        title = params.get("title") or (params.get("toolCall") or {}).get("title") or "tool call"
-        if policy in {"allow", "deny"}:
-            log.info("permission auto-%s chat=%s tool=%s", policy, self.label, title)
-            return pick_permission_option(params, policy)
+        if policy == "deny":
+            log.info("permission auto-deny chat=%s tool=%s", self.label, tool)
+            return DENY
+        if self.mode == "plan":
+            reads = tool in PLAN_READ_TOOLS or (tool == "bash" and allowlist.is_read_only(command))
+            log.info("permission %s in plan mode chat=%s tool=%s: %s",
+                     "allowed" if reads else "denied", self.label, tool, command[:120])
+            return APPROVE if reads else DENY
+        if policy == "allow":
+            log.info("permission auto-allow chat=%s tool=%s", self.label, tool)
+            return APPROVE
         # A read-only command is not worth a button. Asking for `git log` teaches the habit of
         # tapping Allow without reading, which is exactly what the gate exists to prevent.
-        command = str(((params.get("toolCall") or {}).get("rawInput") or {}).get("command") or "")
-        if command and allowlist.is_read_only(command):
+        if tool == "bash" and command and allowlist.is_read_only(command):
             log.info("permission auto-allow chat=%s (read-only): %s", self.label, command[:120])
-            return pick_permission_option(params, "allow")
+            return APPROVE
         token = f"perm-{uuid.uuid4().hex[:12]}"  # two requests can land in the same millisecond
+        params = {"tool": tool, "command": command, "options": list(frame.get("options") or [])}
         slot: dict[str, Any] = {"optionId": None, "params": params}
         self._pending_perm[token] = slot
         self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._ask_permission(token, params)))
-        log.info("permission requested chat=%s tool=%s options=%s", self.label, title,
-                 [o.get("kind") for o in (params.get("options") or [])])
+        log.info("permission requested chat=%s tool=%s: %s", self.label, tool, command[:120])
         deadline = time.time() + float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
         while time.time() < deadline:
             if slot.get("optionId") is not None:
                 self._pending_perm.pop(token, None)
                 return slot["optionId"]
             time.sleep(0.2)
-        log.warning("permission timed out chat=%s tool=%s (denied)", self.label, title)
+        log.warning("permission timed out chat=%s tool=%s (denied)", self.label, tool)
         self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._expire_permission(token)))
         return None
 
-    OPTION_LABELS: ClassVar[dict[str, str]] = {
-        "allow_once": "✅ Allow once",
-        "allow_always": "✅ Always allow",
-        "reject_once": "⛔ Deny",
-        "reject_always": "⛔ Always deny",
-    }
+    OPTION_LABELS: ClassVar[dict[str, str]] = {APPROVE: "✅ Allow", DENY: "⛔ Deny"}
 
     @staticmethod
     def _permission_detail(params: dict[str, Any]) -> tuple[str, str]:
-        """Split a permission request into (headline, monospace body)."""
-        tool_call = params.get("toolCall") or {}
-        raw_input = tool_call.get("rawInput") or {}
-        kind = str(tool_call.get("kind") or params.get("kind") or "tool")
-        command = str(raw_input.get("command") or "").strip()
-        title = str(params.get("title") or tool_call.get("title") or "").strip()
-        if command:
-            return kind, command
-        if title:
-            return kind, title
-        return kind, ""
+        """(headline, monospace body): the tool and what it will run."""
+        return str(params.get("tool") or "tool"), str(params.get("command") or "")
 
-    def _option_label(self, option: dict[str, Any]) -> str:
-        kind = str(option.get("kind") or "")
-        known = self.OPTION_LABELS.get(kind)
-        if known:
-            return known
-        return str(option.get("name") or kind or "option")
+    def _option_label(self, option: str) -> str:
+        if option.startswith(f"{APPROVE} ") and "session" in option:
+            return "✅ Allow for this session"  # omp's "Approve write for this session"
+        return self.OPTION_LABELS.get(option, option)
 
     async def _ask_permission(self, token: str, params: dict[str, Any]) -> None:
         options = params.get("options") or []
@@ -783,11 +1588,16 @@ class ChatAgent:
         nxt = schedule_lib.next_elapse(name) or "see systemctl --user list-timers"
         await self.surface.notice(f"schedule {name} created · {item.on_calendar} → {gateway}\nnext: {nxt}")
 
-    async def offer_options(self, options: list[str]) -> None:
+    async def offer_options(self, options: list[str], question: str = "") -> None:
         """The agent offered answers; the surface turns them into buttons."""
         self.pending_options = options
-        log.info("question offered %s options=%s", self.label, options)
-        await self.surface.offer_options(options)
+        log.info("question offered %s options=%s question=%r", self.label, options, question[:80])
+        params = inspect.signature(self.surface.offer_options).parameters.values()
+        if any(p.name == "question" or p.kind is p.VAR_KEYWORD for p in params):
+            await self.surface.offer_options(options, question=question)
+        else:
+            # a surface not yet updated for the ask heading; the options still work
+            await self.surface.offer_options(options)
 
     async def answer_permission(self, token: str, index: int) -> str | None:
         """Record the user's choice, then let the surface rewrite the prompt into the decision."""
@@ -797,8 +1607,8 @@ class ChatAgent:
         options = slot["params"].get("options") or []
         if not (0 <= index < len(options)):
             return None
-        option = options[index]
-        slot["optionId"] = option.get("optionId")
+        option = str(options[index])
+        slot["optionId"] = option
         label = self._option_label(option)
         log.info("permission answered %s choice=%s", self.label, label)
         kind, detail = self._permission_detail(slot["params"])
@@ -825,6 +1635,9 @@ class ChatAgent:
     # ------------------------------------------------------------------ turn
     async def ask(self, text: str, images: list[dict[str, Any]] | None = None,
                   resumes: int = 0, record: str | None = None) -> str:
+        text = await self._plan_turn(text)
+        if not text:
+            return ""
         await self.ensure()
         self.busy = True
         self._compact_turn = text.strip() == "/compact"
@@ -974,16 +1787,15 @@ class ChatAgent:
             segment.clear()
             if not text.strip():
                 return
-            for part in _chunks(text, 3600):
+            for part in split_markdown(text, 3600):
                 enqueue("text", part, essential=True)
 
         def post_tool(call_id: str) -> None:
             entry = trace[call_id]
             posted.add(call_id)
             if entry.kind != "subagent":
-                seen = self._transcript()
-                named = seen.tools.get(call_id, "") if seen is not None else ""
-                entry.tool = tool_name(entry.kind, inputs.get(call_id, {}), named)
+                # the device path beats omp's name: "read" says less than "github"
+                entry.tool = tool_name(entry.kind, inputs.get(call_id, {}), entry.tool)
             # the start line logs the guess; this one logs the name the chat shows
             log.info("tool done %s tool=%s status=%s %r", self.label, entry.tool,
                      entry.status or "-", entry.title[:80])
@@ -992,6 +1804,10 @@ class ChatAgent:
                 # checklist says more than the trace. Hold the trace until the next update shows
                 # whether the list came; an omp that sends none still gets the trace.
                 held_todo.append(entry)
+                return
+            if entry.kind == "subagent" and self._has_job_cards(call_id):
+                # the job cards already show this call: a summary with every job, then a card
+                # each; the trace would be a second "spawned" message saying less
                 return
             show_tool(entry)
 
@@ -1037,6 +1853,10 @@ class ChatAgent:
             await sender_task  # the buttons and files come after the last message, in order
             raw = "".join(answer)
             _, options = extract_options(raw)
+            if self.mode == "plan" and raw.strip() and not self._user_cancel:
+                # the plan's own question buttons would bypass the review; the review replaces them
+                options = list(PLAN_OPTIONS)
+                self.plan_review = "pending"
             if options:
                 await self.offer_options(options)
             await self.deliver_files(raw)
@@ -1065,10 +1885,27 @@ class ChatAgent:
                     answer.append(update.text)
                     if streams:
                         stream_delta(final=False)
-                elif update.kind in {"config_option_update", "current_mode_update"}:
+                elif update.kind == "config_option_update":
                     flush_thinking()
                     flush_segment()
                     self._on_option_update(update)
+                elif update.kind in {"retry", "notice", "compaction"}:
+                    if not self.verbose:
+                        continue  # a quiet chat hears the answer and nothing else
+                    flush_thinking()
+                    flush_segment()
+                    if self._turn_notice is not None:
+                        text = _event_text(update)
+                        if text:
+                            self._turn_notice(text)
+                    continue
+                elif update.kind == "advisor":
+                    body = self._advisor_body(update)
+                    if body:
+                        flush_thinking()
+                        flush_segment()
+                        enqueue("advisor", body, essential=False)
+                    continue
                 elif update.kind == "plan":
                     flush_thinking()
                     flush_segment()
@@ -1088,18 +1925,23 @@ class ChatAgent:
                         state["tools"] += 1
                         self.tools_used += 1
                         entry.kind = str(raw.get("kind") or "tool")
+                        named = str(raw.get("toolName") or "")
                         entry.title = str(raw.get("title") or "")
                         raw_input = raw.get("rawInput") or {}
                         if not isinstance(raw_input, dict):
                             raw_input = {}
                         inputs[call_id] = raw_input
-                        entry.tool = tool_name(entry.kind, raw_input)
+                        entry.tool = tool_name(entry.kind, raw_input, named)
                         entry.command = str(raw_input.get("command") or "")
+                        if named in SKILL_TOOLS and raw_input.get("name"):
+                            # the intent says why; the action and the skill say what changed
+                            entry.command = " ".join(str(part) for part in (
+                                raw_input.get("action") or "", raw_input.get("name")) if part)
                         tasks = raw_input.get("tasks")
                         if isinstance(tasks, list) and tasks:
                             entry.kind = entry.tool = "subagent"
-                            # omp runs subagents through the `task` tool; ACP has no event of
-                            # its own for them, so the task list is the only place they appear
+                            # the trace names the jobs this call spawned; their progress has
+                            # cards of its own (see _on_subagent)
                             entry.subagent = ", ".join(
                                 f"{item.get('name', '?')} ({item.get('agent', 'task')})"
                                 for item in tasks if isinstance(item, dict))[:80]
@@ -1137,16 +1979,15 @@ class ChatAgent:
         try:
             async with self.surface.typing():
                 result = await asyncio.to_thread(
-                    self.client.prompt, self.session_id, text,
+                    self.client.prompt, text,
                     images=images or None,
                     timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
                 )
-        except AcpError as exc:
+        except AgentError as exc:
             # A silent turn is abandoned here, so stop it in omp too: left running, its late
             # chunks land in the next turn's stream and the chat sees the answer twice.
             if self.client is not None and self.client.alive:
-                with contextlib.suppress(AcpError):
-                    self.client.cancel(self.session_id)
+                self.client.abort()
             # scheduled, not immediate: the sentinel must queue behind updates the reader thread
             # has already handed to the loop, or the last of a turn is dropped
             self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
@@ -1155,7 +1996,7 @@ class ChatAgent:
             self.busy = False
             # A crash or shutdown cut keeps the row, so the next start resumes it. A deliberate
             # stop and a silence timeout do not: the person has already been told it failed.
-            if self._user_cancel or isinstance(exc, AcpTimeout):
+            if self._user_cancel or isinstance(exc, AgentTimeout):
                 self.store.end_turn(self.key)
             raise
         except BaseException:
@@ -1168,6 +2009,7 @@ class ChatAgent:
         await finish()
         self.busy = False
         await self._report_compaction()
+        await self._read_context()
         self._compact_turn = False
         self.store.touch(self.key)
         # A cancel nobody asked for is the gateway going down (systemd signals the agent too).
@@ -1196,7 +2038,7 @@ class ChatAgent:
         if self.client is None or not self.session_id:
             return False
         self.forget_turn()
-        self.client.cancel(self.session_id)
+        self.client.abort()
         return True
 
     async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> tuple[str, str]:
@@ -1205,14 +2047,98 @@ class ChatAgent:
             return "promptRequired", ""
         try:
             outcome, reason = await asyncio.to_thread(
-                self.client.steer, self.session_id, text, images,
+                self.client.steer, text, images,
                 float(self.config.get("acp", "steer_timeout", 15.0)))
-        except AcpError as exc:
+        except AgentError as exc:
             log.warning("steer failed chat=%s: %s", self.label, exc)
             return "failed", str(exc)
         log.info("steer chat=%s outcome=%s chars=%s reason=%s", self.label, outcome, len(text),
                  reason or "-")
         return outcome, reason
+
+    async def follow_up(self, text: str, images: list[dict[str, Any]] | None = None) -> tuple[str, str]:
+        """Queue a message to run after the current turn: same outcomes as steer."""
+        if self.client is None or not self.client.alive or not self.session_id:
+            return "promptRequired", ""
+        try:
+            outcome, reason = await asyncio.to_thread(
+                self.client.follow_up, text, images,
+                float(self.config.get("acp", "steer_timeout", 15.0)))
+        except AgentError as exc:
+            log.warning("follow_up failed chat=%s: %s", self.label, exc)
+            return "failed", str(exc)
+        log.info("follow_up chat=%s outcome=%s chars=%s", self.label, outcome, len(text))
+        return outcome, reason
+
+    @property
+    def busy_mode(self) -> str:
+        """What a message means while a turn runs: steer | followup | queue."""
+        value = self.store.prefs(self.key).get("busy")
+        if value in {"steer", "followup", "queue"}:
+            return value
+        legacy = str(self.config.get("telegram", "busy_message", "") or "") or \
+            str(self.config.get("whatsapp", "busy_message", "") or "")
+        return legacy if legacy in {"steer", "followup", "queue"} else "steer"
+
+    def set_busy_mode(self, value: str) -> str:
+        """Store this chat's busy mode; returns the value set."""
+        if value not in {"steer", "followup", "queue"}:
+            raise AgentError(f"unknown busy mode {value!r}; choose steer, followup or queue")
+        self.store.set_pref(self.key, "busy", value)
+        return value
+
+    async def session_stats(self) -> dict[str, Any]:
+        """omp's counters for this session: messages, tool calls, tokens, cost."""
+        await self.ensure()
+        return await asyncio.to_thread(self.client.session_stats)
+
+    async def rename(self, name: str) -> None:
+        await self.ensure()
+        await asyncio.to_thread(self.client.set_session_name, name)
+
+    async def export_html(self) -> Path:
+        await self.ensure()
+        base = Path(str(self.config.get("files", "incoming_dir",
+                                        "~/.local/state/ompwire/files"))).expanduser()
+        target = base.parent / "exports" / f"{self.session_id or 'session'}.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return Path(await asyncio.to_thread(self.client.export_html, str(target)))
+
+    async def handoff(self, instructions: str = "") -> dict[str, Any]:
+        await self.ensure()
+        result = await asyncio.to_thread(self.client.handoff, instructions)
+        # the session id stays the same, but its title and options may have moved
+        state = await asyncio.to_thread(self.client.state)
+        self.session_id = str(state.get("sessionId") or self.session_id)
+        self.store.put(self.key, self.session_id, self.cwd)
+        await self._refresh_options(state)
+        return result
+
+    async def _plan_turn(self, text: str) -> str:
+        """What a message means in plan mode; "" when it was handled without a turn.
+
+        Approve leaves plan mode and implements the plan. Deny asks for feedback, and the message
+        after it revises the plan. Anything else typed while a plan waits is feedback too, so a
+        review never blocks the chat.
+        """
+        if self.mode != "plan":
+            self.plan_review = ""
+            return text
+        if text == PLAN_OPTIONS[0] and self.plan_review == "pending":
+            self.plan_review = ""
+            await self.set_option("mode", "default")
+            await self.surface.notice("✅ plan approved · plan mode off, implementing")
+            log.info("plan approved chat=%s", self.label)
+            return PLAN_APPROVED
+        if text == PLAN_OPTIONS[1] and self.plan_review == "pending":
+            self.plan_review = "revise"
+            await self.surface.notice("✏️ what should change? Your next message revises the plan.")
+            return ""
+        if self.plan_review in {"pending", "revise"}:
+            self.plan_review = ""
+            log.info("plan feedback chat=%s chars=%s", self.label, len(text))
+            return PLAN_FEEDBACK.format(feedback=text)
+        return PLAN_PROMPT.format(prompt=text)
 
     def forget_turn(self) -> None:
         """The person ended this turn on purpose; a restart must not bring it back."""
@@ -1224,14 +2150,14 @@ class ChatAgent:
         self.store.set_pref(self.key, "yolo", "on" if yolo else "off")
         self.forget_turn()
         if self.client is not None:
-            await asyncio.to_thread(self.client.close, self.session_id)
+            await asyncio.to_thread(self.client.close)
         self.client = None
         await self.ensure(yolo=yolo)
 
     async def stop_process(self) -> None:
         """Close the agent process; the chat keeps its store and comes back on the next message."""
         if self.client is not None:
-            await asyncio.to_thread(self.client.close, self.session_id)
+            await asyncio.to_thread(self.client.close)
             self.client = None
 
     async def shutdown(self) -> None:
@@ -1249,13 +2175,19 @@ class ChatAgent:
 
     async def new_session(self) -> str:
         self.forget_turn()
-        # the old context numbers belong to the old session; the next usage_update re-reads them
+        # the old context numbers belong to the old session; the next get_state re-reads them
         self._compactions_seen = None
         self._last_plan = []
         self._context_good = None
         self._context_warned = False
-        if self.client is not None and self.client.alive and self.session_id:
-            await asyncio.to_thread(self.client.close, self.session_id)
+        if self.client is not None and self.client.alive and not self.busy:
+            # the same process starts the new session; a closed one would resume the old one
+            self.session_id = await asyncio.to_thread(self.client.new_session)
+            self.store.put(self.key, self.session_id, self.cwd)
+            await self._refresh_options()
+            return self.session_id
+        if self.client is not None:
+            await asyncio.to_thread(self.client.close)
         self.client = None
         self.store.clear(self.key)
         await self.ensure()
@@ -1263,7 +2195,7 @@ class ChatAgent:
 
     async def load(self, session_id: str) -> None:
         if self.client is not None:
-            await asyncio.to_thread(self.client.close, self.session_id)
+            await asyncio.to_thread(self.client.close)
         self.client = None
         self._compactions_seen = None
         self._last_plan = []
@@ -1276,11 +2208,55 @@ class ChatAgent:
         await self.ensure()
         self._compactions_seen = None
         self._context_warned = False
-        result = await asyncio.to_thread(self.client.request, "session/fork",
-                                          {"sessionId": self.session_id, "cwd": self.cwd})
-        new_id = str(result.get("sessionId") or "")
+        new_id = await asyncio.to_thread(self.client.fork)
         if new_id:
             self.session_id = new_id
             self.store.put(self.key, new_id, self.cwd)
         return new_id
+
+    async def compact(self) -> dict[str, Any]:
+        """omp's `compact` command; returns its summary. The context numbers re-read after."""
+        await self.ensure()
+        result = await asyncio.to_thread(self.client.compact)
+        await self._refresh_options()
+        return result
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        """This cwd's omp transcripts, newest first: sessionId, updatedAt, size."""
+        return omp_sessions.listing(self.cwd)
+
+    @property
+    def pending_options(self) -> list[str]:
+        """The answers on the open options card. Stored per chat: a restart between the
+        question and the tap used to answer the tap with "that option expired"."""
+        return self._stored_options()[0]
+
+    @pending_options.setter
+    def pending_options(self, options: list[str]) -> None:
+        if not options:
+            self.store.delete_pref(self.key, "pending_options")
+            return
+        # an ask lives in the omp process; a restart ends it, so its card must not outlive it
+        source = "ask" if self.pending_ask is not None else "reply"
+        self.store.set_pref(self.key, "pending_options",
+                            json.dumps({"options": list(options), "source": source}))
+
+    def _stored_options(self) -> tuple[list[str], str]:
+        raw = self.store.prefs(self.key).get("pending_options") or ""
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            return [], ""
+        if not isinstance(data, dict) or not isinstance(data.get("options"), list):
+            return [], ""
+        return [str(option) for option in data["options"]], str(data.get("source") or "")
+
+    @property
+    def mode(self) -> str:
+        """ompwire's own mode; before omp first answers (a restart), the chat's stored choice."""
+        current = (self.options.get("mode") or {}).get("currentValue")
+        if current:
+            return str(current)
+        store = getattr(self, "store", None)
+        return str((store.prefs(self.key).get("mode") if store is not None else "") or "default")
 

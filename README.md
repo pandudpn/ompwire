@@ -20,7 +20,7 @@
 </p>
 
 ```
-chat platforms  ─>  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
+chat platforms  ─>  ompwire  <->  omp --mode rpc-ui  ->  tools, skills, MCP servers
 ```
 
 Ask from your phone, then approve the deploy when the agent asks. ompwire carries the
@@ -38,17 +38,18 @@ output, each as its own message and named after the tool it ran. Its todo list s
 checklist that is posted again each time an item moves. You read what it ran and what came back,
 not only the final answer.
 
-**Talk while it works.** A message sent mid-turn is steered into the running turn, and the bot
-quotes your message with `↪️ steered`. If it cannot be steered, it waits in line as
-`📥 queued #2`.
+**Talk while it works.** A message sent mid-turn is steered into the running turn by default
+(`↪️ steered`). `/busy` switches a chat to omp's follow-up queue, which runs it right after the
+turn, or to ompwire's own queue (`📥 queued #2`). `/btw` asks a side question that never enters
+the conversation.
 
-**Questions with buttons.** When the agent needs a decision it offers choices. Tap one, type
-your own, or skip. Anything else you send meanwhile waits (`⏸️ held #1`) instead of derailing
-the question.
+**Questions with buttons.** When the agent asks with omp's `ask` tool, or ends a reply with
+choices, they arrive as buttons under the question. Tap one, type your own, or skip. Anything
+else you send meanwhile waits (`⏸️ held #1`) instead of derailing the question.
 
-**Approvals that matter.** A shell command that can change the machine asks first: Allow
-once, Always allow, Deny, Always deny. `git log`, `ls` and `rg` run without a tap, so you are not trained to
-approve without reading.
+**Approvals that matter.** A shell command that can change the machine asks first: Allow,
+Allow for this session, Deny. `git log`, `ls` and `rg` run without a tap, so you are not trained
+to approve without reading.
 
 **Sessions that survive.** Restart the gateway and the conversation is still there. A turn cut
 by the restart is resumed when the gateway comes back.
@@ -124,7 +125,7 @@ The full threat model is in [SECURITY.md](SECURITY.md).
 
 - [Guide](docs/guide.md): gateways and platforms, chat commands, approvals, schedules,
   configuration, troubleshooting
-- [Architecture](ARCHITECTURE.md): how a turn flows, the ACP surface used, decisions and
+- [Architecture](ARCHITECTURE.md): how a turn flows, the RPC surface used, decisions and
   their costs
 - [Rules](RULES.md): how to change this repo without breaking a running install
 - [Security](SECURITY.md): threat model and private reporting

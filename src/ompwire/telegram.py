@@ -4,7 +4,7 @@ Design rule: this module owns transport concerns only (polling, posting each ste
 approvals, steering and queueing, session routing). Anything the agent can do itself is
 forwarded as a prompt.
 
-Threading model: the ACP client is synchronous and talks on its own reader thread;
+Threading model: the agent client is synchronous and talks on its own reader thread;
 Telegram is asyncio. The bridge is one asyncio.Queue fed by `loop.call_soon_threadsafe`.
 An approval is answered on its own thread, which waits for the button while the reader
 keeps delivering updates.
@@ -50,21 +50,17 @@ from telegram.ext import (
 
 from . import __version__, engine, omp_config, omp_sessions
 from . import schedules as schedule_lib
-from .acp import AcpError
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
 from .audience import CHANNEL, GROUP, PRIVATE, Audience
 from .config import Config, approval_policy, save_override
-from .engine import (
-    PERMISSION_TIMEOUT,
-    RESUME_PROMPT,
-    mcp_label,
-    resolve_mcp_servers,
-)
+from .engine import RESUME_PROMPT, agent_rows
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
 from .gateways import remember_chat
-from .tg_html import card, change, esc, help_sections
+from .mdrender import to_html
+from .rpc import AgentError
+from .tg_html import card, change, esc, help_sections, stats_rows
 from .tg_login import LoginMixin
 from .tg_pickers import PickerMixin
 from .tg_skills import SkillsMixin
@@ -89,32 +85,45 @@ COMMANDS: list[tuple[str, str]] = [
     ("stop", "cancel the running turn"),
     ("status", "session, model, mode and process state"),
     ("usage", "token usage for this session"),
+    ("stats", "messages, tool calls, tokens and cost from omp"),
     ("context", "context window breakdown from the agent"),
     ("skills", "browse skills and read their SKILL.md"),
-    ("commands", "search the agent's advertised slash commands"),
+    ("commands", "search the agent's own slash commands"),
     ("login", "sign in to a model provider"),
-    ("sessions", "list recorded sessions"),
-    ("resume", "resume a session by id"),
-    ("continue", "resume this chat's last session"),
+    ("sessions", "list recorded sessions and resume one"),
+    ("name", "name this session"),
+    ("export", "export this session as HTML"),
+    ("handoff", "hand the session off to a fresh context"),
     ("fork", "branch this conversation into a new session"),
     ("cwd", "change working directory (new session)"),
     ("model", "show or set the model"),
     ("mode", "show or set default|plan"),
     ("thinking", "show or set the thinking level"),
     ("approve", "show or set the approval policy"),
+    ("busy", "what a message does mid-turn: steer, followup, queue"),
     ("verbose", "toggle activity in this chat: trace, todo, notices"),
-    ("commands", "search the agent's own slash commands"),
-    ("queue", "queue a prompt behind the running turn"),
+    ("btw", "ask a side question without touching the session"),
     ("compact", "run omp's context compaction now"),
     ("compaction", "show or set omp's auto-compaction threshold"),
-    ("steer", "add an instruction to the running turn"),
     ("schedule", "scheduled turns: list, run now, remove"),
     ("reasoning", "show or hide the agent's thinking"),
+    ("advisor", "show or hide the advisor's notes on each turn"),
     ("yolo", "respawn the agent with approvals off, for this chat only"),
     ("kill", "stop the agent process for this chat"),
     ("whoami", "ids and transport info"),
     ("help", "this list"),
 ]
+
+ASK_POLL_INTERVAL = 0.05  # how often a held message waits for the open ask to close
+SESSIONS_SHOWN = 10  # /sessions keeps to one screen of buttons; the rest are older sessions
+
+BUSY_MODES = ("steer", "followup", "queue")
+BUSY_NOTES = {
+    "steer": "a message sent mid-turn joins the running turn",
+    "followup": "a message sent mid-turn runs right after the turn, in the same session",
+    "queue": "a message sent mid-turn waits in ompwire's queue",
+}
+FOLLOWED_UP = "📥 follow-up queued · runs right after the current turn"
 
 
 FORWARD_HINT = (
@@ -124,7 +133,7 @@ FORWARD_HINT = (
 
 
 def _unique_commands() -> list[tuple[str, str]]:
-    """Telegram rejects a duplicate command name, so the menu is deduped."""
+    """Telegram rejects a duplicate command name, so the menu is deduped before it is sent."""
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
     for name, description in COMMANDS:
@@ -160,6 +169,8 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         self.workers: dict[int, asyncio.Task] = {}
         # messages typed while a question is open, released once it is answered or skipped
         self.held: dict[int, list[tuple[Any, Any]]] = {}
+        # chats with an ask still open: the task that frees `held` once it closes
+        self._ask_watchers: dict[int, asyncio.Task] = {}
         # chats where "Other answer" was tapped: the next typed message is the answer
         self.answer_armed: set[int] = set()
         # set on SIGTERM: the worker stops taking turns, so the interrupted one stays on record
@@ -314,7 +325,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                                         images=getattr(payload, "images", None),
                                         resumes=int(getattr(payload, "resumes", 0)),
                                         record=getattr(payload, "original", None))
-                    except AcpError as exc:
+                    except AgentError as exc:
                         if not self.stopping:  # the shutdown killed it; the next start resumes
                             await message.reply_text(f"agent error: {exc}")
                     except Exception as exc:
@@ -329,7 +340,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                             self.session_card(agent, "⏪ resumed", "history lives in the agent session"),
                             parse_mode=ParseMode.HTML,
                         )
-                    except AcpError as exc:
+                    except AgentError as exc:
                         await message.reply_text(f"resume failed: {exc}")
             finally:
                 queue.task_done()
@@ -369,11 +380,12 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         await self.submit(update.effective_chat.id, message, message)
 
     async def submit(self, chat_id: int, payload: Any, message: Any) -> None:
-        """Route one incoming message: into the running turn, or into the queue.
+        """Route one incoming message: into the running turn, the open question, or the queue.
 
-        By default a message sent while the agent works steers that turn, the way a person
-        interrupts a colleague. `[telegram] busy_message = "queue"` restores the old FIFO, and
-        `/queue` always queues. Anything omp declines to inject still lands in the queue.
+        While the agent works a message means what `agent.busy_mode` says: by default it steers
+        that turn, the way a person interrupts a colleague. `followup` runs it right after the
+        turn, `queue` waits in ompwire's FIFO. Anything omp declines to inject lands in the queue.
+        An ask question owns the message before any of that: it is the answer.
         """
         if chat_id < 0:
             payload = self._framed(payload, message)
@@ -381,8 +393,23 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         if chat_id in self.answer_armed:
             # "Other answer" was tapped: this message is the answer, whatever else is waiting
             self.answer_armed.discard(chat_id)
+            if agent.pending_ask is not None and await agent.answer_ask(str(payload.text)):
+                log.info("ask answered by typing chat=%s chars=%s", chat_id, len(payload.text))
+                await self._after_ask(chat_id, agent)
+                return
             await self._route(chat_id, agent, payload, message)
             await self._release_held(chat_id)
+            return
+        # omp's ask tool holds the turn open: what is typed now is its answer, not a new topic
+        if agent.pending_ask is not None and await agent.answer_ask(str(payload.text)):
+            log.info("ask answered by typing chat=%s chars=%s", chat_id, len(payload.text))
+            await self._after_ask(chat_id, agent)
+            return
+        if agent.pending_options and agent.plan_review == "pending":
+            # a plan waits for review: whatever is typed now is feedback on it, not a new topic
+            agent.pending_options = []
+            await agent.surface.retire_options("feedback sent; revising the plan")
+            await self._route(chat_id, agent, payload, message)
             return
         if agent.pending_options:
             # the agent is waiting on its question; a message about something else must not
@@ -423,21 +450,55 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         agent.pending_options = []
         self.answer_armed.discard(chat_id)
 
+    async def _after_ask(self, chat_id: int, agent: engine.ChatAgent) -> None:
+        """Free what waited on the question, once the ask is really closed.
+
+        A multi-question ask keeps `pending_ask` set after each answer, and the last answer only
+        clears it when the agent's reader thread hands the reply to omp. A prompt enqueued before
+        that would run while omp still waits on the ask, so the release waits for it.
+        """
+        self.answer_armed.discard(chat_id)
+        if agent.pending_ask is None:
+            await self._release_held(chat_id)
+            return
+        watcher = self._ask_watchers.get(chat_id)
+        if watcher is None or watcher.done():
+            self._ask_watchers[chat_id] = asyncio.create_task(
+                self._release_when_ask_closes(chat_id, agent))
+
+    async def _release_when_ask_closes(self, chat_id: int, agent: engine.ChatAgent) -> None:
+        try:
+            while agent.pending_ask is not None:
+                await asyncio.sleep(ASK_POLL_INTERVAL)
+        finally:
+            self._ask_watchers.pop(chat_id, None)
+        await self._release_held(chat_id)
+
     async def _route(self, chat_id: int, agent: engine.ChatAgent, payload: Any, message: Any) -> None:
         if not agent.busy:
             self.enqueue(chat_id, "prompt", payload)
             return
-        if str(self.config.get("telegram", "busy_message", "steer")) == "steer":
-            outcome, reason = await agent.steer(payload.text, getattr(payload, "images", None) or None)
-            if outcome == "injected":
-                await self._event(agent, message, STEERED)
-                return
-            if outcome == "promptRequired":
-                # the turn ended between the busy check and the steer: this is a fresh prompt
-                self.enqueue(chat_id, "prompt", payload)
-                return
-            log.warning("steer not accepted chat=%s outcome=%s reason=%s; queueing", chat_id,
-                        outcome, reason or "-")
+        images = getattr(payload, "images", None) or None
+        mode = agent.busy_mode
+        if mode == "queue":
+            depth = self.enqueue(chat_id, "prompt", payload)
+            await self._event(agent, message, queued_text(depth))
+            return
+        if mode == "followup":
+            outcome, reason = await agent.follow_up(payload.text, images)
+            accepted = FOLLOWED_UP
+        else:
+            outcome, reason = await agent.steer(payload.text, images)
+            accepted = STEERED
+        if outcome == "injected":
+            await self._event(agent, message, accepted)
+            return
+        if outcome == "promptRequired":
+            # the turn ended between the busy check and the hand-over: this is a fresh prompt
+            self.enqueue(chat_id, "prompt", payload)
+            return
+        log.warning("%s not accepted chat=%s outcome=%s reason=%s; queueing", mode, chat_id,
+                    outcome, reason or "-")
         depth = self.enqueue(chat_id, "prompt", payload)
         await self._event(agent, message, queued_text(depth))
 
@@ -457,30 +518,15 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         except TelegramError as exc:
             log.warning("ack failed: %s", exc)
 
-    def _agent_gate(self, agent: engine.ChatAgent) -> str:
-        """What the agent itself was started with, which is what decides whether anything asks."""
-        if getattr(agent, "yolo", False):
-            return "yolo · no tool asks"
-        mode = str(self.config.get("agent", "approval_mode", "write") or "write")
-        if approval_policy(self.config) == "allow":
-            return f"{mode} · auto-allow · nothing asks"
-        if approval_policy(self.config) == "deny":
-            return f"{mode} · auto-deny"
-        timeout = float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
-        return f"{mode} · asks · {timeout:.0f}s"
+    def info_rows(self, agent: engine.ChatAgent) -> list[tuple[str, object]]:
+        """What the start banner, /new and /status all show, in that order, for this chat."""
+        return [*agent_rows(agent),
+                ("users", ", ".join(str(u) for u in sorted(self.allowed)) or "none"),
+                ("store", self.config.get("session", "store", "")),
+                ("clock", now_wib())]
 
     def session_card(self, agent: engine.ChatAgent, title: str, note: str = "") -> str:
-        options = getattr(agent, "options", {}) or {}
-        rows = [
-            ("session", agent.session_id[:8]),
-            ("model", (options.get("model") or {}).get("currentValue", "?")),
-            ("mode", (options.get("mode") or {}).get("currentValue", "?")),
-            ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
-            ("approval", self._agent_gate(agent)),
-            ("yolo", "on · nothing asks" if agent.yolo else "off"),
-            ("cwd", agent.cwd),
-        ]
-        return card(title, now_wib(), rows, note)
+        return card(title, "", self.info_rows(agent), note)
 
     async def _busy(self, update: Update, agent: engine.ChatAgent, command: str) -> bool:
         """These commands replace the agent process; doing that mid-turn cut the turn off with
@@ -522,22 +568,13 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         agent = self.agent_for(update.effective_chat.id)
         queue = self.queues.get(update.effective_chat.id)
         alive = agent.client is not None and agent.client.alive
-        options = getattr(agent, "options", {}) or {}
         rows = [
-            ("session", agent.session_id[:8] or "-"),
+            *self.info_rows(agent),
             ("process", f"{'alive' if alive else 'stopped'} · {fmt_uptime(time.time() - agent.started_at)}"),
             ("state", "busy" if agent.busy else "idle"),
             ("queue", queue.qsize() if queue else 0),
-            ("model", (options.get("model") or {}).get("currentValue", "?")),
-            ("mode", (options.get("mode") or {}).get("currentValue", "?")),
-            ("thinking", (options.get("thinking") or {}).get("currentValue", "-")),
-            ("cwd", agent.cwd),
-            ("approval", approval_policy(self.config)),
-            ("yolo", "on" if agent.yolo else "off"),
-            ("trace", "verbose" if agent.verbose else "quiet"),
             ("work", f"{agent.turns} turns · {agent.tools_used} tools"),
             *self._context_rows(agent, self._session_usage(agent)),
-            ("clock", now_wib()),
         ]
         await update.effective_message.reply_text(
             card("📊 status", "", rows), parse_mode=ParseMode.HTML
@@ -652,7 +689,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                                    "applies to every omp client, new agent processes"))
 
     async def on_photo(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Forward a Telegram photo to the agent as an ACP image block."""
+        """Forward a Telegram photo to the agent as an image block on the prompt."""
         if not self._authorized(update):
             return await self._deny(update)
         message = update.effective_message
@@ -683,7 +720,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
     async def on_document(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Save a document from the chat and hand the agent its path.
 
-        ACP has no general attachment block, and the agent has a shell: a readable path is more
+        omp's RPC has no general attachment block, and the agent has a shell: a readable path is more
         useful than a content type the transport would have to guess at.
         """
         if not self._authorized(update):
@@ -728,47 +765,38 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             await self._ack(update.effective_message, queued_text(depth))
 
     async def cmd_sessions(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """This directory's omp transcripts, one button each: a tap resumes that session.
+
+        Resuming replaces the running session, so it waits for a turn the same way /new does.
+        """
         if not self._authorized(update):
             return await self._deny(update)
-        agent = self.agent_for(update.effective_chat.id)
+        chat_id = update.effective_chat.id
+        agent = self.agent_for(chat_id)
+        if await self._busy(update, agent, "/sessions"):
+            return
         await agent.ensure()
-        data = await asyncio.to_thread(agent.client.list_sessions, agent.cwd)
-        rows = (data.get("sessions") or [])[:10]
+        found = await agent.list_sessions()
+        rows = found[:SESSIONS_SHOWN]
         if not rows:
             return await update.effective_message.reply_text("no sessions recorded")
-        table = "\n".join(
-            f"{str(row.get('sessionId') or '')[:8]}  {str(row.get('updatedAt') or '')[:16]}  "
-            f"{((row.get('_meta') or {}).get('size') or '?')}B"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(self._session_label(row, agent),
+                                  callback_data=f"ses:{row.get('sessionId') or ''}")]
             for row in rows
-        )
-        body = card("🗂 sessions", f"{len(rows)} of {len(data.get('sessions') or [])} · {agent.cwd}",
-                    [], "/resume <id> to continue one")
-        body = body.replace("</i>", "</i>\n<pre>" + esc(table) + "</pre>")
-        await update.effective_message.reply_text(body, parse_mode=ParseMode.HTML)
+        ])
+        body = card("🗂 sessions", f"{len(rows)} of {len(found)} · {agent.cwd}", [],
+                    "tap one to resume it · • is this chat's session")
+        await self.app.bot.send_message(chat_id, body, parse_mode=ParseMode.HTML,
+                                       reply_markup=keyboard)
 
-    async def cmd_resume(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return await self._deny(update)
-        if not ctx.args:
-            return await update.effective_message.reply_text("usage: /resume <session-id>")
-        prefix = ctx.args[0]
-        agent = self.agent_for(update.effective_chat.id)
-        await agent.ensure()
-        data = await asyncio.to_thread(agent.client.list_sessions, agent.cwd)
-        match = next((str(r.get("sessionId")) for r in (data.get("sessions") or [])
-                      if str(r.get("sessionId", "")).startswith(prefix)), None)
-        if match is None:
-            return await update.effective_message.reply_text(f"no session starting with {prefix}")
-        self.enqueue(update.effective_chat.id, "resume", (update.effective_message, match))
-
-    async def cmd_continue(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return await self._deny(update)
-        agent = self.agent_for(update.effective_chat.id)
-        record = agent.store.get(agent.key)
-        if record is None:
-            return await update.effective_message.reply_text("nothing to continue, use /new")
-        self.enqueue(update.effective_chat.id, "resume", (update.effective_message, record.session_id))
+    @staticmethod
+    def _session_label(row: dict[str, Any], agent: engine.ChatAgent) -> str:
+        """A button label: id, when it last changed, how big, and a mark for this chat's own."""
+        session_id = str(row.get("sessionId") or "")
+        size = (row.get("_meta") or {}).get("size") or "?"
+        mark = "• " if session_id and session_id == agent.session_id else ""
+        return f"{mark}{session_id[:8]} · {str(row.get('updatedAt') or '')[:16]} · {size}B"
 
     async def cmd_fork(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -783,7 +811,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                 self.session_card(agent, "🌿 forked", "context copied into a new session id"),
                 parse_mode=ParseMode.HTML,
             )
-        except AcpError as exc:
+        except AgentError as exc:
             await update.effective_message.reply_text(f"fork failed: {exc}")
 
     async def cmd_cwd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -878,7 +906,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
     async def cmd_reasoning(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Show or hide the agent's thinking.
 
-        ACP sends it as agent_thought_chunk and the transport used to drop it. Off by default:
+        omp streams it as reasoning (agent_thought_chunk here) and the transport used to drop it. Off by default:
         at thinking=xhigh the thought stream is longer than the answer, and reading it every turn
         is noise. On demand, it is the most direct way to see what the agent is actually weighing.
         """
@@ -894,6 +922,22 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         await self.announce(
             update.effective_chat.id,
             f"reasoning: {'on' if agent.reasoning else 'off'} · `/reasoning on` or `off`")
+
+    async def cmd_advisor(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show or hide the notes omp's advisor model writes on each turn (when it is enabled
+        in omp's config): a second model's corrections are worth seeing next to the answer."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        agent = self.agent_for(update.effective_chat.id)
+        wanted = (ctx.args[0].lower() if ctx.args else "").strip()
+        if wanted in {"on", "off", "1", "0", "true", "false", "yes", "no"}:
+            value = wanted in {"on", "1", "true", "yes"}
+            agent.set_display("advisor", value)
+            return await self.announce(update.effective_chat.id,
+                                       f"advisor: {'on' if value else 'off'} · this chat")
+        await self.announce(
+            update.effective_chat.id,
+            f"advisor: {'on' if agent.advisor else 'off'} · `/advisor on` or `off`")
 
     async def cmd_commands(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Search the slash commands the agent advertises (about a thousand)."""
@@ -913,34 +957,139 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         sample = ", ".join(hits[:60])
         await update.effective_message.reply_text(f"{len(hits)} match(es):\n{sample}")
 
-    async def cmd_queue(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        if not self._authorized(update):
-            return await self._deny(update)
-        if not ctx.args:
-            return await update.effective_message.reply_text("usage: /queue <prompt>")
-        text = " ".join(ctx.args)
-        agent = self.agent_for(update.effective_chat.id)
-        depth = self.enqueue(update.effective_chat.id, "prompt", _TextOnly(text, update.effective_message))
-        await self._ack(update.effective_message,
-                        queued_text(depth) if agent.busy else "▶️ starting now")
+    def busy_card(self, agent: engine.ChatAgent, footer: str = "") -> str:
+        rows = [(mode, BUSY_NOTES[mode]) for mode in BUSY_MODES]
+        return card("📨 busy", f"{agent.busy_mode} · this chat", rows,
+                    footer or "what a message sent while the agent works does")
 
-    async def cmd_steer(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    def busy_keyboard(self, current: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(("• " if mode == current else "") + mode,
+                                  callback_data=f"busy:{mode}")]
+            for mode in BUSY_MODES
+        ])
+
+    async def cmd_busy(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
-        if not ctx.args:
-            return await update.effective_message.reply_text("usage: /steer <text>")
         chat_id = update.effective_chat.id
-        text = " ".join(ctx.args)
         agent = self.agent_for(chat_id)
-        outcome, reason = await agent.steer(text)
-        if outcome == "injected":
-            return await self._ack(update.effective_message, STEERED)
-        if outcome == "promptRequired":
-            # nothing to steer: the text is still what the person wants the agent to read
-            self.enqueue(chat_id, "prompt", _TextOnly(text, update.effective_message))
-            return await update.effective_message.reply_text("nothing running; sent as a new prompt")
+        if not ctx.args:
+            return await update.effective_message.reply_text(
+                self.busy_card(agent), reply_markup=self.busy_keyboard(agent.busy_mode),
+                parse_mode=ParseMode.HTML)
+        value = ctx.args[0].lower()
+        if value not in BUSY_MODES:
+            return await update.effective_message.reply_text(
+                f"usage: /busy [{'|'.join(BUSY_MODES)}]")
+        if value == agent.busy_mode:
+            # a second /busy with the mode already set still deserves an answer, not silence
+            return await update.effective_message.reply_text(
+                f"busy is already {value} · {BUSY_NOTES[value]}")
+        await self.set_busy(chat_id, agent, value)
+
+    async def set_busy(self, chat_id: int, agent: engine.ChatAgent, value: str,
+                       anchor: Any = None) -> str:
+        """Store this chat's busy mode. Returns changed | unchanged."""
+        previous = agent.busy_mode
+        if value == previous:
+            return "unchanged"
+        agent.set_busy_mode(value)
+        log.info("busy mode chat=%s %s -> %s", chat_id, previous, value)
+        body = change("busy", previous, value, BUSY_NOTES[value])
+        if anchor is not None:
+            try:
+                await anchor.edit_text(body, parse_mode=ParseMode.HTML)
+                return "changed"
+            except BadRequest as exc:
+                log.debug("busy anchor edit failed: %s", exc)
+        await self.announce(chat_id, body)
+        return "changed"
+
+    async def cmd_stats(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """omp's own counters for the session, the ones its status line shows."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        agent = self.agent_for(update.effective_chat.id)
+        try:
+            stats = await agent.session_stats()
+        except AgentError as exc:
+            return await update.effective_message.reply_text(f"stats failed: {exc}")
         await update.effective_message.reply_text(
-            f"steer was not accepted ({reason or outcome}); /queue it, or /stop and resend")
+            card("📈 stats", f"session {agent.session_id[:8] or '-'}", stats_rows(stats)),
+            parse_mode=ParseMode.HTML)
+
+    async def cmd_name(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return await self._deny(update)
+        name = " ".join(ctx.args or []).strip()
+        if not name:
+            return await update.effective_message.reply_text("usage: /name <session name>")
+        agent = self.agent_for(update.effective_chat.id)
+        try:
+            await agent.rename(name)
+        except AgentError as exc:
+            return await update.effective_message.reply_text(f"rename failed: {exc}")
+        log.info("session named chat=%s session=%s", update.effective_chat.id,
+                 agent.session_id[:8])
+        await update.effective_message.reply_text(
+            card("🏷️ session named", name, [("session", agent.session_id[:8] or "-")]),
+            parse_mode=ParseMode.HTML)
+
+    async def cmd_export(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """omp writes the session as HTML; the file is the answer, so it is sent as a document."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        message = update.effective_message
+        agent = self.agent_for(update.effective_chat.id)
+        try:
+            path = await agent.export_html()
+        except AgentError as exc:
+            return await message.reply_text(f"export failed: {exc}")
+        log.info("session exported chat=%s path=%s", update.effective_chat.id, path)
+        try:
+            await agent.surface.send_file(path, as_photo=False)
+        except (OSError, TelegramError) as exc:
+            # the export itself worked: say where the file is instead of losing it behind "error"
+            await message.reply_text(f"export written to {path}, sending it failed: {exc}")
+
+    async def cmd_handoff(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """omp's handoff: the session continues from a summary instead of the full history."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        agent = self.agent_for(update.effective_chat.id)
+        if await self._busy(update, agent, "/handoff"):
+            return
+        try:
+            result = await agent.handoff(" ".join(ctx.args or []).strip())
+        except AgentError as exc:
+            return await update.effective_message.reply_text(f"handoff failed: {exc}")
+        log.info("handoff chat=%s session=%s", update.effective_chat.id, agent.session_id[:8])
+        saved = str(result.get("savedPath") or "")
+        await update.effective_message.reply_text(
+            self.session_card(agent, "🤝 handed off",
+                              f"summary saved to {saved}" if saved
+                              else "the session goes on from a summary"),
+            parse_mode=ParseMode.HTML)
+
+    async def cmd_btw(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """A side question: it runs next to a turn and never enters the session's context."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        message = update.effective_message
+        question = " ".join(ctx.args or []).strip()
+        if not question:
+            return await message.reply_text("usage: /btw <question>")
+        agent = self.agent_for(update.effective_chat.id)
+        try:
+            answer = await agent.btw(question)
+        except AgentError as exc:
+            return await message.reply_text(f"btw failed: {exc}")
+        body = f"💬 <blockquote>{esc(question)}</blockquote>\n{to_html(answer)}"
+        try:
+            await message.reply_text(body, parse_mode=ParseMode.HTML, do_quote=True)
+        except BadRequest:
+            await message.reply_text(f"💬 {question}\n\n{answer}", do_quote=True)
 
     async def cmd_yolo(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -964,7 +1113,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         agent = self.agent_for(update.effective_chat.id)
         if agent.client is not None:
             agent.forget_turn()
-            await asyncio.to_thread(agent.client.close, agent.session_id)
+            await agent.stop_process()
             agent.client = None
             log.info("agent killed by user chat=%s", update.effective_chat.id)
             await self.announce(update.effective_chat.id, "agent process stopped")
@@ -1010,10 +1159,12 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             return await self._deny(update)
         names = dict(COMMANDS)
         groups = [
-            ("session", ["new", "sessions", "resume", "continue", "fork", "cwd", "kill"]),
-            ("agent", ["model", "mode", "thinking", "approve", "trace", "verbose", "yolo"]),
+            ("session", ["new", "sessions", "name", "handoff", "export", "fork", "cwd",
+                         "schedule", "kill"]),
+            ("agent", ["model", "mode", "thinking", "approve", "trace", "verbose", "reasoning",
+                       "advisor", "yolo"]),
             ("catalog", ["skills", "login", "commands"]),
-            ("running", ["stop", "queue", "steer", "status", "usage", "context",
+            ("running", ["stop", "busy", "btw", "status", "usage", "stats", "context",
                          "compact", "compaction"]),
             ("info", ["whoami", "help"]),
         ]
@@ -1051,10 +1202,9 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             return
 
         if data.startswith("qo:"):
-            agent = self.agent_for(chat_id)
             choice = data.split(":", 1)[1]
             if choice == "other":
-                if not agent.pending_options:
+                if not (agent.pending_ask is not None or agent.pending_options):
                     await query.answer("that question is closed")
                     return
                 await query.answer("type your answer")
@@ -1064,28 +1214,67 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                 await agent.surface.retire_options("type your answer; your next message is it")
                 return
             if choice == "skip":
-                self._settle_question(chat_id, agent)
                 await query.answer("skipped")
-                await agent.surface.retire_options("skipped")
-                await self._release_held(chat_id)
+                note = "skipped"
+                if agent.pending_ask is not None:
+                    # omp answers with its recommended option (else the first) and carries on
+                    await agent.answer_ask(None, skip=True)
+                    log.info("ask skipped chat=%s", chat_id)
+                    note = "skipped · the agent goes on with its recommended option"
+                self._settle_question(chat_id, agent)
+                await agent.surface.retire_options(note)
+                await self._after_ask(chat_id, agent)
                 return
             try:
-                answer = agent.pending_options[int(choice)]
-            except (ValueError, IndexError):
+                index = int(choice)
+            except ValueError:
                 await query.answer("that option expired")
                 return
+            if agent.pending_ask is not None:
+                # omp's ask: the tap is the answer itself, never a prompt that repeats the label
+                if not await agent.answer_ask(None, option_index=index):
+                    await query.answer("that option expired")
+                    return
+                await query.answer("sent")
+                log.info("ask answered chat=%s index=%s", chat_id, index)
+                await self._after_ask(chat_id, agent)
+                return
+            if not 0 <= index < len(agent.pending_options):
+                await query.answer("that option expired")
+                return
+            answer = agent.pending_options[index]
             await query.answer("sent")
             agent.pending_options = []
             log.info("question answered chat=%s answer=%r", chat_id, answer)
             try:
                 await query.edit_message_text(
-                    card("❓ answer sent", answer, [], "waiting for the agent"), parse_mode=ParseMode.HTML)
+                    card("❓ answer sent", answer, [], "waiting for the agent"),
+                    parse_mode=ParseMode.HTML)
             except BadRequest:
                 pass
             agent.surface.options_message = None
             self._settle_question(chat_id, agent)
             await self._route(chat_id, agent, _TextOnly(answer, query.message), query.message)
             await self._release_held(chat_id)
+            return
+
+        if data.startswith("ses:"):
+            session_id = data.split(":", 1)[1]
+            if not session_id:
+                return await query.answer("no session id")
+            if await self._busy(update, agent, "resume"):
+                return await query.answer("a turn is running")
+            await query.answer("resuming…")
+            log.info("resume queued chat=%s session=%s", chat_id, session_id[:8])
+            self.enqueue(chat_id, "resume", (query.message, session_id))
+            return
+
+        if data.startswith("busy:"):
+            value = data.split(":", 1)[1]
+            if value not in BUSY_MODES:
+                return await query.answer("unknown mode")
+            changed = await self.set_busy(chat_id, agent, value, anchor=query.message)
+            await query.answer(f"already {value}" if changed == "unchanged" else f"busy: {value}")
             return
 
         if data.startswith("skv:"):
@@ -1154,7 +1343,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                     await self._show_config(agent, chat_id, config_id, screen="l",
                                             provider=a, page=b, edit=query.message)
                     return
-            except (AcpError, IndexError) as exc:
+            except (AgentError, IndexError) as exc:
                 await query.answer("failed", show_alert=False)
                 await self.app.bot.send_message(chat_id, f"{config_id} failed: {exc}")
                 return
@@ -1192,30 +1381,41 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         builder = Application.builder().token(self.token)
         self.app = builder.build()
         app = self.app
+        self.register(app)
+        await self._serve(app)
+
+    def register(self, app) -> None:
+        """Every command in the menu gets its handler here; one listed but not registered fell
+        through to the agent's forwarder and nothing answered."""
+        # block=False where a handler waits on omp: PTB processes updates one at a time, so a
+        # /btw answering for a minute would hold back every other chat, an approval tap included.
         app.add_handler(CommandHandler("new", self.cmd_new))
         app.add_handler(CommandHandler("stop", self.cmd_stop))
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("usage", self.cmd_usage))
+        app.add_handler(CommandHandler("stats", self.cmd_stats, block=False))
         app.add_handler(CommandHandler("context", self.cmd_context))
         app.add_handler(CommandHandler("compact", self.cmd_compact))
         app.add_handler(CommandHandler("compaction", self.cmd_compaction))
         app.add_handler(CommandHandler("skills", self.cmd_skills))
         app.add_handler(CommandHandler("login", self.cmd_login))
         app.add_handler(CommandHandler("commands", self.cmd_commands))
-        app.add_handler(CommandHandler("sessions", self.cmd_sessions))
-        app.add_handler(CommandHandler("resume", self.cmd_resume))
-        app.add_handler(CommandHandler("continue", self.cmd_continue))
+        app.add_handler(CommandHandler("sessions", self.cmd_sessions, block=False))
+        app.add_handler(CommandHandler("name", self.cmd_name))
+        app.add_handler(CommandHandler("export", self.cmd_export, block=False))
+        app.add_handler(CommandHandler("handoff", self.cmd_handoff, block=False))
         app.add_handler(CommandHandler("fork", self.cmd_fork))
         app.add_handler(CommandHandler("cwd", self.cmd_cwd))
         app.add_handler(CommandHandler("model", self.cmd_model))
         app.add_handler(CommandHandler("mode", self.cmd_mode))
         app.add_handler(CommandHandler("thinking", self.cmd_thinking))
         app.add_handler(CommandHandler("approve", self.cmd_approve))
+        app.add_handler(CommandHandler("busy", self.cmd_busy))
         app.add_handler(CommandHandler("verbose", self.cmd_verbose))
-        app.add_handler(CommandHandler("schedule", self.cmd_schedule))
         app.add_handler(CommandHandler("reasoning", self.cmd_reasoning))
-        app.add_handler(CommandHandler("queue", self.cmd_queue))
-        app.add_handler(CommandHandler("steer", self.cmd_steer))
+        app.add_handler(CommandHandler("advisor", self.cmd_advisor))
+        app.add_handler(CommandHandler("schedule", self.cmd_schedule))
+        app.add_handler(CommandHandler("btw", self.cmd_btw, block=False))
         app.add_handler(CommandHandler("yolo", self.cmd_yolo))
         app.add_handler(CommandHandler("kill", self.cmd_kill))
         app.add_handler(CommandHandler("whoami", self.cmd_whoami))
@@ -1237,6 +1437,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                                        self.on_document))
         app.add_handler(MessageHandler(filters.ALL, self.log_update), group=-1)
 
+    async def _serve(self, app) -> None:
         await app.initialize()
         await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in _unique_commands()])
         me = await app.bot.get_me()
@@ -1318,37 +1519,13 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         if chat_id is None:
             return
         rows: list[tuple[str, object]] = []
+        agent = self.agent_for(chat_id)
         try:
-            agent = self.agent_for(chat_id)
             await agent.ensure()
-            options = getattr(agent, "options", {}) or {}
-            rows += [
-                ("agent", f"omp {agent.agent_version or '?'}"),
-                ("session", agent.session_id[:8]),
-                ("model", (options.get("model") or {}).get("currentValue", "?")),
-                ("mode", f"{(options.get('mode') or {}).get('currentValue', '?')}"
-                         f" · thinking {(options.get('thinking') or {}).get('currentValue', '-')}"),
-                ("cwd", agent.cwd),
-            ]
         except Exception as exc:
-            rows.append(("agent", f"failed: {exc}"))
+            rows.append(("error", f"agent failed to start: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
-        # The resolved list, not config["mcp"]["servers"]: with source = "mcp-hub" that inline
-        # list is empty while the hub supplies every server, and the banner said "none".
-        try:
-            servers = [str(server.get("name")) for server in resolve_mcp_servers(self.config)]
-        except Exception as exc:
-            servers = []
-            log.warning("mcp resolution failed: %s", exc)
-        rows += [
-            ("approval", self._agent_gate(agent)),
-            ("yolo", "on" if agent.yolo else "off"),
-            ("reasoning", "on" if agent.reasoning else "off"),
-            ("mcp", mcp_label(servers)),
-            ("users", ", ".join(str(u) for u in sorted(self.allowed)) or "none"),
-            ("store", self.config.get("session", "store", "")),
-            ("clock", now_wib()),
-        ]
+        rows += self.info_rows(agent)
         body = card("🟢 ompwire", f"{__version__} · @{username}", rows,
                     "send /help for commands · /status for live state")
         log.info("startup banner: %s", " | ".join(f"{k}={v}" for k, v in rows))

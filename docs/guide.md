@@ -8,7 +8,7 @@ not installed yet.
 - [In a chat app](#in-a-chat-app)
 - [Approval](#approval)
 - [Schedules](#schedules)
-- [Thinking and subagents](#thinking-and-subagents)
+- [Thinking, advisor and subagents](#thinking-advisor-and-subagents)
 - [Terminal](#terminal)
 - [Configuration](#configuration)
 - [Update and remove](#update-and-remove)
@@ -157,17 +157,20 @@ The terminal has its own smaller set, described under [Terminal](#terminal).
 
 | Command | What it does |
 | --- | --- |
-| `/new`, `/sessions`, `/resume <id>`, `/continue` | session lifecycle |
-| `/fork` | branch the current session |
+| `/new`, `/sessions` | start a session, or list this directory's sessions with a resume button each |
+| `/fork`, `/handoff [note]` | branch the current session, or hand it to a fresh one with a summary |
+| `/name <text>`, `/export` | rename the session, or get it as an HTML file |
 | `/model`, `/mode`, `/thinking` | switch with an inline keyboard |
 | `/cwd <path>` | start a session in another directory |
-| `/status`, `/usage`, `/context` | what is running, what the session cost, what fills the context |
+| `/status`, `/usage`, `/stats`, `/context` | what is running, what the session cost, message and tool counts, what fills the context |
 | `/compact` | run OMP's compaction now |
 | `/compaction [10-95\|off\|on]` | show or set OMP's auto-compaction threshold |
-| `/queue <text>`, `/steer <text>` | queue a turn, or add to the running one |
+| `/busy [steer\|followup\|queue]` | what a message sent mid-turn does, in this chat |
+| `/btw <question>` | a side question answered without touching the conversation |
 | `/stop`, `/kill` | cancel the turn, or stop this chat's agent process |
 | `/approve`, `/verbose`, `/yolo` | approval policy, activity in this chat (trace, todo list, notices), approvals off for this chat |
 | `/reasoning [on\|off]` | show the agent's thinking above the answer, in this chat |
+| `/advisor [on\|off]` | show omp's advisor notes on each turn, in this chat (on by default) |
 | `/skills [query]`, `/commands` | what the agent can do |
 | `/schedule [run\|rm <name>]` | list scheduled turns, run one now, remove one |
 | `/login` | sign in to a model provider |
@@ -177,15 +180,37 @@ Any other slash command is forwarded to the agent as a prompt.
 
 ### While the agent is working
 
-A message sent mid-turn is steered into the running turn: the agent reads it at its next step,
-and the reply says `↪️ steered`. When OMP declines it, or when `[telegram] busy_message =
-"queue"` is set, the message is queued and the reply says its place (`📥 queued #2`). `/queue`
-always queues. `/stop` cancels the turn.
+What a message sent mid-turn does is set per chat with `/busy`:
+
+- `steer` (default): it goes into the running turn, which reads it at its next step. The reply
+  says `↪️ steered`.
+- `followup`: OMP queues it and runs it as the next turn, right after this one. The reply says
+  `📥 follow-up queued`.
+- `queue`: ompwire holds it and sends it as a new turn once this one ends (`📥 queued #2`).
+
+When OMP declines a steer or a follow-up, the message falls back to the queue. `/stop` cancels
+the turn. `/btw` works while a turn runs: the side question is answered on its own and never
+enters the conversation.
+
+### Subagents
+
+When the agent runs subagents through its `task` tool, a verbose chat gets one summary message
+for the call and one card per job. The summary (`🤖 subagent (spawned 2 background agents)`)
+lists each job with its type, status, age and tool count, the task it was given, and a totals
+line (running, done, failed, tools, tokens). A job card shows the status line, then the task,
+type, model with its thinking level, usage (requests, tokens, cost as omp reports them) and the
+last action, in a code block. Each update is a new message, like the rest of the chat: until every
+job has finished, a card is posted again at most once a minute, even while a job sits on one
+long command, and once more when a job ends, so a background job that outlives the turn still
+reports how it finished. A quiet chat (a group, or `/verbose` off) shows none of them.
 
 ### Questions
 
-The agent asks by ending a reply with `<<options: a | b>>`. The line becomes buttons, plus
-✏️ Other answer and ⏭️ Skip. While the question is open:
+OMP's `ask` tool arrives as buttons, one question at a time, with the question above them. A
+reply can also end with `<<options: a | b>>`, which becomes buttons the same way. Both add
+✏️ Other answer and ⏭️ Skip. Skip on an `ask` lets the agent go on with the option OMP marked as
+recommended (or the first one); the turn keeps running. An `ask` nobody answers within
+`[approval] timeout` (120 seconds) is resolved the same way. While the question is open:
 
 - a message about something else is held (`⏸️ held #1`) and runs after the question is settled;
 - after ✏️ Other answer, the next message you type is the answer;
@@ -214,15 +239,26 @@ last      10:41 WIB · 735.1k → 68.2k
 
 ## Approval
 
-The agent runs with `approval_mode = write`. Reads and file writes are free; a shell command
-that can change something sends a request with Allow once, Always allow, Deny and Always deny.
-Commands that only read are let through: the command is tokenised, a pipeline counts as
+The agent runs with `approval_mode = write`. Reads and OMP's own file writes go through; a shell
+command that can change something sends a request with ✅ Allow, ✅ Allow for this session and
+⛔ Deny. Commands that only read are let through: the command is tokenised, a pipeline counts as
 read-only only when every part is, and a redirect is allowed only into `/dev/null`.
 
-`write` is the one OMP mode that both lets the agent work and reaches a person. Under
-`always-ask` OMP denies writes without sending a request, so no button ever appears. `yolo`
-asks nothing; `/yolo` turns it on for one chat. An unanswered request is denied after
-`[approval] timeout` (120 seconds by default).
+`yolo` asks nothing; `/yolo` turns it on for one chat. An unanswered request is denied after
+`[approval] timeout` (120 seconds by default). A question OMP opens that is not an approval
+(free text, an editor) is cancelled, because nobody in the chat sees it.
+
+### Plan mode
+
+`/mode plan` makes the agent explore and propose before it changes anything. Reads and read-only
+commands run without a button; every other tool is refused. The plan arrives with two buttons:
+
+- ✅ Approve plan: back to default mode, and the agent implements the plan.
+- ✏️ Deny & revise: the bot asks what to change. Your next message (typing straight away works
+  too) goes back as feedback, and a revised plan comes back for review.
+
+Plan mode is ompwire's own, since OMP's plan review exists only in its terminal UI. `/mode
+default` leaves it at any time.
 
 The appended system prompt sets the scope: a question gets a read-only answer, a clone goes to
 `/tmp` or `~/.cache`, and anything that touches production stops so the agent can say what it
@@ -248,11 +284,16 @@ timeout.
 writes files, `yolo` (the default) asks nothing. You can also ask in the chat ("every morning
 at 7, summarise the repo"); the agent proposes it and nothing is installed until you confirm.
 
-## Thinking and subagents
+## Thinking, advisor and subagents
 
-`/reasoning on` shows the agent's thinking above the answer in a collapsed block.
-`[stream] show_reasoning` sets the default. Subagents need no switch: OMP runs them through its
-`task` tool, and the trace labels that call `subagent` with its name and progress.
+`/reasoning on` shows the agent's thinking above the answer in a code block.
+`[stream] show_reasoning` sets the default. When omp's advisor is enabled (`advisor.enabled` in
+`~/.omp/agent/config.yml`), its notes on a turn show as `⚖️ advisor`, one code block per note
+with its severity (🛑 blocker, ⚠️ concern, 💡 nit). `/advisor off` hides them in this chat;
+`[stream] show_advisor` sets the default (on). Subagents need no switch: OMP runs them through
+its `task` tool, and each job gets its own card (see Subagents). A skill the agent creates,
+updates or deletes (`manage_skill`, `learn`) shows in the trace as `🎓` with the action and the
+skill's name.
 
 ## Terminal
 
@@ -287,8 +328,10 @@ One gateway is two directories, so `gateway remove` with the full delete leaves 
 behind.
 
 Precedence: defaults, then `config.toml`, then the gateway's own settings, then toggles set from
-its chat, then environment variables. Sections: `[acp]`,
-`[agent]`, `[session]`, `[stream]`, `[approval]`, `[files]`, `[logging]`, `[mcp]`,
+its chat, then environment variables. Sections: `[acp]` (the agent command, run as
+`omp --mode rpc-ui`; an old `--mode acp` or `--mode rpc` is read as rpc-ui), `[agent]`,
+`[session]`, `[stream]`,
+`[approval]`, `[files]`, `[logging]`,
 and one per platform (`[telegram]`). `ompwire config` prints the merged result with secrets masked.
 `OMPWIRE_CONFIG_DIR` points everything at another directory.
 
@@ -358,8 +401,8 @@ conversation or unfinished turn is lost. The old `gateways.toml` is kept as
 
 `ompwire setup` can be run again: every prompt is pre-filled with what is on disk.
 
-`[mcp] source = "mcp-hub"` reads a shared `servers.yaml`; `exclude` and
-`[mcp.overrides.<name>]` adjust it per machine.
+MCP servers are OMP's own: it reads `~/.omp/agent/mcp.json` and starts a server only when a turn
+calls it. ompwire injects none, and an `[mcp]` section left in an old config is ignored.
 
 `[files]` sets `max_mb` (20, both directions) and `incoming_dir` for documents sent into the
 chat. The agent sends a file by naming it on its own line:

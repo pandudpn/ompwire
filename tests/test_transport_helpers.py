@@ -1,32 +1,16 @@
-"""Offline tests for the transport helpers: MCP shaping and the picker grouping.
-
-Both encode behaviour that only shows up against the real agent, so they are
-pinned here without needing a bot token or an ACP process.
+"""Offline tests for the picker grouping: behaviour that only shows up against the real agent,
+pinned here without needing a bot token or an agent process.
 """
 
 from __future__ import annotations
 
 from ompwire.config import load_config
-from ompwire.mcp_hub import normalize
 from ompwire.telegram import Transport
 
 
 class FakeAgent:
     def __init__(self, options):
         self.options = options
-
-
-def test_env_object_is_converted_to_array():
-    shaped = normalize([{"name": "x", "command": "npx", "args": ["-y", "pkg"], "env": {"A": "1"}}])
-    assert shaped[0]["env"] == [{"name": "A", "value": "1"}]
-    assert shaped[0]["type"] == "stdio"
-
-
-def test_missing_env_becomes_empty_list():
-    # omp 18.12.6 rejects session/new when env is absent or an object
-    shaped = normalize([{"name": "y", "command": "bun"}])
-    assert shaped[0]["env"] == []
-    assert shaped[0]["args"] == []
 
 
 def test_providers_group_by_slash_prefix():
@@ -222,61 +206,45 @@ def test_tool_block_escapes_html_in_output():
     assert "&lt;b&gt;" in body
 
 
-def test_chat_formatting_hint_is_forwarded_to_the_agent():
-    """Without the hint the model writes commands inline; omp needs to be told."""
+def _client_args(prose=None, mode="default"):
+    """The omp command line a chat's agent starts with, built without a running loop."""
     from ompwire.config import load_config
     from ompwire.engine import ChatAgent
 
     config = load_config(env={})
+    if prose is not None:
+        config.data.setdefault("agent", {})["append_system_prompt"] = prose
     agent = ChatAgent.__new__(ChatAgent)
     agent.config = config
     agent.cwd = "/tmp"
     agent.yolo = False
+    agent.options = {"mode": {"currentValue": mode}}
     agent._on_update = None
-    agent._on_permission = None
-    client = ChatAgent._build_client(agent)
-    args = client.args
-    assert "--append-system-prompt" in args
+    agent._on_dialog = None
+    return ChatAgent._build_client(agent).args
+
+
+def test_chat_formatting_hint_is_forwarded_to_the_agent():
+    """Without the hint the model writes commands inline; omp needs to be told."""
+    args = _client_args()
+    assert args[:2] == ["--mode", "rpc-ui"]
     hint = args[args.index("--append-system-prompt") + 1]
     assert "fenced code" in hint
 
 
-def test_the_markers_are_described_even_with_no_prose_configured():
-    """There is no switch: a reply that cannot carry a file is a reply this transport does not
-    understand, so the marker explanation is not something a config can drop."""
-    from ompwire.config import load_config
-    from ompwire.engine import ChatAgent
-
-    config = load_config(env={})
-    config.data.setdefault("agent", {})["append_system_prompt"] = ""
-    agent = ChatAgent.__new__(ChatAgent)
-    agent.config = config
-    agent.cwd = "/tmp"
-    agent.yolo = False
-    agent._on_update = None
-    agent._on_permission = None
-
-    args = ChatAgent._build_client(agent).args
-    assert "--append-system-prompt" in args
-
-
 def test_the_marker_protocol_is_always_described():
-    """An upgraded install keeps its old config prose, so the markers cannot live there."""
-    from ompwire.config import load_config
-    from ompwire.engine import ChatAgent
-
-    config = load_config(env={})
-    config.data.setdefault("agent", {})["append_system_prompt"] = ""
-    agent = ChatAgent.__new__(ChatAgent)
-    agent.config = config
-    agent.cwd = "/tmp"
-    agent.yolo = False
-    agent._on_update = None
-    agent._on_permission = None
-
-    args = ChatAgent._build_client(agent).args
+    """There is no switch: a reply that cannot carry a file is a reply this transport does not
+    understand, and an upgraded install keeps its old config prose, so the markers cannot live
+    there."""
+    args = _client_args(prose="")
     hint = args[args.index("--append-system-prompt") + 1]
     assert "<<file:" in hint and "<<options:" in hint
+
+
+def test_plan_mode_starts_the_agent_asking_before_every_tool():
+    """Plan mode only reads: every call must come through the approval hook to be refused."""
+    assert "--approval-mode=always-ask" in _client_args(mode="plan")
+    assert "--approval-mode=always-ask" not in _client_args()
 
 
 def test_the_subagent_is_named_in_the_tool_block():
