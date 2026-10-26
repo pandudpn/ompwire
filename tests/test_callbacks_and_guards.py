@@ -120,6 +120,30 @@ def test_an_option_offered_before_a_restart_still_answers_after_it(tmp_path):
     assert late == ["that option expired"]
 
 
+def test_an_ask_card_does_not_outlive_the_restart_that_ended_its_ask(tmp_path):
+    """omp's ask lives in the process a restart kills; its card must not hold the next message
+    or turn a tap into a fresh prompt. A reply's own options still survive (test above)."""
+    config = _config(tmp_path)
+
+    async def ask_open():
+        agent = _transport(config).agent_for(7)
+        agent.pending_ask = {"token": "ask-1", "questions": [{"id": "q"}], "index": 0}
+        agent.pending_options = ["red", "blue"]
+
+    async def after_restart():
+        transport = _transport(config)
+        sent: list[str] = []
+        transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or 1
+        message = _Typed("something new")
+        await transport.submit(7, message, message)
+        return sent, message.replies, transport.agent_for(7).pending_options
+
+    asyncio.run(ask_open())
+    sent, replies, left = asyncio.run(after_restart())
+    assert sent == ["something new"], "the message ran instead of waiting on a dead question"
+    assert not any(reply.startswith("⏸️ held") for reply in replies)
+    assert left == []
+
 
 def test_other_answer_removes_the_buttons(tmp_path):
     config = _config(tmp_path)

@@ -684,6 +684,10 @@ class ChatAgent:
         self.started_at = time.time()
         # an ask question the person owes an answer to: {"questions", "index", "answers"}
         self.pending_ask: dict[str, Any] | None = None
+        if self._stored_options()[1] == "ask":
+            # the ask died with the omp process that asked it; a card left from it would hold
+            # every new message and turn a tap into a fresh prompt instead of an answer
+            self.pending_options = []
         # plan mode: a plan is waiting for Approve/Deny; "revise" means the next message is feedback
         self.plan_review: str = ""
         # when this chat last got a message; the pacing gap is measured from it across turns
@@ -2167,19 +2171,27 @@ class ChatAgent:
     def pending_options(self) -> list[str]:
         """The answers on the open options card. Stored per chat: a restart between the
         question and the tap used to answer the tap with "that option expired"."""
-        raw = self.store.prefs(self.key).get("pending_options") or ""
-        try:
-            options = json.loads(raw) if raw else []
-        except ValueError:
-            return []
-        return [str(option) for option in options] if isinstance(options, list) else []
+        return self._stored_options()[0]
 
     @pending_options.setter
     def pending_options(self, options: list[str]) -> None:
-        if options:
-            self.store.set_pref(self.key, "pending_options", json.dumps(list(options)))
-        else:
+        if not options:
             self.store.delete_pref(self.key, "pending_options")
+            return
+        # an ask lives in the omp process; a restart ends it, so its card must not outlive it
+        source = "ask" if self.pending_ask is not None else "reply"
+        self.store.set_pref(self.key, "pending_options",
+                            json.dumps({"options": list(options), "source": source}))
+
+    def _stored_options(self) -> tuple[list[str], str]:
+        raw = self.store.prefs(self.key).get("pending_options") or ""
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            return [], ""
+        if not isinstance(data, dict) or not isinstance(data.get("options"), list):
+            return [], ""
+        return [str(option) for option in data["options"]], str(data.get("source") or "")
 
     @property
     def mode(self) -> str:
