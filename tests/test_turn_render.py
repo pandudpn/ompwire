@@ -301,6 +301,38 @@ def test_a_read_only_command_does_not_wait_for_a_click(rendered):
     assert not bot.messages  # no button was posted
 
 
+@pytest.mark.parametrize(("policy", "expected"), [
+    # plan mode is stronger than "allow": the write is denied, the read allowed
+    ("allow", ["Deny", "Approve", "Approve"]),
+    # "deny" is stronger than plan mode: even the read is refused, in or out of plan
+    ("deny", ["Deny", "Deny", "Deny"]),
+])
+def test_the_strictest_of_policy_and_plan_mode_decides(policy, expected):
+    """Review finding: [approval] policy = "allow" answered before the plan-mode check, so a
+    chat in plan mode could write."""
+    import types as _types
+
+    from ompwire.config import load_config
+
+    config = load_config(env={})
+    config.data.setdefault("approval", {})["policy"] = policy
+    write = {"method": "select", "title": "Allow tool: write\nPath: /tmp/x.txt",
+             "options": ["Approve", "Deny"]}
+    read = {"method": "select", "title": "Allow tool: read\nPath: /tmp/x.txt",
+            "options": ["Approve", "Deny"]}
+
+    async def go():
+        agent = telegram.chat_agent(config, 1, key=f"plan-{policy}",
+                                   app=_types.SimpleNamespace(bot=FakeBot()))
+        agent.options = {"mode": {"currentValue": "plan"}}
+        answers = [agent._on_permission(write), agent._on_permission(read)]
+        agent.options = {"mode": {"currentValue": "default"}}
+        return answers + [agent._on_permission(write)]
+
+    # plan write, plan read, then a write outside plan mode
+    assert asyncio.run(go()) == expected
+
+
 def test_text_is_cut_at_each_tool_call_into_separate_messages(rendered):
     """Each step keeps its own timestamp: text, then the tool, then the text after it."""
     messages = rendered([

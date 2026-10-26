@@ -1384,16 +1384,21 @@ class ChatAgent:
     def _on_permission(self, frame: dict[str, Any]) -> str | None:
         """The option to answer an approval with: "Approve", "Deny", or None to cancel."""
         tool, command = approval_detail(frame)
+        # The strictest rule wins: a "deny" policy refuses everything; plan mode promises the
+        # chat only reads, so an "allow" policy must not turn that into writes. Plan mode runs
+        # with always-ask, so its reads come here too.
         policy = approval_policy(self.config)
-        if policy in {"allow", "deny"}:
-            log.info("permission auto-%s chat=%s tool=%s", policy, self.label, tool)
-            return APPROVE if policy == "allow" else DENY
+        if policy == "deny":
+            log.info("permission auto-deny chat=%s tool=%s", self.label, tool)
+            return DENY
         if self.mode == "plan":
-            # plan mode explores and proposes; it runs with always-ask, so reads come here too
             reads = tool in PLAN_READ_TOOLS or (tool == "bash" and allowlist.is_read_only(command))
             log.info("permission %s in plan mode chat=%s tool=%s: %s",
                      "allowed" if reads else "denied", self.label, tool, command[:120])
             return APPROVE if reads else DENY
+        if policy == "allow":
+            log.info("permission auto-allow chat=%s tool=%s", self.label, tool)
+            return APPROVE
         # A read-only command is not worth a button. Asking for `git log` teaches the habit of
         # tapping Allow without reading, which is exactly what the gate exists to prevent.
         if tool == "bash" and command and allowlist.is_read_only(command):
