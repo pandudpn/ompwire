@@ -207,3 +207,31 @@ def test_a_long_option_is_shown_whole_in_the_message():
 
     asyncio.run(main())
     assert long in sent["text"]
+
+
+def test_an_ask_question_is_the_heading_of_the_options_card():
+    """omp's ask carries its question; without it the chat shows numbered options with no ask."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from ompwire.config import load_config
+    from ompwire.engine import ChatAgent
+    from ompwire.telegram import TelegramSurface
+
+    sent = {}
+
+    async def fake_send_message(chat_id, text, reply_markup=None, **kwargs):
+        sent["text"], sent["kb"] = text, reply_markup
+        return SimpleNamespace(chat_id=chat_id)
+
+    async def main():
+        surface = TelegramSurface(SimpleNamespace(bot=SimpleNamespace(
+            send_message=fake_send_message)), 5)
+        agent = ChatAgent(load_config(env={}), "tg:5", surface)
+        await agent.offer_options(["teh", "kopi"], question="Minum apa?")
+
+    asyncio.run(main())
+    assert "Minum apa?" in sent["text"]
+    labels = [button.text for row in sent["kb"].inline_keyboard for button in row]
+    assert labels[:2] == ["1. teh", "2. kopi"]
+    assert "teh" in sent["text"] and "kopi" in sent["text"]

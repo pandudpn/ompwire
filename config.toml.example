@@ -6,10 +6,10 @@
 # merged result.
 
 [acp]
-# The agent process. omp runs in RPC mode; the section keeps its old name so existing
-# configs load, and an `--mode acp` left in one is read as `--mode rpc`.
+# The agent process. omp runs in RPC-UI mode; the section keeps its old name so existing
+# configs load, and an `--mode acp` or `--mode rpc` left in one is read as `--mode rpc-ui`.
 command = "omp"
-args = ["--mode", "rpc"]
+args = ["--mode", "rpc-ui"]
 startup_timeout = 60.0     # seconds for the agent to report ready
 turn_timeout = 900.0       # seconds of silence before a turn is given up
 

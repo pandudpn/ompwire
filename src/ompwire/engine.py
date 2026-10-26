@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, ClassVar
 
 from . import allowlist, gateways, omp_sessions
@@ -62,19 +64,20 @@ def child_env() -> dict[str, str]:
 
 
 def agent_args(config: Config) -> list[str]:
-    """`[acp] args` as omp RPC arguments. The section keeps its name so existing configs load; an
-    `--mode acp` written by an older setup is read as `--mode rpc`, the protocol this speaks."""
-    raw = config.get("acp", "args") or ["--mode", "rpc"]
+    """`[acp] args` as omp RPC-UI arguments. The section keeps its name so existing configs load;
+    `--mode acp` and plain `--mode rpc` are read as `--mode rpc-ui`, the only mode whose `ask`
+    tool works over the wire."""
+    raw = config.get("acp", "args") or ["--mode", "rpc-ui"]
     args = shlex.split(raw) if isinstance(raw, str) else [str(part) for part in raw]
     if args[:1] == ["acp"]:
         args = args[1:]  # the `omp acp` subcommand form
     for index, part in enumerate(args):
-        if part == "--mode" and index + 1 < len(args) and args[index + 1] == "acp":
-            args[index + 1] = "rpc"
-        elif part == "--mode=acp":
-            args[index] = "--mode=rpc"
+        if part == "--mode" and index + 1 < len(args) and args[index + 1] in {"acp", "rpc"}:
+            args[index + 1] = "rpc-ui"
+        elif part == "--mode=acp" or part == "--mode=rpc":
+            args[index] = "--mode=rpc-ui"
     if not any(part == "--mode" or part.startswith("--mode=") for part in args):
-        args = ["--mode", "rpc", *args]
+        args = ["--mode", "rpc-ui", *args]
     return args
 
 
@@ -186,6 +189,36 @@ def mcp_server_names() -> list[str]:
     return sorted(read_mcp_servers())
 
 
+
+def _event_text(update: AgentUpdate) -> str:
+    """The one notice line for a retry/notice/compaction event, or "" to say nothing."""
+    raw = update.raw
+    kind = str(raw.get("type") or update.kind)
+    if kind == "auto_retry_start":
+        delay = int(raw.get("delayMs") or 0) / 1000
+        return (f"🔁 retry {raw.get('attempt')}/{raw.get('maxAttempts')} in {delay:.0f}s"
+                f" · {raw.get('errorMessage')}")
+    if kind == "auto_retry_end":
+        return "🔁 retry ok" if raw.get("success") else f"🔁 retry gave up: {raw.get('finalError')}"
+    if kind == "retry_fallback_applied":
+        return f"↪️ fallback {raw.get('from')} → {raw.get('to')}" + (
+            f" ({raw.get('reason')})" if raw.get("reason") else "")
+    if kind == "retry_fallback_succeeded":
+        return f"↪️ fallback {raw.get('model')} works"
+    if kind == "notice":
+        return f"⚠️ {raw.get('message')}"
+    if kind == "extension_error":
+        return f"⚠️ extension error: {raw.get('error') or raw.get('message')}"
+    if kind == "auto_compaction_start":
+        return f"🗜️ compacting ({raw.get('reason')})…"
+    if kind == "auto_compaction_end":
+        # the transcript notice already reports before→after; only a failure is news here
+        if raw.get("aborted") or raw.get("errorMessage"):
+            return f"🗜️ compaction failed: {raw.get('errorMessage') or 'aborted'}"
+        return ""
+    return ""
+
+
 MCP_LABEL_MAX = 6
 
 
@@ -233,6 +266,7 @@ def agent_rows(agent: ChatAgent) -> list[tuple[str, str]]:
         ("approval", approval_gate(agent)),
         ("trace", ("verbose" if agent.verbose else "quiet")
                   + (" · reasoning" if agent.reasoning else "")),
+        ("busy", agent.busy_mode),
         ("mcp", mcp_label(servers)),
         ("cwd", agent.cwd),
     ]
@@ -349,7 +383,7 @@ class Surface(abc.ABC):
     def typing(self): ...  # async context manager
 
     @abc.abstractmethod
-    async def offer_options(self, options: list[str]) -> None: ...
+    async def offer_options(self, options: list[str], question: str = "") -> None: ...
 
     async def retire_options(self, note: str) -> None:
         """The open question was answered; surfaces with buttons take them away."""
@@ -404,6 +438,8 @@ class ChatAgent:
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
         self.started_at = time.time()
         self.pending_options: list[str] = []
+        # an ask question the person owes an answer to: {"questions", "index", "answers"}
+        self.pending_ask: dict[str, Any] | None = None
         # plan mode: a plan is waiting for Approve/Deny; "revise" means the next message is feedback
         self.plan_review: str = ""
         # when this chat last got a message; the pacing gap is measured from it across turns
@@ -449,6 +485,9 @@ class ChatAgent:
         self._pending_perm: dict[str, dict[str, Any]] = {}
         self._loop = asyncio.get_running_loop()
         self._lock = asyncio.Lock()
+        self._btw_waiters: dict[str, asyncio.Future] = {}
+        self._ask_slots: dict[str, dict[str, Any]] = {}
+        self._btw_records: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ setup
     def _build_client(self, yolo: bool = False, resume: str = "") -> AgentClient:
@@ -657,7 +696,20 @@ class ChatAgent:
             names = [f"/{c.get('name')}" for c in (update.raw.get("commands") or [])]
             self._loop.call_soon_threadsafe(self.advertised_commands.__setitem__, slice(None), names)
             return
-        if update.kind in {"queue_update", "session_settled", "agent_end", "notice"}:
+        if update.kind == "btw":
+            # a side question runs next to the turn; its frames must not touch the turn queue
+            self._loop.call_soon_threadsafe(self._on_btw, update)
+            return
+        if update.kind in {"retry", "notice", "compaction"} and not self.busy:
+            # outside a turn nothing reads the turn queue; a straight notice keeps its place.
+            # Mid-turn they fall through to _updates, so drain() renders them in order.
+            if self.verbose:
+                text = _event_text(update)
+                if text:
+                    self._loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(self._context_notice(text)))
+            return
+        if update.kind in {"queue_update", "session_settled", "agent_end"}:
             return
         if update.kind == "config_option_update" and not self.busy:
             # between turns nothing reads the turn queue; mid-turn they take it, so a notice
@@ -665,6 +717,54 @@ class ChatAgent:
             self._loop.call_soon_threadsafe(self._on_option_update, update)
             return
         self._loop.call_soon_threadsafe(self._updates.put_nowait, update)
+
+    BTW_FINAL = frozenset({"complete", "error", "cancelled"})
+
+    def _on_btw(self, update: AgentUpdate) -> None:
+        """Runs on the loop thread. Every btw_record is kept by record id; a waiter is settled
+        only by a final one, since omp announces the record as `running` before it answers.
+        btw_delta streams text nobody renders, so it is dropped."""
+        if update.raw.get("type") != "btw_record":
+            return
+        record = update.raw.get("record") or {}
+        record_id = str(record.get("id") or "")
+        if not record_id:
+            return
+        self._btw_records[record_id] = record
+        if str(record.get("status") or "") not in self.BTW_FINAL:
+            return
+        waiter = self._btw_waiters.pop(record_id, None)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(record)
+
+    async def btw(self, question: str) -> str:
+        """Ask omp's side question: it does not enter the session context and runs while the
+        main turn runs. Returns the answer, or a short failure line."""
+        client = self.client
+        if client is None or not client.alive:
+            await self.ensure()
+            client = self.client
+        assert client is not None
+        record = await asyncio.to_thread(client.btw, question)
+        record_id = str((record.get("record") or record).get("id") or "")
+        waiter: asyncio.Future = self._loop.create_future()
+        landed = self._btw_records.get(record_id) if record_id else None
+        if landed is not None and str(landed.get("status") or "") in self.BTW_FINAL:
+            # a fast answer can land before the waiter exists; its record is already kept
+            waiter.set_result(landed)
+        else:
+            self._btw_waiters[record_id] = waiter
+        try:
+            done = await asyncio.wait_for(waiter, 120.0)
+        except TimeoutError:
+            self._btw_waiters.pop(record_id, None)
+            return "the side question timed out"
+        finally:
+            self._btw_records.pop(record_id, None)
+        status = str(done.get("status") or "")
+        if status == "error":
+            return "the side question failed"
+        return str(done.get("answer") or "").strip() or "no answer came back"
 
     def _on_usage(self, used: int, size: int) -> None:
         """Runs on the loop thread. Tracks the context window, the warning crossing and
@@ -751,14 +851,93 @@ class ChatAgent:
         self._on_options(updated)
 
     def _on_dialog(self, frame: dict[str, Any]) -> dict[str, Any] | None:
-        """A dialog the agent opened (reader thread). Tool approvals become buttons; any other
-        dialog has nobody to answer it in a chat, so it is cancelled and the agent carries on."""
+        """A dialog the agent opened (reader thread). Tool approvals become buttons, an `ask`
+        becomes a question card; any other dialog is cancelled and the agent carries on."""
+        if frame.get("method") == "ask":
+            return self._on_ask(frame)
         if not is_approval(frame):
             log.info("dialog cancelled chat=%s method=%s title=%r", self.label, frame.get("method"),
                      str(frame.get("title") or "")[:120])
             return None
         option = self._on_permission(frame)
         return {"value": option} if option else {"cancelled": True}
+
+    def _on_ask(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """The ask tool's questions (reader thread, blocking like _on_permission). Questions go
+        to the chat one at a time through the options card. An ask is a question, not an
+        approval: it always reaches a person, whatever the approval policy says."""
+        questions = [q for q in (frame.get("questions") or []) if isinstance(q, dict)]
+        if not questions:
+            return {"cancelled": True}
+        slot: dict[str, Any] = {"answer": None}
+        token = f"ask-{uuid.uuid4().hex[:12]}"
+        state = {"questions": questions, "index": 0, "answers": [], "slot": slot,
+                 "token": token}
+        self._ask_slots[token] = state
+        self.pending_ask = {"token": token, "questions": questions, "index": 0}
+        timeout = float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(self._show_ask_question(token)))
+        deadline = time.time() + timeout
+        note = "answered"
+        try:
+            while time.time() < deadline:
+                if slot["answer"] is not None:
+                    return slot["answer"]
+                time.sleep(0.2)
+            log.warning("ask timed out chat=%s (%.0fs)", self.label, timeout)
+            note = "timed out"
+            return {"cancelled": True, "timedOut": True}
+        finally:
+            self._ask_slots.pop(token, None)
+            self.pending_ask = None
+            self.pending_options = []
+            self._loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self.surface.retire_options(note)))
+
+    async def _show_ask_question(self, token: str) -> None:
+        """Runs on the loop thread: the open question becomes the options card."""
+        state = self._ask_slots.get(token)
+        if state is None:
+            return
+        question = state["questions"][state["index"]]
+        labels = [str(o.get("label") or "") for o in (question.get("options") or [])]
+        text = str(question.get("question") or question.get("header") or "")
+        self.pending_ask = {"token": token, "questions": state["questions"],
+                            "index": state["index"]}
+        self.pending_options = labels
+        await self.offer_options(labels, question=text)
+
+    async def answer_ask(self, text: str | None, *, option_index: int | None = None,
+                         skip: bool = False) -> bool:
+        """Consume a chat answer for the open ask question. True when it was ours to take."""
+        state = next(iter(self._ask_slots.values()), None)
+        if state is None:
+            return False
+        question = state["questions"][state["index"]]
+        options = [str(o.get("label") or "") for o in (question.get("options") or [])]
+        if skip:
+            # cancel the whole ask: the agent continues without any answer
+            state["slot"]["answer"] = {"cancelled": True}
+            return True
+        answer: dict[str, Any] | None = None
+        if option_index is not None and 0 <= option_index < len(options):
+            answer = {"answers": [{"id": question.get("id"),
+                                   "selectedOptions": [options[option_index]]}]}
+        elif text:
+            answer = {"answers": [{"id": question.get("id"), "selectedOptions": [],
+                                   "customInput": text}]}
+        if answer is None:
+            return False
+        state["answers"].append(answer)
+        if state["index"] + 1 < len(state["questions"]):
+            state["index"] += 1
+            await self.surface.retire_options("answered")
+            self._loop.create_task(self._show_ask_question(state["token"]))
+            return True
+        state["slot"]["answer"] = (answer if len(state["questions"]) == 1
+                                   else {"answers": [a["answers"][0] for a in state["answers"]]})
+        return True
 
     def _on_permission(self, frame: dict[str, Any]) -> str | None:
         """The option to answer an approval with: "Approve", "Deny", or None to cancel."""
@@ -908,11 +1087,16 @@ class ChatAgent:
         nxt = schedule_lib.next_elapse(name) or "see systemctl --user list-timers"
         await self.surface.notice(f"schedule {name} created · {item.on_calendar} → {gateway}\nnext: {nxt}")
 
-    async def offer_options(self, options: list[str]) -> None:
+    async def offer_options(self, options: list[str], question: str = "") -> None:
         """The agent offered answers; the surface turns them into buttons."""
         self.pending_options = options
-        log.info("question offered %s options=%s", self.label, options)
-        await self.surface.offer_options(options)
+        log.info("question offered %s options=%s question=%r", self.label, options, question[:80])
+        params = inspect.signature(self.surface.offer_options).parameters.values()
+        if any(p.name == "question" or p.kind is p.VAR_KEYWORD for p in params):
+            await self.surface.offer_options(options, question=question)
+        else:
+            # a surface not yet updated for the ask heading; the options still work
+            await self.surface.offer_options(options)
 
     async def answer_permission(self, token: str, index: int) -> str | None:
         """Record the user's choice, then let the surface rewrite the prompt into the decision."""
@@ -1200,6 +1384,16 @@ class ChatAgent:
                     flush_thinking()
                     flush_segment()
                     self._on_option_update(update)
+                elif update.kind in {"retry", "notice", "compaction"}:
+                    if not self.verbose:
+                        continue  # a quiet chat hears the answer and nothing else
+                    flush_thinking()
+                    flush_segment()
+                    if self._turn_notice is not None:
+                        text = _event_text(update)
+                        if text:
+                            self._turn_notice(text)
+                    continue
                 elif update.kind == "plan":
                     flush_thinking()
                     flush_segment()
@@ -1345,6 +1539,64 @@ class ChatAgent:
         log.info("steer chat=%s outcome=%s chars=%s reason=%s", self.label, outcome, len(text),
                  reason or "-")
         return outcome, reason
+
+    async def follow_up(self, text: str, images: list[dict[str, Any]] | None = None) -> tuple[str, str]:
+        """Queue a message to run after the current turn: same outcomes as steer."""
+        if self.client is None or not self.client.alive or not self.session_id:
+            return "promptRequired", ""
+        try:
+            outcome, reason = await asyncio.to_thread(
+                self.client.follow_up, text, images,
+                float(self.config.get("acp", "steer_timeout", 15.0)))
+        except AgentError as exc:
+            log.warning("follow_up failed chat=%s: %s", self.label, exc)
+            return "failed", str(exc)
+        log.info("follow_up chat=%s outcome=%s chars=%s", self.label, outcome, len(text))
+        return outcome, reason
+
+    @property
+    def busy_mode(self) -> str:
+        """What a message means while a turn runs: steer | followup | queue."""
+        value = self.store.prefs(self.key).get("busy")
+        if value in {"steer", "followup", "queue"}:
+            return value
+        legacy = str(self.config.get("telegram", "busy_message", "") or "") or \
+            str(self.config.get("whatsapp", "busy_message", "") or "")
+        return legacy if legacy in {"steer", "followup", "queue"} else "steer"
+
+    def set_busy_mode(self, value: str) -> str:
+        """Store this chat's busy mode; returns the value set."""
+        if value not in {"steer", "followup", "queue"}:
+            raise AgentError(f"unknown busy mode {value!r}; choose steer, followup or queue")
+        self.store.set_pref(self.key, "busy", value)
+        return value
+
+    async def session_stats(self) -> dict[str, Any]:
+        """omp's counters for this session: messages, tool calls, tokens, cost."""
+        await self.ensure()
+        return await asyncio.to_thread(self.client.session_stats)
+
+    async def rename(self, name: str) -> None:
+        await self.ensure()
+        await asyncio.to_thread(self.client.set_session_name, name)
+
+    async def export_html(self) -> Path:
+        await self.ensure()
+        base = Path(str(self.config.get("files", "incoming_dir",
+                                        "~/.local/state/ompwire/files"))).expanduser()
+        target = base.parent / "exports" / f"{self.session_id or 'session'}.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return Path(await asyncio.to_thread(self.client.export_html, str(target)))
+
+    async def handoff(self, instructions: str = "") -> dict[str, Any]:
+        await self.ensure()
+        result = await asyncio.to_thread(self.client.handoff, instructions)
+        # the session id stays the same, but its title and options may have moved
+        state = await asyncio.to_thread(self.client.state)
+        self.session_id = str(state.get("sessionId") or self.session_id)
+        self.store.put(self.key, self.session_id, self.cwd)
+        await self._refresh_options(state)
+        return result
 
     async def _plan_turn(self, text: str) -> str:
         """What a message means in plan mode; "" when it was handled without a turn.

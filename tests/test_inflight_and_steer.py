@@ -32,11 +32,14 @@ class Bot:
 class Client:
     alive = True
 
-    def __init__(self, stop_reason="end_turn", steer_outcome="injected"):
+    def __init__(self, stop_reason="end_turn", steer_outcome="injected",
+                 follow_outcome="injected"):
         self.stop_reason = stop_reason
         self.steer_outcome = steer_outcome
+        self.follow_outcome = follow_outcome
         self.on_update = None
         self.steered: list[str] = []
+        self.followed: list[str] = []
 
     def state(self):
         return {}
@@ -47,6 +50,10 @@ class Client:
     def steer(self, text, images=None, timeout=30.0):
         self.steered.append(text)
         return self.steer_outcome, ""
+
+    def follow_up(self, text, images=None, timeout=30.0):
+        self.followed.append(text)
+        return self.follow_outcome, ""
 
     def abort(self):
         return None
@@ -193,6 +200,52 @@ def test_queue_mode_keeps_the_old_fifo(tmp_path):
     queued = _submit(config, client, True, msg)
     assert client.steered == []
     assert queued == ["wait your turn"]
+
+
+def _followup_config(tmp_path):
+    config = _config(tmp_path)
+    store = SessionStore(config.get("session", "store"))
+    try:
+        store.set_pref("tg:7", "busy", "followup")
+    finally:
+        store.close()
+    return config
+
+
+def test_followup_mode_hands_the_message_to_the_next_turn(tmp_path):
+    client = Client(follow_outcome="injected")
+    msg = Msg("and then run the tests")
+    queued = _submit(_followup_config(tmp_path), client, True, msg)
+    assert client.followed == ["and then run the tests"]
+    assert client.steered == []
+    assert queued == []
+    assert msg.replies and msg.replies[0].startswith("📥 follow-up queued")
+
+
+def test_a_followup_the_agent_declines_falls_back_to_the_queue(tmp_path):
+    client = Client(follow_outcome="failed")
+    msg = Msg("later")
+    queued = _submit(_followup_config(tmp_path), client, True, msg)
+    assert queued == ["later"]
+    assert msg.replies == ["📥 queued #1 · runs after the current turn"]
+
+
+def test_a_turn_that_ended_before_the_followup_becomes_a_prompt(tmp_path):
+    client = Client(follow_outcome="promptRequired")
+    msg = Msg("next thing")
+    queued = _submit(_followup_config(tmp_path), client, True, msg)
+    assert queued == ["next thing"]
+    assert msg.replies == []
+
+
+def test_the_chat_preference_beats_the_old_busy_message_setting(tmp_path):
+    config = _followup_config(tmp_path)
+    config.data.setdefault("telegram", {})["busy_message"] = "steer"
+    client = Client()
+    queued = _submit(config, client, True, Msg("after this turn"))
+    assert client.followed == ["after this turn"]
+    assert client.steered == []
+    assert queued == []
 
 
 def test_an_idle_evicted_chat_still_works_on_the_next_message(tmp_path):

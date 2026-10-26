@@ -157,14 +157,16 @@ The terminal has its own smaller set, described under [Terminal](#terminal).
 
 | Command | What it does |
 | --- | --- |
-| `/new`, `/sessions`, `/resume <id>`, `/continue` | session lifecycle |
-| `/fork` | branch the current session |
+| `/new`, `/sessions` | start a session, or list this directory's sessions with a resume button each |
+| `/fork`, `/handoff [note]` | branch the current session, or hand it to a fresh one with a summary |
+| `/name <text>`, `/export` | rename the session, or get it as an HTML file |
 | `/model`, `/mode`, `/thinking` | switch with an inline keyboard |
 | `/cwd <path>` | start a session in another directory |
-| `/status`, `/usage`, `/context` | what is running, what the session cost, what fills the context |
+| `/status`, `/usage`, `/stats`, `/context` | what is running, what the session cost, message and tool counts, what fills the context |
 | `/compact` | run OMP's compaction now |
 | `/compaction [10-95\|off\|on]` | show or set OMP's auto-compaction threshold |
-| `/queue <text>`, `/steer <text>` | queue a turn, or add to the running one |
+| `/busy [steer\|followup\|queue]` | what a message sent mid-turn does, in this chat |
+| `/btw <question>` | a side question answered without touching the conversation |
 | `/stop`, `/kill` | cancel the turn, or stop this chat's agent process |
 | `/approve`, `/verbose`, `/yolo` | approval policy, activity in this chat (trace, todo list, notices), approvals off for this chat |
 | `/reasoning [on\|off]` | show the agent's thinking above the answer, in this chat |
@@ -177,15 +179,24 @@ Any other slash command is forwarded to the agent as a prompt.
 
 ### While the agent is working
 
-A message sent mid-turn is steered into the running turn: the agent reads it at its next step,
-and the reply says `↪️ steered`. When OMP declines it, or when `[telegram] busy_message =
-"queue"` is set, the message is queued and the reply says its place (`📥 queued #2`). `/queue`
-always queues. `/stop` cancels the turn.
+What a message sent mid-turn does is set per chat with `/busy`:
+
+- `steer` (default): it goes into the running turn, which reads it at its next step. The reply
+  says `↪️ steered`.
+- `followup`: OMP queues it and runs it as the next turn, right after this one. The reply says
+  `📥 follow-up queued`.
+- `queue`: ompwire holds it and sends it as a new turn once this one ends (`📥 queued #2`).
+
+When OMP declines a steer or a follow-up, the message falls back to the queue. `/stop` cancels
+the turn. `/btw` works while a turn runs: the side question is answered on its own and never
+enters the conversation.
 
 ### Questions
 
-The agent asks by ending a reply with `<<options: a | b>>`. The line becomes buttons, plus
-✏️ Other answer and ⏭️ Skip. While the question is open:
+OMP's `ask` tool arrives as buttons, one question at a time, with the question above them. A
+reply can also end with `<<options: a | b>>`, which becomes buttons the same way. Both add
+✏️ Other answer and ⏭️ Skip; Skip on an `ask` lets the agent carry on without an answer. While
+the question is open:
 
 - a message about something else is held (`⏸️ held #1`) and runs after the question is settled;
 - after ✏️ Other answer, the next message you type is the answer;

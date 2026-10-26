@@ -227,7 +227,7 @@ def _client_args(prose=None, mode="default"):
 def test_chat_formatting_hint_is_forwarded_to_the_agent():
     """Without the hint the model writes commands inline; omp needs to be told."""
     args = _client_args()
-    assert args[:2] == ["--mode", "rpc"]
+    assert args[:2] == ["--mode", "rpc-ui"]
     hint = args[args.index("--append-system-prompt") + 1]
     assert "fenced code" in hint
 

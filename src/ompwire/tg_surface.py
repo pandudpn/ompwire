@@ -149,12 +149,14 @@ class TelegramSurface(engine.Surface):
             stop.set()
             task.cancel()
 
-    async def offer_options(self, options: list[str]) -> None:
+    async def offer_options(self, options: list[str], question: str = "") -> None:
         """Numbered buttons plus a free-text escape hatch.
 
         Telegram cuts an inline button's label to one line on the phone, so a sentence-long
         option arrived as "Teks per segmen + 1 pesan…". The full text goes in the message body,
         numbered, and each button carries its number so the choice is never ambiguous.
+
+        An ask question is the card's heading; a plan review has none and keeps the generic one.
         """
         rows = [[InlineKeyboardButton(f"{index + 1}. {option}"[:64], callback_data=f"qo:{index}")]
                 for index, option in enumerate(options)]
@@ -163,10 +165,12 @@ class TelegramSurface(engine.Surface):
         listed = "\n".join(f"<b>{index + 1}.</b> {esc(option)}"
                            for index, option in enumerate(options))
         self.options_listed = listed
+        asked = question.strip()
+        head = card(f"❓ {asked}" if asked else "❓ pick an answer",
+                    "tap one, Other to type it, or Skip", [],
+                    "messages sent before you answer wait for it")
         self.options_message = await self.app.bot.send_message(
-            self.chat_id,
-            card("❓ pick an answer", "tap one, Other to type it, or Skip", [],
-                 "messages sent before you answer wait for it") + f"\n\n{listed}",
+            self.chat_id, head + f"\n\n{listed}",
             reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
         )
 

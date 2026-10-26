@@ -40,7 +40,7 @@ from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
 from .gateways import remember_chat, user_id
 from .rpc import AgentError
-from .telegram import COMMANDS, FORWARD_HINT, configure_logging
+from .telegram import BUSY_MODES, BUSY_NOTES, COMMANDS, FORWARD_HINT, configure_logging
 from .wa_client import (
     GROUP_SERVER,
     LID_SERVER,
@@ -52,6 +52,7 @@ from .wa_client import (
     user_part,
 )
 from .wa_surface import (
+    FOLLOWED_UP,
     SKIP_WORDS,
     STEERED,
     WhatsAppSurface,
@@ -68,9 +69,10 @@ IDLE_CHECK_INTERVAL = 60.0
 # A linked device that answers in a burst is what WhatsApp's spam heuristics look for.
 MIN_GAP = 1.5
 # commands the WhatsApp transport answers itself; anything else starting with "/" is the agent's
-HANDLED = {"new", "stop", "status", "usage", "context", "sessions", "resume", "continue", "fork",
-           "cwd", "model", "mode", "thinking", "approve", "verbose", "reasoning", "queue",
-           "steer", "compact", "compaction", "yolo", "kill", "whoami", "help", "schedule"}
+HANDLED = {"new", "stop", "status", "usage", "context", "sessions", "fork", "cwd",
+           "model", "mode", "thinking", "approve", "verbose", "reasoning", "busy", "stats",
+           "name", "export", "handoff", "btw", "compact", "compaction", "yolo", "kill",
+           "whoami", "help", "schedule"}
 
 
 @dataclass
@@ -408,6 +410,14 @@ class Transport:
         chat = incoming.chat
         agent = self.agent_for(chat)
         lowered = word.lower()
+        if agent.pending_ask:
+            # omp's ask tool outranks whatever card is on screen: the agent is waiting on it
+            await self._answer_ask(agent, word)
+            self.choices.pop(chat, None)
+            # the core clears pending_ask on its reader thread, up to a poll later, so waiting
+            # for that would strand these: they queue behind this turn either way
+            await self._release_held(chat)
+            return True
         if choice.kind == "question":
             if lowered in SKIP_WORDS:
                 self.choices.pop(chat, None)
@@ -470,7 +480,40 @@ class Transport:
             self.choices.pop(chat, None)
             await self.set_policy(chat, ("ask", "allow", "deny")[index])
             return True
+        if choice.kind == "busy":
+            self.choices.pop(chat, None)
+            await self._set_busy_mode(chat, agent, choice.data[index])
+            return True
+        if choice.kind == "session":
+            if await self._busy(incoming, agent, "resuming a session"):
+                return True   # the list stays open: the same number works once the turn ends
+            self.choices.pop(chat, None)
+            log.info("session resume chat=%s session=%s", chat, choice.data[index])
+            self.enqueue(chat, "resume", choice.data[index])
+            await self.reply(incoming, f"⏪ resuming session {choice.data[index][:8]}")
+            return True
         return False
+
+    @staticmethod
+    def _ask_index(agent: engine.ChatAgent, word: str) -> int | None:
+        """Which open ask option a typed number means; None when it is not one of them."""
+        text = word.strip()
+        size = len(agent.pending_options)
+        if text.isdigit() and 1 <= int(text) <= size:
+            return int(text) - 1
+        return None
+
+    async def _answer_ask(self, agent: engine.ChatAgent, word: str) -> bool:
+        """What a typed message means to the open ask: a number, the skip word, or free text."""
+        text = word.strip()
+        index = self._ask_index(agent, text)
+        taken = index is not None and await agent.answer_ask(None, option_index=index)
+        if not taken:
+            # the question can move on between the card and the reply: the number is still text
+            taken = (await agent.answer_ask(None, skip=True) if text.lower() in SKIP_WORDS
+                     else await agent.answer_ask(text))
+        log.info("ask answer %s taken=%s chars=%s", agent.label, taken, len(text))
+        return taken
 
     async def submit(self, incoming: Incoming) -> None:
         chat = incoming.chat
@@ -478,6 +521,12 @@ class Transport:
         if chat in self.answer_armed:
             self.answer_armed.discard(chat)
             await self._route(chat, agent, incoming)
+            await self._release_held(chat)
+            return
+        if agent.pending_ask and not incoming.images:
+            # the ask tool is waiting inside the turn: what is typed now is its answer
+            await self._answer_ask(agent, incoming.text)
+            self.choices.pop(chat, None)
             await self._release_held(chat)
             return
         if agent.pending_options and agent.plan_review == "pending":
@@ -492,6 +541,8 @@ class Transport:
             log.info("held while a question is open chat=%s position=%s", chat, len(held))
             await self._event(agent, incoming, held_text(len(held)))
             return
+        # a question that timed out never answers itself: what waited behind it goes out first
+        await self._release_held(chat)
         await self._route(chat, agent, incoming)
 
     async def _release_held(self, chat: str) -> None:
@@ -502,10 +553,12 @@ class Transport:
             log.info("released %s held message(s) chat=%s", len(held), chat)
 
     async def _route(self, chat: str, agent: engine.ChatAgent, incoming: Incoming) -> None:
+        """Where a prompt goes: straight into a turn, or through what /busy chose."""
         if not agent.busy:
             self.enqueue(chat, "prompt", incoming)
             return
-        if str(self.config.get("whatsapp", "busy_message", "steer")) == "steer":
+        mode = agent.busy_mode
+        if mode == "steer":
             outcome, reason = await agent.steer(incoming.prompt, incoming.images or None)
             if outcome == "injected":
                 await self._event(agent, incoming, STEERED)
@@ -514,6 +567,16 @@ class Transport:
                 self.enqueue(chat, "prompt", incoming)
                 return
             log.warning("steer not accepted chat=%s outcome=%s reason=%s; queueing", chat,
+                        outcome, reason or "-")
+        elif mode == "followup":
+            outcome, reason = await agent.follow_up(incoming.prompt, incoming.images or None)
+            if outcome == "injected":
+                await self._event(agent, incoming, FOLLOWED_UP)
+                return
+            if outcome == "promptRequired":
+                self.enqueue(chat, "prompt", incoming)
+                return
+            log.warning("follow-up not accepted chat=%s outcome=%s reason=%s; queueing", chat,
                         outcome, reason or "-")
         depth = self.enqueue(chat, "prompt", incoming)
         await self._event(agent, incoming, queued_text(depth))
@@ -586,6 +649,34 @@ class Transport:
         await self.send_text(incoming.chat, card("🧮 usage", f"session {agent.session_id[:8] or '-'}",
                                                  rows))
 
+    async def cmd_stats(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
+        """omp's own counters: what this session has spent, in messages and tokens."""
+        try:
+            data = await agent.session_stats()
+        except AgentError as exc:
+            await self.reply(incoming, f"stats failed: {exc}")
+            return
+        counts = data.get("tokens") or {}
+        rows: list[tuple[str, object]] = [
+            ("messages", f"{data.get('userMessages', 0)} you · "
+                         f"{data.get('assistantMessages', 0)} agent · "
+                         f"{data.get('toolCalls', 0)} tools"),
+            ("tokens", f"{tokens(counts.get('input', 0))} in · "
+                       f"{tokens(counts.get('output', 0))} out"),
+            ("cache", f"{tokens(counts.get('cacheRead', 0))} read · "
+                      f"{tokens(counts.get('cacheWrite', 0))} written"),
+            ("cost", _money(data.get("cost"))),
+            ("premium", data.get("premiumRequests")),
+        ]
+        usage = data.get("contextUsage") or {}
+        if usage.get("contextWindow"):
+            rows.append(("context", engine.context_line(int(usage.get("tokens") or 0),
+                                                        int(usage.get("contextWindow") or 1))))
+        else:
+            rows += _context_rows(agent, _session_usage(agent))
+        await self.send_text(incoming.chat,
+                             card("🧾 stats", f"session {agent.session_id[:8] or '-'}", rows))
+
     async def cmd_context(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
         await self._agent_prompt(incoming, agent, "/context")
 
@@ -624,36 +715,63 @@ class Transport:
                                             f"{new.get('thresholdPercent', '?')}% · new agent processes")
 
     async def cmd_sessions(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
+        """This directory's sessions, numbered: a reply with a number resumes one."""
         await agent.ensure()
-        data = {"sessions": await agent.list_sessions()}
-        rows = (data.get("sessions") or [])[:10]
-        if not rows:
+        sessions = (await agent.list_sessions())[:10]
+        if not sessions:
             await self.reply(incoming, "no sessions recorded")
             return
-        table = "\n".join(f"{str(row.get('sessionId') or '')[:8]}  {str(row.get('updatedAt') or '')[:16]}"
-                          for row in rows)
-        await self.send_text(incoming.chat, f"*🗂 sessions* · _{agent.cwd}_\n```{table}```\n"
-                                            f"_/resume <id> to continue one_")
+        current = agent.session_id
+        ids = [str(row.get("sessionId") or "") for row in sessions]
+        labels = [f"{session[:8]} · {str(row.get('updatedAt') or '')[:16]}"
+                  f"{'  ← current' if session == current else ''}"
+                  for session, row in zip(ids, sessions, strict=True)]
+        await self.send_text(incoming.chat,
+                             card("🗂 sessions", "", [("cwd", agent.cwd),
+                                                      ("shown", f"{len(ids)} newest first")],
+                                  "reply with the number to resume one")
+                             + "\n\n" + numbered(labels))
+        self.choices[incoming.chat] = Choice("session", len(ids), ids)
 
-    async def cmd_resume(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
-        if not args:
-            await self.reply(incoming, "usage: /resume <session-id>")
+    async def cmd_handoff(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
+        if await self._busy(incoming, agent, "/handoff"):
             return
-        await agent.ensure()
-        data = {"sessions": await agent.list_sessions()}
-        match = next((str(r.get("sessionId")) for r in (data.get("sessions") or [])
-                      if str(r.get("sessionId", "")).startswith(args[0])), None)
-        if match is None:
-            await self.reply(incoming, f"no session starting with {args[0]}")
+        instructions = " ".join(args).strip()
+        try:
+            result = await agent.handoff(instructions)
+        except AgentError as exc:
+            await self.reply(incoming, f"handoff failed: {exc}")
             return
-        self.enqueue(incoming.chat, "resume", match)
+        rows: list[tuple[str, object]] = [("session", agent.session_id[:8] or "-")]
+        saved = str(result.get("savedPath") or "")
+        if saved:
+            rows.append(("saved", saved))
+        if instructions:
+            rows.append(("note", instructions[:200]))
+        await self.send_text(incoming.chat, card(
+            "🤝 handoff", "", rows,
+            "the next session starts from that summary" if saved else "handed off"))
 
-    async def cmd_continue(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
-        record = agent.store.get(agent.key)
-        if record is None:
-            await self.reply(incoming, "nothing to continue, use /new")
+    async def cmd_name(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
+        name = " ".join(args).strip()
+        if not name:
+            await self.reply(incoming, "usage: /name <text>")
             return
-        self.enqueue(incoming.chat, "resume", record.session_id)
+        try:
+            await agent.rename(name)
+        except AgentError as exc:
+            await self.reply(incoming, f"rename failed: {exc}")
+            return
+        await self.send_text(incoming.chat, f"🏷️ session named *{name}*")
+
+    async def cmd_export(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
+        try:
+            path = await agent.export_html()
+        except (AgentError, OSError) as exc:
+            await self.reply(incoming, f"export failed: {exc}")
+            return
+        await agent.surface.send_file(path, False)
+        await self.reply(incoming, f"📄 exported · {path.name}")
 
     async def cmd_fork(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
         if await self._busy(incoming, agent, "/fork"):
@@ -751,32 +869,41 @@ class Transport:
         await self.send_text(incoming.chat, f"reasoning: {'on' if agent.reasoning else 'off'}"
                                             + ("" if wanted else " · /reasoning on|off"))
 
-    async def cmd_queue(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
-        if not args:
-            await self.reply(incoming, "usage: /queue <prompt>")
+    async def _set_busy_mode(self, chat: str, agent: engine.ChatAgent, value: str) -> None:
+        try:
+            mode = agent.set_busy_mode(value)
+        except AgentError as exc:
+            await self.send_text(chat, f"busy mode: {exc}")
             return
-        payload = Incoming(incoming.chat, incoming.sender, " ".join(args), incoming.group,
-                           incoming.event, who=incoming.who)
-        depth = self.enqueue(incoming.chat, "prompt", payload)
-        await self.reply(incoming, queued_text(depth) if agent.busy else "▶️ starting now")
+        log.info("busy mode chat=%s mode=%s", chat, mode)
+        await self.send_text(chat, busy_card(agent))
 
-    async def cmd_steer(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
-        if not args:
-            await self.reply(incoming, "usage: /steer <text>")
+    async def cmd_busy(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
+        """What a message sent while a turn runs does, in this chat."""
+        value = (args[0].lower() if args else "").strip()
+        if value:
+            await self._set_busy_mode(incoming.chat, agent, value)
             return
-        text = " ".join(args)
-        prompt = f"[{incoming.who}] {text}" if incoming.group and incoming.who else text
-        outcome, reason = await agent.steer(prompt)
-        if outcome == "injected":
-            await self.reply(incoming, STEERED)
-        elif outcome == "promptRequired":
-            self.enqueue(incoming.chat, "prompt",
-                         Incoming(incoming.chat, incoming.sender, text, incoming.group,
-                                  incoming.event, who=incoming.who))
-            await self.reply(incoming, "nothing running; sent as a new prompt")
-        else:
-            await self.reply(incoming, f"steer was not accepted ({reason or outcome}); "
-                                       f"/queue it, or /stop and resend")
+        current = agent.busy_mode
+        labels = [f"{mode}{'  ← current' if mode == current else ''} · {BUSY_NOTES[mode]}"
+                  for mode in BUSY_MODES]
+        await self.send_text(incoming.chat,
+                             card("🚦 busy mode", current, footer="reply with the number")
+                             + "\n\n" + numbered(labels))
+        self.choices[incoming.chat] = Choice("busy", len(BUSY_MODES), BUSY_MODES)
+
+    async def cmd_btw(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
+        """A side question: answered on its own, and it never enters the conversation."""
+        question = " ".join(args).strip()
+        if not question:
+            await self.reply(incoming, "usage: /btw <question>")
+            return
+        try:
+            answer = await agent.btw(question)
+        except AgentError as exc:
+            await self.reply(incoming, f"btw failed: {exc}")
+            return
+        await agent.surface.post(card("💬 btw", question[:200]) + "\n\n" + answer, kind="text")
 
     async def cmd_yolo(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
         if await self._busy(incoming, agent, "/yolo"):
@@ -819,9 +946,9 @@ class Transport:
     async def cmd_help(self, incoming: Incoming, _agent: engine.ChatAgent, _args: list[str]) -> None:
         names = dict(COMMANDS)
         groups = [
-            ("session", ["new", "sessions", "resume", "continue", "fork", "cwd", "kill"]),
+            ("session", ["new", "sessions", "fork", "cwd", "handoff", "name", "export", "kill"]),
             ("agent", ["model", "mode", "thinking", "approve", "verbose", "reasoning", "yolo"]),
-            ("running", ["stop", "queue", "steer", "status", "usage", "context", "compact",
+            ("running", ["stop", "busy", "btw", "status", "usage", "stats", "context", "compact",
                          "compaction", "schedule"]),
             ("info", ["whoami", "help"]),
         ]
@@ -999,6 +1126,21 @@ class LinkMissing(RuntimeError):
 
 def _current(agent: engine.ChatAgent, config_id: str) -> str:
     return str(((agent.options or {}).get(config_id) or {}).get("currentValue") or "?")
+
+
+def busy_card(agent: engine.ChatAgent) -> str:
+    """What a mid-turn message does in this chat, and how to change it."""
+    mode = agent.busy_mode
+    return card("🚦 busy mode", mode, [("while busy", BUSY_NOTES[mode])],
+                "reply with a number, or /busy steer|followup|queue")
+
+
+def _money(value: Any) -> str:
+    """A cost as omp reported it, or "" when it reported nothing to show."""
+    try:
+        return f"${float(value):.2f}"
+    except (TypeError, ValueError):
+        return ""
 
 
 def _session_usage(agent: engine.ChatAgent) -> omp_sessions.SessionUsage | None:

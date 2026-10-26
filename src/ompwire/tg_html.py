@@ -10,7 +10,7 @@ import html
 from collections.abc import Iterable
 from typing import Any
 
-from .format import TOOL_LINE_WIDTH, _clip
+from .format import TOOL_LINE_WIDTH, _clip, tokens
 
 
 def esc(value: object) -> str:
@@ -44,6 +44,34 @@ def change(label: str, old: object, new: object, note: str = "") -> str:
     """Config-change notice: one line, old value struck through to the new one."""
     line = f"⚙️ <b>{esc(label)}</b>  <s>{esc(old)}</s> → <code>{esc(new)}</code>"
     return f"{line}\n<i>{esc(note)}</i>" if note else line
+
+
+def stats_rows(stats: dict[str, Any]) -> list[tuple[str, str]]:
+    """omp's SessionStats as card rows: messages, tool calls, tokens, cost, context."""
+    counts = stats.get("tokens") or {}
+    rows = [
+        ("messages", f"{stats.get('userMessages', 0)} you · "
+                     f"{stats.get('assistantMessages', 0)} agent · "
+                     f"{stats.get('totalMessages', 0)} total"),
+        ("tools", f"{stats.get('toolCalls', 0)} calls"),
+        ("tokens", f"in {tokens(counts.get('input'))} · out {tokens(counts.get('output'))}"),
+        ("cache", f"{tokens(counts.get('cacheRead'))} read · "
+                  f"{tokens(counts.get('cacheWrite'))} written"),
+        ("total", tokens(counts.get("total"))),
+    ]
+    cost = stats.get("cost")
+    if isinstance(cost, (int, float)):
+        rows.append(("cost", f"${cost:.4f}"))
+    premium = stats.get("premiumRequests")
+    if premium:
+        rows.append(("premium", f"{premium} requests"))
+    usage = stats.get("contextUsage") or {}
+    window = usage.get("contextWindow")
+    if window:
+        used = int(usage.get("tokens") or 0)
+        rows.append(("context", f"{tokens(used)} / {tokens(window)} "
+                                f"({used * 100 // int(window)}%)"))
+    return rows
 
 
 # What the tool is for, at a glance; anything not listed is a plugin or MCP tool

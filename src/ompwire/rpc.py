@@ -1,4 +1,4 @@
-"""omp's RPC mode (`omp --mode rpc`) over stdio, shaped for the engine.
+"""omp's RPC-UI mode (`omp --mode rpc-ui`) over stdio, shaped for the engine.
 
 omp's RPC protocol is newline-delimited JSON, not JSON-RPC: commands carry an `id`, replies come
 back as `{"type": "response", "id", "command", "success", "data"|"error"}`, and everything else is
@@ -8,7 +8,7 @@ an event frame. Facts this module relies on, measured against omp 18.12.6:
     prompt                      acknowledged on admission; `prompt_result` with the same id ends it
     steer                       queued into the running turn; `queue_update` shows it, then empties
     abort                       ends the run; its prompt_result says status "aborted"
-    extension_ui_request        approvals arrive as `select` with options ["Approve", "Deny"]
+    extension_ui_request        approvals arrive as `select`; `ask` carries the ask tool's questions
     --resume <sessionId>        reopens a transcript written by an earlier process (ACP's included)
     get_state                   sessionId, sessionFile, contextUsage, todoPhases, model, thinking
 
@@ -16,7 +16,7 @@ The engine was written against ACP updates and its rendering is tested in that s
 client translates RPC events into the same `Update` kinds (agent_message_chunk, tool_call, plan,
 usage_update, config_option_update). Everything protocol-specific stays in this file.
 
-A plain `--mode rpc` reads the agent's own `mcp.json`, so MCP servers are omp's business here:
+A plain `--mode rpc-ui` reads the agent's own `mcp.json`, so MCP servers are omp's business here:
 the lazy hub starts what a turn calls instead of every server per chat.
 """
 
@@ -97,12 +97,12 @@ def _usage(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 class AgentClient:
-    """One `omp --mode rpc` process: one session, its pipes, pending commands and callbacks."""
+    """One `omp --mode rpc-ui` process: one session, its pipes, pending commands and callbacks."""
 
     def __init__(
         self,
         command: str = "omp",
-        args: Iterable[str] = ("--mode", "rpc"),
+        args: Iterable[str] = ("--mode", "rpc-ui"),
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         on_update: Callable[[Update], None] | None = None,
@@ -159,6 +159,9 @@ class AgentClient:
         # v2 splits an oversized frame into chunks instead of truncating it
         with contextlib.suppress(AgentError):
             self.request("negotiate_protocol", {"protocolVersion": PROTOCOL_VERSION}, timeout=10)
+        # the ask tool speaks through `ask` dialogs; without this the model is told it is missing
+        with contextlib.suppress(AgentError):
+            self.request("set_ask_dialog", {"enabled": True}, timeout=10)
 
     def _stderr_loop(self) -> None:
         proc = self._proc
@@ -314,8 +317,20 @@ class AgentClient:
                 turn["output"] = True
                 if turn.get("local"):
                     turn["done"].set()
-        elif kind in {"auto_compaction_start", "auto_compaction_end", "notice", "queue_update",
-                      "available_commands_update", "agent_end", "session_settled"}:
+        elif kind == "notice":
+            # info notices ("xd://: mounted …") are noise; the chat only hears problems
+            if str(frame.get("level") or "info") in {"warning", "error"}:
+                self._emit("notice", frame)
+        elif kind == "extension_error":
+            self._emit("notice", frame)
+        elif kind in {"auto_retry_start", "auto_retry_end", "retry_fallback_applied",
+                      "retry_fallback_succeeded"}:
+            self._emit("retry", frame)
+        elif kind in {"auto_compaction_start", "auto_compaction_end"}:
+            self._emit("compaction", frame)
+        elif kind in {"btw_delta", "btw_record"}:
+            self._emit("btw", frame)
+        elif kind in {"queue_update", "available_commands_update", "agent_end", "session_settled"}:
             self._emit(str(kind), frame)
 
     def _finish_turn(self, status: str, error: str = "") -> None:
@@ -429,6 +444,40 @@ class AgentClient:
         except AgentError as exc:
             return "failed", str(exc)
         return "injected", ""
+
+    def follow_up(self, text: str, images: list[dict[str, Any]] | None = None,
+                  timeout: float = 30.0) -> tuple[str, str]:
+        """Queue a message to run after the current turn: same contract as steer."""
+        turn = self._turn
+        if turn is None or turn["done"].is_set():
+            return "promptRequired", ""
+        params: dict[str, Any] = {"message": text}
+        if images:
+            params["images"] = images
+        try:
+            self.request("follow_up", params, timeout=timeout)
+        except AgentError as exc:
+            return "failed", str(exc)
+        return "injected", ""
+
+    def session_stats(self) -> dict[str, Any]:
+        return self.request("get_session_stats") or {}
+
+    def set_session_name(self, name: str) -> None:
+        self.request("set_session_name", {"name": name})
+
+    def export_html(self, path: str) -> str:
+        """Export the session as HTML to an absolute `path`; returns the file written."""
+        data = self.request("export_html", {"outputPath": path}, timeout=120) or {}
+        return str(data.get("path") or path)
+
+    def btw(self, question: str) -> dict[str, Any]:
+        """Ask a side question that does not enter the main context; returns its record."""
+        return self.request("btw", {"question": question}) or {}
+
+    def handoff(self, instructions: str = "") -> dict[str, Any]:
+        params = {"customInstructions": instructions} if instructions else {}
+        return self.request("handoff", params, timeout=120) or {}
 
     def prompt(self, text: str, images: list[dict[str, Any]] | None = None,
                timeout: float = 900.0) -> PromptResult:

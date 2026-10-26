@@ -94,7 +94,7 @@ def test_config_is_written_and_parses(monkeypatch, tmp_path):
 
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert data["acp"]["command"] == "omp"
-    assert data["acp"]["args"] == ["--mode", "rpc"]
+    assert data["acp"]["args"] == ["--mode", "rpc-ui"]
     assert "gateway" not in data and "telegram" not in data
     assert data["agent"]["mode"] == "default"
     assert data["agent"]["thinking"] == "xhigh"

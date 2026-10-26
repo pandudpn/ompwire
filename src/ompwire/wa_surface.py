@@ -24,6 +24,7 @@ log = logging.getLogger("ompwire.whatsapp")
 WHATSAPP_LIMIT = 4000  # WhatsApp takes ~65k; past a screen a phone stops being readable
 
 STEERED = "↪️ steered · the agent reads this at its next step"
+FOLLOWED_UP = "📥 follow-up queued · it runs right after this turn"
 SKIP_WORDS = {"0", "skip", "lewati"}
 
 
@@ -150,10 +151,12 @@ class WhatsAppSurface(engine.Surface):
             task.cancel()
             await self.transport.presence(self.chat, typing=False)
 
-    async def offer_options(self, options: list[str]) -> None:
+    async def offer_options(self, options: list[str], question: str = "") -> None:
+        """The question (omp's ask tool sends one) and its numbered answers."""
         listed = numbered(options)
         self.options_listed = listed
-        body = (card("❓ pick an answer", "reply with a number, your own words, or 0 to skip")
+        title = "❓ " + (question.strip() or "pick an answer")
+        body = (card(title, "reply with a number, your own words, or 0 to skip")
                 + f"\n\n{listed}\n\n_messages sent before you answer wait for it_")
         self.options_message = await self.transport.send_text(self.chat, body)
         self.transport.open_question(self.chat, len(options))

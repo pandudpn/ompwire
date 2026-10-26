@@ -47,7 +47,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     # the agent process; the section name predates RPC and is kept so existing configs load
     "acp": {
         "command": "omp",
-        "args": ["--mode", "rpc"],
+        "args": ["--mode", "rpc-ui"],
         "startup_timeout": 60.0,
         "turn_timeout": 900.0,
     },

@@ -38,7 +38,7 @@ TEMPLATE = """# ompwire configuration — written by `ompwire setup`
 
 [acp]
 command = "omp"
-args = ["--mode", "rpc"]
+args = ["--mode", "rpc-ui"]
 startup_timeout = 60.0
 turn_timeout = 900.0
 
@@ -211,7 +211,7 @@ def agent_catalog(cwd: str, command: str = "omp") -> dict[str, Any]:
     """The options the agent actually offers, so setup picks from facts not guesses."""
     from .rpc import AgentClient
 
-    client = AgentClient(command=command, args=["--mode", "rpc", "--no-session"], cwd=cwd,
+    client = AgentClient(command=command, args=["--mode", "rpc-ui", "--no-session"], cwd=cwd,
                          startup_timeout=60.0)
     try:
         state = client.state()

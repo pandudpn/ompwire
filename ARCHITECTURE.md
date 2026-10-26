@@ -6,7 +6,7 @@ back*, and where the seams are.
 
 ```
 +--------+        +---------+        +------------------+        +----------------------+
-| chat   | <----> | ompwire | <----> | omp --mode rpc   | <----> | tools, skills, MCP   |
+| chat   | <----> | ompwire | <----> | omp --mode rpc-ui| <----> | tools, skills, MCP   |
 | surface|        |         | stdio  | loop, memory     |        | providers, files     |
 +--------+        +---------+        +------------------+        +----------------------+
                        |
@@ -36,8 +36,8 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | File | What it is |
 | --- | --- |
 | `engine.py` | the platform-neutral agent engine: ChatAgent, the turn renderer, the `Surface` contract, `ToolTrace`, `FloodWait`, resume planning |
-| `telegram.py` | the Telegram transport: polling, routing (steer, queue, held questions), commands, callbacks, banners, group and channel addressing |
-| `tg_surface.py` | how one Telegram chat shows a turn: `TelegramSurface`, `TelegramDelivery`, the steered/queued/held acks |
+| `telegram.py` | the Telegram transport: polling, routing (busy mode, held questions, ask answers), commands, callbacks, banners, group and channel addressing |
+| `tg_surface.py` | how one Telegram chat shows a turn: `TelegramSurface`, `TelegramDelivery`, the steered/follow-up/queued/held acks |
 | `tg_pickers.py`, `tg_login.py`, `tg_skills.py` | mixins of the transport: the model/mode/thinking pickers, provider login, `/skills` |
 | `whatsapp.py` | the WhatsApp transport: routing, group addressing, numbered answers, commands, banners |
 | `audience.py` | `Audience`: the one admission rule (private, group, channel) both transports ask before anything runs |
@@ -48,7 +48,7 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `gateway_cli.py` | `ompwire gateway ...`: start, remove, list, status, logs, and `_run`, the unit's entry point |
 | `setup.py` | the wizard, `.env` writing token normalisation, `bot_identity` verification |
 | `update.py` | install mode detection, update, restart of running gateways |
-| `rpc.py` | the client for `omp --mode rpc` over stdio |
+| `rpc.py` | the client for `omp --mode rpc-ui` over stdio |
 | `gateways.py` | gateway definitions, credentials per gateway, selection rules |
 | `config.py` | layered config: defaults, `config.toml`, environment, redaction of dumps |
 | `service.py` | systemd unit rendering, start, stop, remove, state |
@@ -76,8 +76,9 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 ## A turn, end to end
 
 1. Telegram delivers an update. The transport drops it unless the sender is on the gateway's
-   allow list. A message sent while a turn runs is steered into it or queued, with a reply
-   saying which; one sent while a question is open is held until the question is settled.
+   allow list. A message sent while a turn runs follows the chat's `/busy` mode (steered, an omp
+   follow-up, or ompwire's queue), with a reply saying which; one sent while a question is open is
+   held until the question is settled.
 2. The chat key resolves to a session id in `sessions.db`. The agent process starts with
    `--resume <id>`, or with a new session when there is none or the transcript is gone.
 3. Stored prefs (model, thinking) are replayed with `set_model` and `set_thinking_level`.
@@ -180,8 +181,9 @@ An approval is the only place a human can intervene. omp asks through an `extens
 and whose options are `Approve`, `Deny` and often `Approve <tool> for this session`. In `write`
 mode omp asks before a shell command and lets its own write tool through; `yolo` asks nothing.
 Plan mode respawns the process with `--approval-mode=always-ask` so that every tool asks, then
-answers reads itself and denies the rest (see Plan mode below). Any other dialog (`input`,
-`editor`, a free-form question) is cancelled, since nobody in the chat is shown it.
+answers reads itself and denies the rest (see Plan mode below). omp's `ask` tool is a question,
+not an approval: it reaches the chat as buttons whatever the approval policy (see Questions
+below). Any other dialog (`input`, `editor`) is cancelled, since nobody in the chat is shown it.
 
 A denial is the safe default: the request expires after `[approval] timeout`, ompwire answers
 `Deny`, and omp fails that one tool call instead of the turn. That is why an approval left
@@ -211,10 +213,29 @@ has a decision behind it:
 | `plan` | the agent's todo list, posted as a fresh checklist each time it changes; a repeat (omp's reminder) and the emptied list at the end are skipped |
 | `available_commands_update` | fills `/commands` |
 | `config_option_update` | from `model_changed` / `thinking_level_changed`; keeps the pickers current; a model change the chat did not ask for (a fallback) is posted as `⚙️ omp switched …`, while the echo of a chat's own `/model` stays silent |
+| `retry` | `auto_retry_*` and `retry_fallback_*`: `🔁 retry 2/3 in 5s · <error>`, `↪️ fallback a → b` in a verbose chat |
+| `notice` | omp's warning and error notices and extension errors, as `⚠️ …`; info notices (MCP mounts) are dropped |
+| `compaction` | `auto_compaction_start` as `🗜️ compacting…`; the end only when it failed, since the transcript-based notice reports before → after |
+| `btw` | `btw_delta` / `btw_record`, collected per record for `/btw`; never enters the turn |
+
+Notices from these kinds go through the turn's own outbox mid-turn, so they land in order with
+the traces around them, and a quiet chat sees none of them.
 
 RPC sends no usage event. After each turn the engine reads `get_state.contextUsage`, which fills
 `agent.context` and drives the ⚠️ warning at `stream.compaction_warn`; a report under 5% of the
 last good one is held, since omp can anchor it on a few hundred tokens after a resume.
+
+## Questions
+
+omp's `ask` tool only exists when the process runs as `--mode rpc-ui`; under plain `--mode rpc`
+the model is told it is unavailable (measured on 18.12.6). `rpc.py` starts omp in rpc-ui and sends
+`set_ask_dialog {enabled: true}`, after which one `ask` request carries every question of the
+call. ompwire shows them one at a time through the same options card as the `<<options>>`
+marker, with the question as its heading. A tap answers with that label, typed text with
+`customInput`, Skip cancels the whole ask, and `[approval] timeout` answers
+`{cancelled, timedOut}`, which omp resolves to the recommended or first option. rpc-ui also sends
+presentation requests (`setWidget`, `notify`, ...); they are fire-and-forget and never answered.
+The `<<options>>` marker stays as the fallback for questions the model writes into its reply.
 
 omp names the tool on every event (`toolName`), MCP tools included, so the trace is headed by the
 tool's own name; a call whose path is `xd://x` is named after the device instead of `read`. A
@@ -266,18 +287,22 @@ negotiates protocol v2, which splits large frames into chunks that `rpc.py` reas
 
 | Command or event | Direction | Used for |
 | --- | --- | --- |
-| `--resume <id>` (argument) | to agent | reopen a session after a restart, `/resume`, a mode switch |
+| `--resume <id>` (argument) | to agent | reopen a session after a restart, a `/sessions` tap, a mode switch |
+| `set_ask_dialog` | to agent | turn `ask` into one structured request (see Questions) |
 | `get_state` | to agent | session id and file, model, thinking level, `contextUsage` |
 | `prompt` | to agent | one turn; acknowledged on admission, ended by `prompt_result` |
-| `steer` | to agent | a message sent mid-turn, and `/steer` |
+| `steer`, `follow_up` | to agent | a message sent mid-turn, by the chat's `/busy` mode |
 | `abort` | to agent | `/stop`; the turn ends with status `aborted` |
 | `set_model`, `get_available_models` | to agent | `/model` |
 | `set_thinking_level`, `get_available_thinking_levels` | to agent | `/thinking` |
-| `new_session`, `fork`, `compact` | to agent | `/new`, `/fork`, `/compact` |
+| `new_session`, `fork`, `compact`, `handoff` | to agent | `/new`, `/fork`, `/compact`, `/handoff` |
+| `get_session_stats`, `set_session_name`, `export_html` | to agent | `/stats`, `/name`, `/export` |
+| `btw` | to agent | `/btw`, answered beside the session |
 | `message_update`, `tool_execution_*` | from agent | prose, reasoning, tool calls and their output |
 | `model_changed`, `thinking_level_changed` | from agent | a switch the chat did not ask for |
+| `auto_retry_*`, `retry_fallback_*`, `notice`, `auto_compaction_*` | from agent | the notices above |
 | `available_commands_update` | from agent | `/commands` |
-| `extension_ui_request` | from agent | approvals (`select`); every other dialog is cancelled |
+| `extension_ui_request` | from agent | approvals (`select`) and questions (`ask`); other dialogs are cancelled |
 
 `/sessions` has no command behind it: omp's transcripts are listed from disk for the chat's cwd.
 `/plan` has no RPC handler either (omp's plan review is TUI-only), which is why plan mode is
@@ -327,16 +352,17 @@ and the next message (typed straight away works too) goes back as feedback for a
   Always answer with a label omp offered.
 - **Model selection is provider plus id.** `set_model` takes `{provider, modelId}`; the chat
   shows and stores `provider/id`, so a stored value without the slash is skipped, not guessed.
-- **Steering goes through `steer`, never a second `prompt`.** `steer` is queued into the running
-  turn and shows up as a `queue_update`; nothing running answers `promptRequired`. A message sent
-  while a turn runs is steered by default (`[telegram] busy_message = "queue"` restores the
-  FIFO); anything not injected falls back to the queue, and `/queue` always queues. The message
-  gets a reply saying which: `↪️ steered` or `📥 queued #n`.
+- **A message mid-turn goes through `steer` or `follow_up`, never a second `prompt`.** Both are
+  queued by omp and show up as a `queue_update`; nothing running answers `promptRequired`. The
+  chat's `/busy` mode picks: `steer` (default) goes into the running turn, `followup` runs as the
+  next turn inside the same `prompt` call, `queue` is ompwire's own FIFO. A legacy
+  `[telegram] busy_message` still sets the default. Anything omp declines falls back to the
+  queue, and the reply says which: `↪️ steered`, `📥 follow-up queued` or `📥 queued #n`.
 - **Compaction is read from omp's transcript.** omp writes a `compaction` entry with
   `tokensBefore`/`tokensAfter` to the session JSONL, so after each turn a new entry gets one `🗜️`
   notice. Entries present when the process starts are not announced, and a `/compact` turn stays
   quiet because omp reports it itself (`command_output`). `/usage` sums the same file, so its
-  totals survive restarts and `/resume`.
+  totals survive restarts and a resume from `/sessions`.
 - **An approval answer must not block the reader.** The reply to an `extension_ui_request` can
   take minutes; it is answered on its own thread so a steer sent during an approval returns.
 - **A turn cut by a restart is resumed, per transport.** `ask()` writes an `inflight` row before

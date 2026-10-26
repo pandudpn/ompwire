@@ -241,12 +241,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         state = client.state()
         model = state.get("model") or {}
-        print(f"ok   RPC handshake: session {str(state.get('sessionId'))[:8]} · model "
+        print(f"ok   RPC-UI handshake: session {str(state.get('sessionId'))[:8]} · model "
               f"{model.get('provider')}/{model.get('id')} · thinking {state.get('thinkingLevel') or '-'}")
         print(f"     models available: {len(client.models())} · "
               f"thinking levels: {', '.join(client.thinking_levels()) or '-'}")
     except AgentError as exc:
-        print(f"FAIL RPC handshake: {exc}")
+        print(f"FAIL RPC-UI handshake: {exc}")
         failures += 1
     finally:
         client.close()

@@ -107,12 +107,36 @@ class TerminalSurface(engine.Surface):
         yield
 
     # ---------------------------------------------------------------- buttons
-    async def offer_options(self, options: list[str]) -> None:
-        """Number the answers and remember them: the next line typed is the answer."""
+    async def offer_options(self, options: list[str], question: str = "") -> None:
+        """Number the answers and remember them.
+
+        An `ask` question blocks the turn on the agent side, so the terminal answers it right
+        here: the REPL is inside ask() and cannot read a line while the turn runs. The
+        `<<options:>>` marker card is not an ask; its answer is the next line the REPL reads.
+        """
         self.offered = list(options)
+        if question:
+            print(question, flush=True)
         for index, option in enumerate(options, 1):
             print(f"{index}. {option}")
-        print("answer with a number, or type your own reply", flush=True)
+        agent = self.agent
+        if agent is None or agent.pending_ask is None:
+            print("answer with a number, or type your own reply", flush=True)
+            return
+        print("answer with a number, type your own reply, or 0 to skip", flush=True)
+        try:
+            line = (await asyncio.to_thread(input, "> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            await agent.answer_ask(None, skip=True)
+            return
+        if line.lower() in {"0", "skip"}:
+            await agent.answer_ask(None, skip=True)
+        elif line.isdigit() and 0 < int(line) <= len(options):
+            await agent.answer_ask(None, option_index=int(line) - 1)
+        elif line:
+            await agent.answer_ask(line)
+        else:
+            await agent.answer_ask(None, skip=True)
 
     def pick_option(self, line: str) -> str | None:
         """The option a numbered line stands for; the offer is spent either way."""
@@ -180,8 +204,6 @@ async def _repl(agent: engine.ChatAgent, surface: TerminalSurface) -> int:
             return 0
         if not line:
             continue
-        # the offer a turn made is spent by the next line, whatever that line turns out to be
-        answer = surface.pick_option(line)
         if line in {"/exit", "/quit"}:
             return 0
         if line == "/new":
@@ -227,6 +249,17 @@ async def _repl(agent: engine.ChatAgent, surface: TerminalSurface) -> int:
             except AgentError as exc:
                 print(f"error: {exc}", file=sys.stderr)
             continue
+        if agent.pending_ask is not None:
+            # an ask question is open: a number picks its option, "skip" cancels, anything
+            # else is free text
+            if line.strip().lower() in {"skip", "0"}:
+                await agent.answer_ask(None, skip=True)
+            elif line.isdigit() and 0 < int(line) <= len(agent.pending_options):
+                await agent.answer_ask(None, option_index=int(line) - 1)
+            else:
+                await agent.answer_ask(line)
+            continue
+        answer = surface.pick_option(line)
         text = answer or line
         try:
             await agent.ask(text)

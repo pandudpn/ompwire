@@ -191,6 +191,144 @@ def test_skip_releases_what_was_held(tmp_path):
     assert left == []
 
 
+def _asking(transport, options):
+    """The transport's view of an agent with omp's ask open: a real ChatAgent, a fake answer.
+
+    omp's reader thread clears `pending_ask` once it has the answer, so the fake does the same.
+    """
+    agent = transport.agent_for(7)
+    agent.pending_ask = {"token": "ask-1", "questions": [{"id": "q", "question": "Minum apa?"}],
+                         "index": 0}
+    agent.pending_options = list(options)
+    taken: list[tuple[str | None, int | None, bool]] = []
+
+    async def answer_ask(text, *, option_index=None, skip=False):
+        taken.append((text, option_index, skip))
+        agent.pending_ask = None
+        agent.pending_options = []
+        return True
+
+    agent.answer_ask = answer_ask
+    sent: list[str] = []
+    transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or len(sent)
+    return agent, taken, sent
+
+
+def test_an_ask_option_button_answers_the_question_instead_of_sending_its_label(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent, taken, sent = _asking(transport, ["teh", "kopi"])
+        query = Query("qo:1")
+        await transport.on_callback(_update(query)[0], None)
+        return taken, sent, agent.pending_ask
+
+    taken, sent, pending = asyncio.run(go())
+    assert taken == [(None, 1, False)]  # the index omp chose, not "kopi" as a prompt
+    assert sent == []
+    assert pending is None
+
+
+def test_an_ask_skip_cancels_the_question(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent, taken, sent = _asking(transport, ["teh", "kopi"])
+        query = Query("qo:skip")
+        await transport.on_callback(_update(query)[0], None)
+        return taken, sent, agent.pending_ask
+
+    taken, sent, pending = asyncio.run(go())
+    assert taken == [(None, None, True)]
+    assert sent == []
+    assert pending is None
+
+
+def test_a_typed_message_answers_the_open_ask(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        _agent, taken, sent = _asking(transport, ["teh", "kopi"])
+        typed = _Typed("es teh tanpa gula")
+        await transport.submit(7, typed, typed)
+        return taken, sent
+
+    taken, sent = asyncio.run(go())
+    assert taken == [("es teh tanpa gula", None, False)]
+    assert sent == []
+
+
+def test_a_message_typed_after_the_answer_becomes_a_prompt_again(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        _agent, taken, sent = _asking(transport, ["teh"])
+        first = _Typed("teh")
+        await transport.submit(7, first, first)
+        second = _Typed("lanjut yang tadi")
+        await transport.submit(7, second, second)
+        return taken, sent
+
+    taken, sent = asyncio.run(go())
+    assert taken == [("teh", None, False)]
+    assert sent == ["lanjut yang tadi"]
+
+
+def test_what_was_held_goes_out_only_after_the_ask_closes(tmp_path):
+    """A multi-question ask keeps `pending_ask` set: releasing early would run a second turn."""
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent, taken, sent = _asking(transport, ["pagi", "sore"])
+        held = _Typed("abaikan, jawab pertanyaan tadi")
+        transport.held[7] = [(held, held)]
+
+        async def answer_ask(text, *, option_index=None, skip=False):
+            taken.append((text, option_index, skip))
+            return True  # the ask stays open: omp moved on to its next question
+
+        agent.answer_ask = answer_ask
+        query = Query("qo:0")
+        await transport.on_callback(_update(query)[0], None)
+        released_while_open = list(sent)
+        agent.pending_ask = None  # the last answer lands
+        await asyncio.sleep(2 * telegram.ASK_POLL_INTERVAL)
+        return released_while_open, sent
+
+    released_while_open, sent = asyncio.run(go())
+    assert released_while_open == []
+    assert sent == ["abaikan, jawab pertanyaan tadi"]
+
+
+def test_an_ask_that_closed_before_the_tap_reports_the_stale_card(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent = transport.agent_for(7)
+        agent.pending_ask = {"token": "ask-1", "questions": [{"id": "q"}], "index": 0}
+        agent.pending_options = ["teh"]
+
+        async def answer_ask(text, *, option_index=None, skip=False):
+            return False
+
+        agent.answer_ask = answer_ask
+        sent: list[str] = []
+        transport.enqueue = lambda _chat, _kind, payload: sent.append(payload.text) or 1
+        query = Query("qo:0")
+        await transport.on_callback(_update(query)[0], None)
+        return sent, query.answers
+
+    sent, answers = asyncio.run(go())
+    assert sent == []
+    assert answers == ["that option expired"]
+
+
 def test_a_stale_option_button_says_so_instead_of_sending(tmp_path):
     config = _config(tmp_path)
 
