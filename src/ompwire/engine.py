@@ -345,6 +345,11 @@ class JobCard:
     detached: bool = False  # a background agent, which can outlive the turn that spawned it
     session_file: str = ""  # the job's own transcript; the reason it failed is written there
     error: str = ""
+    task: str = ""  # what the parent asked it to do: the assignment, else the task description
+    thinking: str = ""
+    requests: int = 0
+    tokens: int = 0
+    cost: float = 0.0
 
 
 JOB_ERROR_TAIL = 256 * 1024
@@ -400,7 +405,8 @@ def job_from_frame(raw: dict[str, Any]) -> JobCard | None:
                        status=str(payload.get("status") or ""),
                        parent=parent,
                        detached=bool(payload.get("detached")),
-                       session_file=str(payload.get("sessionFile") or ""))
+                       session_file=str(payload.get("sessionFile") or ""),
+                       task=_one_line(payload.get("description")))
     if frame != "subagent_progress":
         return None
     progress = payload.get("progress")
@@ -432,7 +438,25 @@ def job_from_frame(raw: dict[str, Any]) -> JobCard | None:
         current_tool=current_tool,
         current_since_ms=_as_int(progress.get("currentToolStartMs")) if current_tool else 0,
         parent=parent,
+        detached=bool(payload.get("detached")),
+        session_file=str(payload.get("sessionFile") or ""),
+        task=_one_line(payload.get("assignment") or payload.get("task")),
+        thinking=str(progress.get("resolvedThinkingLevel") or ""),
+        requests=_as_int(progress.get("requests")),
+        tokens=_as_int(progress.get("tokens")),
+        cost=_as_float(progress.get("cost")),
     )
+
+
+def _one_line(value: Any, width: int = 160) -> str:
+    return _clip(" ".join(str(value or "").split()), lines=1, width=width)
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def job_status(status: str) -> str:
@@ -483,8 +507,53 @@ def job_action(card: JobCard) -> str:
 
 
 def job_row(card: JobCard) -> str:
-    """One line of the summary card: name · agent type · status."""
-    return f"{card.name} · {card.agent or 'task'} · {job_status(card.status)}"
+    """One line of the summary card: name · agent type · status, how long, how many tools."""
+    parts = [card.name, card.agent or "task", job_line(card)]
+    if card.status in JOB_FINAL and card.tool_count:
+        parts.append(f"{card.tool_count} tool{'s' if card.tool_count > 1 else ''}")
+    return " · ".join(parts)
+
+
+def job_usage(card: JobCard) -> str:
+    """What a job has spent so far: requests, tokens, cost. Empty until omp reports any."""
+    parts = []
+    if card.requests:
+        parts.append(f"{card.requests} request{'s' if card.requests > 1 else ''}")
+    if card.tokens:
+        parts.append(f"{tokens(card.tokens)} tokens")
+    if card.cost:
+        parts.append(f"${card.cost:.2f}")
+    return " · ".join(parts)
+
+
+def job_details(card: JobCard) -> list[tuple[str, str]]:
+    """The labelled lines of a job card, below its title and status. A line with nothing to
+    say is left out, so a job that has just started does not show empty labels."""
+    model = card.model or "?"
+    if card.thinking and card.thinking not in model:
+        model += f" · thinking {card.thinking}"
+    rows = [("Task", card.task), ("Type", card.agent or "task"), ("Model", model),
+            ("Usage", job_usage(card)), ("Last action", job_action(card))]
+    return [(label, value) for label, value in rows if value]
+
+
+def group_totals(group: list[JobCard]) -> str:
+    """The summary card's footer: how many jobs run, ended, failed, and what they spent."""
+    running = sum(1 for card in group if card.status not in JOB_FINAL)
+    done = sum(1 for card in group if card.status == "completed")
+    failed = len(group) - running - done
+    parts = [f"{running} running"] if running else []
+    if done:
+        parts.append(f"{done} done")
+    if failed:
+        parts.append(f"{failed} failed")
+    used = sum(card.tool_count for card in group)
+    if used:
+        parts.append(f"{used} tool{'s' if used > 1 else ''}")
+    spent = sum(card.tokens for card in group)
+    if spent:
+        parts.append(f"{tokens(spent)} tokens")
+    return " · ".join(parts)
 
 
 class FloodWait(Exception):
@@ -1004,6 +1073,11 @@ class ChatAgent:
             job.tool_count = max(job.tool_count, fresh.tool_count)
             job.detached = job.detached or fresh.detached
             job.session_file = fresh.session_file or job.session_file
+            job.task = fresh.task or job.task
+            job.thinking = fresh.thinking or job.thinking
+            job.requests = max(job.requests, fresh.requests)
+            job.tokens = max(job.tokens, fresh.tokens)
+            job.cost = max(job.cost, fresh.cost)
             if raw.get("type") == "subagent_progress":
                 job.current_tool = fresh.current_tool
                 job.current_since_ms = fresh.current_since_ms

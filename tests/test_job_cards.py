@@ -218,8 +218,9 @@ def test_the_summary_waits_for_the_call_and_goes_out_before_its_cards(tmp_path):
     surface = asyncio.run(go())
     keys = [key for key, _body in surface.cards]
     assert keys == [f"group:{PARENT}", f"job:{PARENT}:CountPy", f"job:{PARENT}:DateNow"]
-    assert surface.bodies(f"group:{PARENT}") == [
-        "spawned 2: CountPy · task · running, DateNow · task · running"]
+    summary = surface.bodies(f"group:{PARENT}")
+    assert len(summary) == 1 and summary[0].startswith("spawned 2: CountPy · task · running")
+    assert "DateNow · task · running" in summary[0]
 
 
 def test_a_running_card_is_rewritten_at_most_once_a_minute(tmp_path):
@@ -611,28 +612,38 @@ def test_telegram_posts_every_job_card_update_as_a_new_message():
 
 
 def test_telegram_renders_the_job_card():
-    body = tg_surface_with(FakeBot()).job(running_card())
+    card = running_card(task="List the Go modules and their entry points", thinking="high",
+                        model="omniroute/coding-worker", requests=4, tokens=58_600, cost=0.12)
+    body = tg_surface_with(FakeBot()).job(card)
     assert body.splitlines()[0] == "🤖 <b>subagent</b> - CountPy"
-    assert "Job type: task" in body
-    assert f"Model: {MODEL}" in body
     assert "running · 1m20s · 3 tools" in body
-    assert "Last action: Counting py files · bash: find . -name '*.py'" in body
+    for label, value in [("Task", "List the Go modules and their entry points"),
+                         ("Type", "task"), ("Model", "omniroute/coding-worker · thinking high"),
+                         ("Usage", "4 requests · 58.6k tokens · $0.12"),
+                         ("Last action", "Counting py files · bash: find . -name '*.py'")]:
+        assert f"<b>{label}:</b> {value}" in body
+    assert "<pre>" not in body and "<code>" not in body, "details read as text, not a code block"
 
 
-def test_telegram_renders_the_summary():
-    done = running_card(name="DateNow", status="completed", duration_ms=1_000, tool_count=1)
-    body = tg_surface_with(FakeBot()).jobs([running_card(), done], 2)
-    assert body.splitlines() == ["🤖 <b>subagent</b> (spawned 2 background agents)",
-                                "CountPy · task · running",
-                                "DateNow · task · ✅ done"]
+def test_telegram_renders_the_summary_with_each_task_and_the_totals():
+    done = running_card(name="DateNow", status="completed", tool_count=1, tokens=2_000)
+    running = running_card(task="Count the python files", tokens=10_000)
+    body = tg_surface_with(FakeBot()).jobs([running, done], 2)
+    lines = body.splitlines()
+    assert lines[0] == "🤖 <b>subagent</b> (spawned 2 background agents)"
+    assert "• CountPy · task · running · 1m20s · 3 tools" in lines
+    assert "  <i>Count the python files</i>" in lines
+    assert "• DateNow · task · ✅ done · 1 tool" in lines
+    assert lines[-1] == "1 running · 1 done · 4 tools · 12k tokens"
 
 
 def test_telegram_marks_a_job_without_known_type_and_model():
     body = tg_surface_with(FakeBot()).job(engine.JobCard(name="<odd&name>", status="running"))
-    assert "Job type: task" in body and "Model: ?" in body
+    assert "<b>Type:</b> task" in body and "<b>Model:</b> ?" in body
     assert "&lt;odd&amp;name&gt;" in body, "a job name is escaped like any other text"
     # the line is always there: a job that has not called a tool yet says it is starting
-    assert "Last action:" in body
+    assert "<b>Last action:</b> starting…" in body
+    assert "Usage" not in body and "Task" not in body, "nothing reported yet, no empty label"
 
 
 # ------------------------------------------------------------- whatsapp surface
@@ -665,13 +676,16 @@ def test_whatsapp_posts_every_job_card_update_as_a_new_message():
 
 def test_whatsapp_renders_the_card_in_its_own_markup():
     surface = wa_surface.WhatsAppSurface(WaTransport(), "6281234")
-    body = surface.job(running_card())
+    body = surface.job(running_card(task="Count the python files", tokens=7_274))
     assert body.splitlines()[0] == "🤖 *subagent* - CountPy"
-    assert "Job type: task" in body and f"Model: {MODEL}" in body
     assert "_running · 1m20s · 3 tools_" in body
-    assert "Last action: Counting py files · bash: find . -name '*.py'" in body
+    assert "*Task:* Count the python files" in body and f"*Model:* {MODEL}" in body
+    assert "*Usage:* 7.27k tokens" in body
+    assert "*Last action:* Counting py files · bash: find . -name '*.py'" in body
+    assert "```" not in body
     summary = surface.jobs([running_card()], 1)
     assert summary.splitlines()[0] == "🤖 *subagent* (spawned 1 background agent)"
+    assert summary.splitlines()[-1] == "1 running · 3 tools"
 
 
 # ------------------------------------------------------------------ terminal
@@ -685,10 +699,9 @@ def test_the_terminal_prints_a_card_per_update(capsys):
 
     asyncio.run(go())
     out = capsys.readouterr().out
-    assert out.count("[job] CountPy · task · " + MODEL) == 2, "a terminal has no message to edit"
-    assert "[job] CountPy · task · " + MODEL in out
-    assert "  running · 1m20s · 3 tools" in out
-    assert "  last: Counting py files · bash: find . -name '*.py'" in out
+    assert out.count("[job] CountPy · running · 1m20s · 3 tools") == 2
+    assert f"  model: {MODEL}" in out
+    assert "  last action: Counting py files · bash: find . -name '*.py'" in out
 
 
 def test_the_terminal_renders_the_summary():
@@ -696,5 +709,6 @@ def test_the_terminal_renders_the_summary():
     done = running_card(name="DateNow", status="completed")
     body = surface.jobs([running_card(), done], 2)
     assert body.splitlines() == ["[jobs] 2 background agents spawned",
-                                "  CountPy · task · running",
-                                "  DateNow · task · ✅ done"]
+                                "  CountPy · task · running · 1m20s · 3 tools",
+                                "  DateNow · task · ✅ done · 3 tools",
+                                "  1 running · 1 done · 6 tools"]

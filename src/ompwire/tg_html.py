@@ -151,24 +151,25 @@ def plan_card(items: Iterable[Any]) -> str:
 
 
 def job_group(group: Iterable[engine.JobCard], spawned: int) -> str:
-    """The card that opens a `task` call: one line per job it spawned."""
+    """The card that opens a `task` call: one line per job, then the totals so far."""
     group = list(group)
     word = "agent" if spawned == 1 else "agents"
     background = "background " if any(card.detached for card in group) else ""
     lines = [f"🤖 <b>subagent</b> (spawned {spawned} {background}{word})"]
-    lines.extend(esc(engine.job_row(card)) for card in group)
+    for card in group:
+        lines.append(f"• {esc(engine.job_row(card))}")
+        if card.task:
+            lines.append(f"  <i>{esc(card.task)}</i>")
+    totals = engine.group_totals(group)
+    if totals:
+        lines += ["", esc(totals)]
     return "\n".join(lines)
 
 
 def job_block(card: engine.JobCard) -> str:
     """One subagent as a card of its own: what it is, what it last did, how it is doing."""
-    lines = [f"🤖 <b>subagent</b> - {esc(card.name)}",
-             f"Job type: {esc(card.agent or 'task')}",
-             f"Model: {esc(card.model or '?')}",
-             f"<i>{esc(engine.job_line(card))}</i>"]
-    action = engine.job_action(card)
-    if action:
-        lines += ["", f"Last action: {esc(action)}"]
+    lines = [f"🤖 <b>subagent</b> - {esc(card.name)}", f"<i>{esc(engine.job_line(card))}</i>", ""]
+    lines += [f"<b>{esc(label)}:</b> {esc(value)}" for label, value in engine.job_details(card)]
     return "\n".join(lines)
 
 

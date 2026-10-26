@@ -84,18 +84,21 @@ class TerminalSurface(engine.Surface):
         return "\n".join(blocks)
 
     def job(self, card: engine.JobCard) -> str:
-        head = f"[job] {card.name} · {card.agent or 'task'} · {card.model or '?'}"
-        lines = [head, f"  {engine.job_line(card)}"]
-        action = engine.job_action(card)
-        if action:
-            lines.append(f"  last: {action}")
+        lines = [f"[job] {card.name} · {engine.job_line(card)}"]
+        lines += [f"  {label.lower()}: {value}" for label, value in engine.job_details(card)]
         return "\n".join(lines)
 
     def jobs(self, group: list[engine.JobCard], spawned: int) -> str:
         word = "agent" if spawned == 1 else "agents"
         background = "background " if any(card.detached for card in group) else ""
         lines = [f"[jobs] {spawned} {background}{word} spawned"]
-        lines.extend(f"  {engine.job_row(card)}" for card in group)
+        for card in group:
+            lines.append(f"  {engine.job_row(card)}")
+            if card.task:
+                lines.append(f"    {card.task}")
+        totals = engine.group_totals(group)
+        if totals:
+            lines.append(f"  {totals}")
         return "\n".join(lines)
 
     # ----------------------------------------------------------------- posting

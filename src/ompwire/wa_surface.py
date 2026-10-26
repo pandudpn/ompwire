@@ -132,20 +132,21 @@ class WhatsAppSurface(engine.Surface):
         return "\n\n".join(blocks)
 
     def job(self, card: engine.JobCard) -> str:
-        lines = [f"🤖 *subagent* - {card.name}",
-                 f"Job type: {card.agent or 'task'}",
-                 f"Model: {card.model or '?'}",
-                 f"_{engine.job_line(card)}_"]
-        action = engine.job_action(card)
-        if action:
-            lines += ["", f"Last action: {action}"]
+        lines = [f"🤖 *subagent* - {card.name}", f"_{engine.job_line(card)}_", ""]
+        lines += [f"*{label}:* {value}" for label, value in engine.job_details(card)]
         return "\n".join(lines)
 
     def jobs(self, group: list[engine.JobCard], spawned: int) -> str:
         word = "agent" if spawned == 1 else "agents"
         background = "background " if any(card.detached for card in group) else ""
         lines = [f"🤖 *subagent* (spawned {spawned} {background}{word})"]
-        lines.extend(engine.job_row(card) for card in group)
+        for card in group:
+            lines.append(f"• {engine.job_row(card)}")
+            if card.task:
+                lines.append(f"  _{card.task}_")
+        totals = engine.group_totals(group)
+        if totals:
+            lines += ["", totals]
         return "\n".join(lines)
 
     @contextlib.asynccontextmanager
