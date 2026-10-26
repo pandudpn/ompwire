@@ -234,8 +234,9 @@ the model is told it is unavailable (measured on 18.12.6). `rpc.py` starts omp i
 `set_ask_dialog {enabled: true}`, after which one `ask` request carries every question of the
 call. ompwire shows them one at a time through the same options card as the `<<options>>`
 marker, with the question as its heading. A tap answers with that label, typed text with
-`customInput`, Skip cancels the whole ask, and `[approval] timeout` answers
-`{cancelled, timedOut}`, which omp resolves to the recommended or first option. rpc-ui also sends
+`customInput`; Skip and the `[approval] timeout` both answer `{cancelled, timedOut}`, which omp
+resolves to the recommended or first option and carries on. A bare `{cancelled: true}` would abort
+the whole turn (measured on 18.12.6), so it is never sent for an ask. rpc-ui also sends
 presentation requests (`setWidget`, `notify`, ...); they are fire-and-forget and never answered.
 The `<<options>>` marker stays as the fallback for questions the model writes into its reply.
 

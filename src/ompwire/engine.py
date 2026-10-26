@@ -1411,8 +1411,10 @@ class ChatAgent:
         question = state["questions"][state["index"]]
         options = [str(o.get("label") or "") for o in (question.get("options") or [])]
         if skip:
-            # cancel the whole ask: the agent continues without any answer
-            state["slot"]["answer"] = {"cancelled": True}
+            # a bare `cancelled` makes omp abort the whole turn (measured on 18.12.6); with
+            # `timedOut` it answers every question with its recommended option, else the first,
+            # and the agent carries on, which is what Skip promises
+            state["slot"]["answer"] = {"cancelled": True, "timedOut": True}
             return True
         answer: dict[str, Any] | None = None
         if option_index is not None and 0 <= option_index < len(options):

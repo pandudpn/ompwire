@@ -194,12 +194,15 @@ def test_ask_answered_by_free_text_sends_custom_input(tmp_path):
                                     "customInput": "lain saja"}]}]
 
 
-def test_ask_skipped_cancels_the_whole_ask(tmp_path):
+def test_ask_skipped_takes_the_recommended_option_and_keeps_the_turn(tmp_path):
+    """Measured on omp 18.12.6: a bare `cancelled` aborts the whole turn, while
+    `cancelled` + `timedOut` makes omp answer with the recommended option (else the first)
+    and carry on. Skip promises the second."""
     async def tap(agent):
         await agent.answer_ask(None, skip=True)
 
     bodies, _ = _run_ask(tmp_path, tap)
-    assert bodies == [{"cancelled": True}]
+    assert bodies == [{"cancelled": True, "timedOut": True}]
 
 
 def test_ask_timed_out_reports_timedout(tmp_path):

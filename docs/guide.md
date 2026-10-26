@@ -208,8 +208,9 @@ reports how it finished. A quiet chat (a group, or `/verbose` off) shows none of
 
 OMP's `ask` tool arrives as buttons, one question at a time, with the question above them. A
 reply can also end with `<<options: a | b>>`, which becomes buttons the same way. Both add
-✏️ Other answer and ⏭️ Skip; Skip on an `ask` lets the agent carry on without an answer. While
-the question is open:
+✏️ Other answer and ⏭️ Skip. Skip on an `ask` lets the agent go on with the option OMP marked as
+recommended (or the first one); the turn keeps running. An `ask` nobody answers within
+`[approval] timeout` (120 seconds) is resolved the same way. While the question is open:
 
 - a message about something else is held (`⏸️ held #1`) and runs after the question is settled;
 - after ✏️ Other answer, the next message you type is the answer;

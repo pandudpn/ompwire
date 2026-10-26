@@ -1215,12 +1215,14 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                 return
             if choice == "skip":
                 await query.answer("skipped")
+                note = "skipped"
                 if agent.pending_ask is not None:
-                    # cancelling the ask ends omp's question entirely; the turn carries on
+                    # omp answers with its recommended option (else the first) and carries on
                     await agent.answer_ask(None, skip=True)
                     log.info("ask skipped chat=%s", chat_id)
+                    note = "skipped · the agent goes on with its recommended option"
                 self._settle_question(chat_id, agent)
-                await agent.surface.retire_options("skipped")
+                await agent.surface.retire_options(note)
                 await self._after_ask(chat_id, agent)
                 return
             try:
