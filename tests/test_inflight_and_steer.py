@@ -6,8 +6,8 @@ import asyncio
 import types
 
 from ompwire import engine, telegram
-from ompwire.acp import PromptResult
 from ompwire.config import load_config
+from ompwire.rpc import PromptResult, Update
 from ompwire.store import SessionStore
 
 
@@ -38,14 +38,20 @@ class Client:
         self.on_update = None
         self.steered: list[str] = []
 
+    def state(self):
+        return {}
+
     def prompt(self, *_a, **_k):
         return PromptResult(stop_reason=self.stop_reason, usage={}, text="", updates=[])
 
-    def steer(self, _sid, text, _images=None, _timeout=15.0):
+    def steer(self, text, images=None, timeout=30.0):
         self.steered.append(text)
         return self.steer_outcome, ""
 
-    def cancel(self, _sid):
+    def abort(self):
+        return None
+
+    def close(self):
         return None
 
 
@@ -225,3 +231,66 @@ def test_schedule_lists_without_crashing(tmp_path, monkeypatch):
 
     asyncio.run(go())
     assert any("no schedules yet" in body for body in sent)
+
+
+class Planner(Client):
+    """Answers every prompt with a plan and records what the agent was actually sent."""
+
+    def __init__(self):
+        super().__init__()
+        self.prompts: list[str] = []
+
+    def prompt(self, text, *_a, **_k):
+        self.prompts.append(text)
+        if self.on_update is not None:  # the answer streams, as omp's does
+            self.on_update(Update(kind="agent_message_chunk", session_id="s",
+                                  raw={"content": {"type": "text", "text": "1. do it"}}))
+        return PromptResult(stop_reason="end_turn", usage={}, text="1. do it", updates=[])
+
+
+def _planning(config):
+    planner = Planner()
+    agent = _agent(config, planner)
+    planner.on_update = agent._on_update
+    agent.options = {"mode": {"currentValue": "plan"}}
+
+    async def respawn():
+        agent.client = planner  # a new omp process resuming the same session
+
+    agent.ensure = respawn
+    return agent
+
+
+def test_plan_mode_ends_with_review_buttons_and_approve_implements(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        agent = _planning(config)
+        await agent.ask("add a readme")
+        offered = list(agent.pending_options)
+        await agent.ask(engine.PLAN_OPTIONS[0])
+        return agent, offered
+
+    agent, offered = asyncio.run(go())
+    assert offered == list(engine.PLAN_OPTIONS)
+    first, second = agent.client.prompts
+    assert "Plan mode is on" in first and "add a readme" in first
+    assert second == engine.PLAN_APPROVED
+    assert agent.mode == "default"
+
+
+def test_deny_takes_the_next_message_as_feedback_and_stays_in_plan_mode(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        agent = _planning(config)
+        await agent.ask("add a readme")
+        await agent.ask(engine.PLAN_OPTIONS[1])  # Deny: no turn, it asks what to change
+        await agent.ask("also add a license")
+        return agent
+
+    agent = asyncio.run(go())
+    _first, revised = agent.client.prompts
+    assert "also add a license" in revised and "Revise the plan" in revised
+    assert agent.mode == "plan"
+    assert agent.plan_review == "pending"  # the revised plan is up for review again

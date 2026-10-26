@@ -214,15 +214,26 @@ last      10:41 WIB · 735.1k → 68.2k
 
 ## Approval
 
-The agent runs with `approval_mode = write`. Reads and file writes are free; a shell command
-that can change something sends a request with Allow once, Always allow, Deny and Always deny.
-Commands that only read are let through: the command is tokenised, a pipeline counts as
+The agent runs with `approval_mode = write`. Reads and OMP's own file writes go through; a shell
+command that can change something sends a request with ✅ Allow, ✅ Allow for this session and
+⛔ Deny. Commands that only read are let through: the command is tokenised, a pipeline counts as
 read-only only when every part is, and a redirect is allowed only into `/dev/null`.
 
-`write` is the one OMP mode that both lets the agent work and reaches a person. Under
-`always-ask` OMP denies writes without sending a request, so no button ever appears. `yolo`
-asks nothing; `/yolo` turns it on for one chat. An unanswered request is denied after
-`[approval] timeout` (120 seconds by default).
+`yolo` asks nothing; `/yolo` turns it on for one chat. An unanswered request is denied after
+`[approval] timeout` (120 seconds by default). A question OMP opens that is not an approval
+(free text, an editor) is cancelled, because nobody in the chat sees it.
+
+### Plan mode
+
+`/mode plan` makes the agent explore and propose before it changes anything. Reads and read-only
+commands run without a button; every other tool is refused. The plan arrives with two buttons:
+
+- ✅ Approve plan: back to default mode, and the agent implements the plan.
+- ✏️ Deny & revise: the bot asks what to change. Your next message (typing straight away works
+  too) goes back as feedback, and a revised plan comes back for review.
+
+Plan mode is ompwire's own, since OMP's plan review exists only in its terminal UI. `/mode
+default` leaves it at any time.
 
 The appended system prompt sets the scope: a question gets a read-only answer, a clone goes to
 `/tmp` or `~/.cache`, and anything that touches production stops so the agent can say what it
@@ -287,8 +298,9 @@ One gateway is two directories, so `gateway remove` with the full delete leaves 
 behind.
 
 Precedence: defaults, then `config.toml`, then the gateway's own settings, then toggles set from
-its chat, then environment variables. Sections: `[acp]`,
-`[agent]`, `[session]`, `[stream]`, `[approval]`, `[files]`, `[logging]`, `[mcp]`,
+its chat, then environment variables. Sections: `[acp]` (the agent command, run as
+`omp --mode rpc`; an old `--mode acp` is read as rpc), `[agent]`, `[session]`, `[stream]`,
+`[approval]`, `[files]`, `[logging]`,
 and one per platform (`[telegram]`). `ompwire config` prints the merged result with secrets masked.
 `OMPWIRE_CONFIG_DIR` points everything at another directory.
 
@@ -358,8 +370,8 @@ conversation or unfinished turn is lost. The old `gateways.toml` is kept as
 
 `ompwire setup` can be run again: every prompt is pre-filled with what is on disk.
 
-`[mcp] source = "mcp-hub"` reads a shared `servers.yaml`; `exclude` and
-`[mcp.overrides.<name>]` adjust it per machine.
+MCP servers are OMP's own: it reads `~/.omp/agent/mcp.json` and starts a server only when a turn
+calls it. ompwire injects none, and an `[mcp]` section left in an old config is ignored.
 
 `[files]` sets `max_mb` (20, both directions) and `incoming_dir` for documents sent into the
 chat. The agent sends a file by naming it on its own line:

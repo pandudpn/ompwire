@@ -20,8 +20,6 @@ allowed_users = [111, 222]
 [approval]
 policy = "ask"
 
-[mcp]
-source = "none"
 
 [session]
 store = "{store}"
@@ -67,7 +65,7 @@ def test_status_shows_every_setting_that_decides_behaviour(monkeypatch, tmp_path
     assert rows["cwd"] == "/srv/app"
     assert rows["approvals"] == "yolo (bypassed)"
     assert "telegram token" not in rows
-    assert rows["mcp"] == "source none"
+    assert rows["mcp"].endswith("omp's own mcp.json")
     assert str(store) in rows["sessions cli"]  # `ompwire chat` keeps the configured store
     assert "gateways/telegram/sessions.db" in rows["sessions telegram"]  # each bot its own
     assert str(log) in rows["log"]
@@ -102,28 +100,19 @@ def test_status_exits_zero_and_prints_aligned_rows(monkeypatch, tmp_path, capsys
 
 
 def _doctor(monkeypatch, tmp_path, allowed: str):
-    class Info:
-        def get(self, key, default=None):
-            return {"agentInfo": {"name": "omp", "version": "9.9.9"},
-                    "agentCapabilities": {"loadSession": True},
-                    "protocolVersion": 1}.get(key, default)
-
-    class Session:
-        get = staticmethod(lambda key, default=None: {"sessionId": "abc12345",
-                                                      "configOptions": []}.get(key, default))
-
     class Client:
         def __init__(self, **kwargs):
             pass
 
-        def initialize(self):
-            return Info()
+        def state(self):
+            return {"sessionId": "abc12345", "model": {"provider": "a", "id": "b"},
+                    "thinkingLevel": "high"}
 
-        def new_session(self, cwd, servers):
-            return Session()
+        def models(self):
+            return [{"provider": "a", "id": "b"}]
 
-        def close_session(self, session_id):
-            pass
+        def thinking_levels(self):
+            return ["off", "high"]
 
         def close(self):
             pass
@@ -145,7 +134,7 @@ def _doctor(monkeypatch, tmp_path, allowed: str):
     monkeypatch.setattr("ompwire.service.state", lambda gateway="telegram": "active")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/omp")
     monkeypatch.setattr(cli, "SessionStore", lambda path: _Closable())
-    monkeypatch.setattr(cli, "AcpClient", Client)
+    monkeypatch.setattr(cli, "AgentClient", Client)
     return cli.main(["--config", str(config_dir / "config.toml"), "doctor"])
 
 

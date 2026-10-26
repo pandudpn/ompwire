@@ -1,6 +1,6 @@
 """The platform-neutral agent engine: one ChatAgent per conversation.
 
-This module owns everything a turn needs that is not platform I/O: the ACP subprocess and its
+This module owns everything a turn needs that is not platform I/O: the omp RPC subprocess and its
 session, the drain of updates into traces, the pacing of outgoing messages, permission asking,
 schedules, files and usage. A platform implements `Surface` and gets a working agent; nothing
 here knows Telegram.
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import abc
 import asyncio
-import contextlib
 import logging
 import os
 import re
@@ -23,18 +22,16 @@ from typing import Any, ClassVar
 
 from . import allowlist, gateways, omp_sessions
 from . import schedules as schedule_lib
-from .acp import AcpClient, AcpError, AcpTimeout, pick_permission_option
-from .acp import Update as AcpUpdate
 from .attachments import extract as extract_files
 from .attachments import hide_partial as hide_file_partial
 from .config import Config, approval_policy
 from .format import humanize_token_report, tokens, wib_time
-from .mcp_hub import hub_servers, normalize
-from .mcp_hub import merge_entry as merge_mcp_entry
 from .mdrender import strip_agent_noise
 from .omp_sessions import plausible_context
 from .questions import extract as extract_options
 from .questions import hide_partial
+from .rpc import APPROVE, DENY, AgentClient, AgentError, AgentTimeout, approval_detail, is_approval
+from .rpc import Update as AgentUpdate
 from .store import SessionStore
 
 log = logging.getLogger("ompwire.engine")
@@ -64,12 +61,39 @@ def child_env() -> dict[str, str]:
     return env
 
 
-def _acp_args(config: Config) -> list[str]:
-    """`[acp] args`, accepting the one-string form the environment override produces."""
-    raw = config.get("acp", "args") or ["--mode", "acp"]
-    if isinstance(raw, str):
-        return shlex.split(raw)
-    return [str(part) for part in raw]
+def agent_args(config: Config) -> list[str]:
+    """`[acp] args` as omp RPC arguments. The section keeps its name so existing configs load; an
+    `--mode acp` written by an older setup is read as `--mode rpc`, the protocol this speaks."""
+    raw = config.get("acp", "args") or ["--mode", "rpc"]
+    args = shlex.split(raw) if isinstance(raw, str) else [str(part) for part in raw]
+    if args[:1] == ["acp"]:
+        args = args[1:]  # the `omp acp` subcommand form
+    for index, part in enumerate(args):
+        if part == "--mode" and index + 1 < len(args) and args[index + 1] == "acp":
+            args[index + 1] = "rpc"
+        elif part == "--mode=acp":
+            args[index] = "--mode=rpc"
+    if not any(part == "--mode" or part.startswith("--mode=") for part in args):
+        args = ["--mode", "rpc", *args]
+    return args
+
+
+_VERSIONS: dict[str, str] = {}
+
+
+def _omp_version(command: str) -> str:
+    """`omp --version` once per process ("omp/18.12.6" -> "18.12.6"); RPC has no handshake that
+    reports it."""
+    if command not in _VERSIONS:
+        import subprocess
+
+        try:
+            out = subprocess.run([command, "--version"], capture_output=True, text=True,
+                                 timeout=10, check=False).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        _VERSIONS[command] = out.split("/", 1)[-1].split()[0] if out else ""
+    return _VERSIONS[command]
 
 
 def resume_plan(store_path: str, prefix: str) -> tuple[list[tuple[str, str, int]],
@@ -112,13 +136,13 @@ def _is_waiting(title: str) -> bool:
     return bool(WAITING_RE.match(title.strip()))
 
 
-# ACP gives each tool call a coarse kind and files most of omp's tools under "other". The
-# transcript names the real tool; until it does, only the kinds that stand for one tool are named.
+# omp names the tool on every RPC event. A call without a name falls back to its kind, and only
+# the kinds that stand for one tool are named.
 _KIND_TOOL = {"think": "todo", "fetch": "web_search"}
 
 
 def tool_name(kind: str, raw_input: dict[str, Any], named: str = "") -> str:
-    """The tool behind a call: omp's own name when the transcript has it, else a safe guess."""
+    """The tool behind a call: omp's own name when it sent one, else a safe guess."""
     path = str(raw_input.get("path") or "")
     if path.startswith("xd://"):
         # a device runs through read or write; the device says what happened, "write" does not
@@ -154,27 +178,12 @@ def _chunks(text: str, limit: int) -> list[str]:
     return out or [""]
 
 
-def resolve_mcp_servers(config: Any) -> list[dict[str, Any]]:
-    """The servers a session is opened with.
+def mcp_server_names() -> list[str]:
+    """The MCP servers omp loads on its own, from its `mcp.json`. In RPC mode the agent reads that
+    file itself, so this only names them for the banner; nothing is passed to the session."""
+    from .setup import read_mcp_servers
 
-    One resolver, because the banner lives on a different class than the session: a copy of this
-    logic in the banner reported "none" while the hub was supplying twenty-four servers.
-    """
-    source = str(config.get("mcp", "source", "inline") or "inline").lower()
-    if source == "none":
-        return []
-    if source == "mcp-hub":
-        entries = hub_servers(
-            config.get("mcp", "hub_path", "~/mcp-hub/servers.yaml"),
-            include=config.get("mcp", "include", []) or [],
-            exclude=config.get("mcp", "exclude", []) or [],
-        )
-        overrides = config.get("mcp", "overrides", {}) or {}
-        for entry in entries:
-            patch = overrides.get(entry.get("name")) or {}
-            merge_mcp_entry(entry, patch)
-        return normalize(entries)
-    return normalize(config.get("mcp", "servers", []) or [])
+    return sorted(read_mcp_servers())
 
 
 MCP_LABEL_MAX = 6
@@ -198,8 +207,29 @@ def context_line(used: int, size: int) -> str:
     return f"{tokens(used)} / {tokens(size)} ({used * 100 // size}%)"
 
 
-# Choices that belong to the chat, not to one ACP session: /new must not reset them.
+# Choices that belong to the chat, not to one agent session: /new must not reset them.
 PREF_KEYS = ("model", "mode", "thinking")
+
+# Tools plan mode lets through without a button: they only look. Everything else is refused.
+PLAN_READ_TOOLS = frozenset({"read", "grep", "glob", "find", "lsp", "web_search", "todo"})
+
+# Plan mode is ompwire's: omp's own plan review lives in its terminal UI, not over RPC. The
+# turn is told to plan; the answer ends with Approve/Deny buttons; Deny takes feedback next.
+PLAN_PROMPT = (
+    "Plan mode is on. Investigate read-only: you may read, search and run read-only commands; "
+    "any write, edit or other side effect will be refused. Do not implement anything. Reply with "
+    "a concise numbered plan for the request below: the files you would change, how, and how you "
+    "would verify it. Do not ask whether to proceed; the person approves or rejects the plan with "
+    "buttons.\n\nRequest:\n{prompt}"
+)
+PLAN_APPROVED = (
+    "The plan above is approved. Plan mode is off: implement it now, then verify the result."
+)
+PLAN_FEEDBACK = (
+    "The plan above was rejected with this feedback. Revise the plan accordingly; stay in plan "
+    "mode and do not implement anything yet.\n\nFeedback:\n{feedback}"
+)
+PLAN_OPTIONS = ("✅ Approve plan", "✏️ Deny & revise")
 
 
 @dataclass
@@ -214,7 +244,7 @@ class ToolTrace:
     subagent: str = ""
     steps: list[str] = field(default_factory=list)
     brief: str = ""
-    tool: str = ""  # omp's name for it (bash, wait, todo, …); kind is ACP's coarse class
+    tool: str = ""  # omp's name for it (bash, wait, todo, …); kind is the fallback class
 
 
 @dataclass(frozen=True)
@@ -306,7 +336,7 @@ class Surface(abc.ABC):
     async def notice(self, text: str) -> Any | None: ...
 
 class ChatAgent:
-    """One chat's ACP agent: subprocess, session id, queue and counters."""
+    """One chat's omp agent: subprocess, session id, queue and counters."""
 
     def __init__(self, config: Config, key: str, surface: Surface, *, shared: bool = False) -> None:
         self.config = config
@@ -317,7 +347,7 @@ class ChatAgent:
         self.shared = shared
         self.label = surface.label
         self.store = SessionStore(config.get("session", "store"))
-        self.client: AcpClient | None = None
+        self.client: AgentClient | None = None
         self.session_id = ""
         # /cwd is stored with the session; without reading it back a restart silently moved the
         # chat to the configured directory while still loading the session from the other one
@@ -336,6 +366,8 @@ class ChatAgent:
         self.pending_schedules: dict[str, schedule_lib.Proposal] = {}
         self.started_at = time.time()
         self.pending_options: list[str] = []
+        # plan mode: a plan is waiting for Approve/Deny; "revise" means the next message is feedback
+        self.plan_review: str = ""
         # when this chat last got a message; the pacing gap is measured from it across turns
         self._last_post = 0.0
         self.last_used = time.time()
@@ -352,10 +384,13 @@ class ChatAgent:
             self.yolo = stored_yolo == "on"
         self.turns = 0
         self.tools_used = 0
+        # the agent's choices in one shape for every picker: {"model": {"currentValue",
+        # "options": [{"value", "name"}]}, "thinking": …}, rebuilt from get_state after each change
         self.options: dict[str, dict[str, Any]] = {}
-        # values ompwire itself asked for; omp echoes them as config_option_update, which must
-        # not be reported back as a change made from omp's side
+        # values ompwire itself asked for; omp reports them back as model_changed and
+        # thinking_level_changed, which must not be announced as a change made from omp's side
         self._asked: set[tuple[str, str]] = set()
+        self._models: list[dict[str, Any]] = []
         # set while a turn runs: posts a notice in order with the turn's own messages
         self._turn_notice: Callable[[str], None] | None = None
         self.info: dict[str, Any] = {}
@@ -372,15 +407,18 @@ class ChatAgent:
         self._compact_turn = False
         # last context report that looked real; outlives a process restart, not a session change
         self._context_good: int | None = None
-        self._updates: asyncio.Queue[AcpUpdate | None] = asyncio.Queue()
+        self._updates: asyncio.Queue[AgentUpdate | None] = asyncio.Queue()
         self._pending_perm: dict[str, dict[str, Any]] = {}
         self._loop = asyncio.get_running_loop()
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ setup
-    def _build_client(self, yolo: bool = False) -> AcpClient:
-        args = _acp_args(self.config)
+    def _build_client(self, yolo: bool = False, resume: str = "") -> AgentClient:
+        args = agent_args(self.config)
         approval = "yolo" if (yolo or self.yolo) else str(self.config.get("agent", "approval_mode", ""))
+        if self.mode == "plan":
+            # every tool call asks, and _on_permission refuses each write: plan mode only reads
+            approval = "always-ask"
         hint = str(self.config.get("agent", "append_system_prompt", "") or "").strip()
         from .config import PROTOCOL_HINT
 
@@ -390,54 +428,44 @@ class ChatAgent:
             args.append(f"--approval-mode={approval}")
         if hint:
             args += ["--append-system-prompt", hint]
-        return AcpClient(
+        if resume:
+            args += ["--resume", resume]
+        return AgentClient(
             command=str(self.config.get("acp", "command", "omp")),
             args=args,
             cwd=self.cwd,
             env=child_env(),
             on_update=self._on_update,
-            on_permission=self._on_permission,
+            on_dialog=self._on_dialog,
             startup_timeout=float(self.config.get("acp", "startup_timeout", 60.0)),
         )
 
     async def ensure(self, yolo: bool = False) -> None:
         if self.client is not None and self.client.alive:
             return
-        self.client = self._build_client(yolo=yolo)
-        info = await asyncio.to_thread(self.client.initialize)
-        agent = info.get("agentInfo") or {}
-        self.agent_version = str(agent.get("version") or "")
-        self.info = info
-        log.info("agent up for %s: %s %s (approval=%s, mcp=%d)", self.label,
-                 agent.get("name"), agent.get("version"),
-                 "yolo" if self.yolo else self.config.get("agent", "approval_mode", "write"),
-                 len(self._mcp_servers()))
         record = self.store.get(self.key)
-        previous = self.client.on_update
-        self.client.on_update = None  # session/load replays the transcript
+        resume = record.session_id if record is not None else ""
+        self.client = self._build_client(yolo=yolo, resume=resume)
         try:
-            if record is not None:
-                try:
-                    result = await asyncio.to_thread(
-                        self.client.load_session, record.session_id, self.cwd, self._mcp_servers()
-                    )
-                    self.session_id = record.session_id
-                except AcpError:
-                    result = await asyncio.to_thread(self.client.new_session, self.cwd, self._mcp_servers())
-                    self.session_id = str(result.get("sessionId") or "")
-            else:
-                result = await asyncio.to_thread(self.client.new_session, self.cwd, self._mcp_servers())
-                self.session_id = str(result.get("sessionId") or "")
-        except AcpError as exc:
-            if not self._mcp_servers():
+            state = await asyncio.to_thread(self.client.state)
+        except AgentError as exc:
+            if not resume:
                 raise
-            log.warning("session/new with mcp servers failed (%s); retrying without them", exc)
-            result = await asyncio.to_thread(self.client.new_session, self.cwd, [])
-            self.session_id = str(result.get("sessionId") or "")
-        finally:
-            self.client.on_update = previous
-        self.options = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
+            # the transcript is gone (deleted, or another machine's): start fresh, say so
+            log.warning("resume %s failed for %s (%s); starting a new session", resume[:8],
+                        self.label, exc)
+            self.client = self._build_client(yolo=yolo)
+            state = await asyncio.to_thread(self.client.state)
+        self.session_id = str(state.get("sessionId") or "")
+        self.agent_version = self.agent_version or _omp_version(
+            str(self.config.get("acp", "command", "omp")))
+        self.info = {"agentInfo": {"name": "omp", "version": self.agent_version}}
+        log.info("agent up for %s: omp %s (approval=%s, session=%s%s)", self.label,
+                 self.agent_version or "?",
+                 "yolo" if self.yolo else self.config.get("agent", "approval_mode", "write"),
+                 self.session_id[:8], ", resumed" if resume == self.session_id else "")
         self.store.put(self.key, self.session_id, self.cwd)
+        await self._refresh_options(state)
         self._seed_context()
         await self._apply_preferences()
 
@@ -460,8 +488,8 @@ class ChatAgent:
             return None
 
     async def _report_compaction(self) -> None:
-        """omp logs each compaction in its transcript, and that log is the only place it shows:
-        no event crosses ACP, and the context number alone cannot tell a compaction apart from a
+        """omp logs each compaction in its transcript, and that log is the source used here: it
+        survives restarts, and the context number alone cannot tell a compaction apart from a
         report omp could not anchor. A new entry since the last turn gets one notice."""
         seen = self._transcript()
         if seen is None:
@@ -476,29 +504,95 @@ class ChatAgent:
         await self._context_notice(f"🗜️ omp compacted the context at {wib_time(latest.at)} · "
                                    f"{tokens(latest.before)} → {tokens(latest.after)}")
 
-    def _mcp_servers(self) -> list[dict[str, Any]]:
-        return resolve_mcp_servers(self.config)
+    async def _refresh_options(self, state: dict[str, Any] | None = None) -> None:
+        """Rebuild `options` from what the agent reports: model and thinking from get_state, the
+        choices from the model catalog. ompwire's own `mode` (default | plan) rides along."""
+        client = self.client
+        if client is None:
+            return
+        if state is None:
+            state = await asyncio.to_thread(client.state)
+        if not self._models:
+            try:
+                self._models = await asyncio.to_thread(client.models)
+            except AgentError as exc:
+                log.warning("model list unavailable for %s: %s", self.label, exc)
+        try:
+            levels = await asyncio.to_thread(client.thinking_levels)
+        except AgentError:
+            levels = []
+        model = state.get("model") or {}
+        current_model = f"{model.get('provider')}/{model.get('id')}" if model.get("id") else ""
+        model_values = [{"value": f"{entry.get('provider')}/{entry.get('id')}",
+                         "name": str(entry.get("name") or entry.get("id") or "")}
+                        for entry in self._models if entry.get("id")]
+        mode = str((self.options.get("mode") or {}).get("currentValue")
+                   or self.prefs().get("mode") or "default")
+        self.options = {
+            "model": {"id": "model", "currentValue": current_model, "options": model_values},
+            "thinking": {"id": "thinking", "currentValue": str(state.get("thinkingLevel") or ""),
+                         "options": [{"value": level, "name": level} for level in levels]},
+            "mode": {"id": "mode", "currentValue": mode,
+                     "options": [{"value": "default", "name": "default"},
+                                 {"value": "plan", "name": "plan"}]},
+        }
+        usage = state.get("contextUsage") or {}
+        if usage.get("contextWindow"):
+            self._on_usage(int(usage.get("tokens") or 0), int(usage.get("contextWindow") or 0))
+
+    async def _read_context(self) -> None:
+        """RPC sends no usage event: the context meter and its warning read get_state per turn."""
+        client = self.client
+        if client is None or not client.alive:
+            return
+        try:
+            state = await asyncio.to_thread(client.state)
+        except AgentError as exc:
+            log.info("context read failed chat=%s: %s", self.label, exc)
+            return
+        usage = state.get("contextUsage") or {}
+        if usage.get("contextWindow"):
+            self._on_usage(int(usage.get("tokens") or 0), int(usage.get("contextWindow") or 0))
 
     def prefs(self) -> dict[str, str]:
         """Per-chat choices that must outlive a session (/new used to reset them)."""
         return self.store.prefs(self.key)
 
     async def set_option(self, config_id: str, value: str) -> dict[str, Any]:
-        """Set one session option and keep `options` current; every setter goes through here."""
+        """Set one option and keep `options` current; every setter goes through here.
+
+        model and thinking go to the agent; `mode` is ompwire's own (plan mode, see ask()).
+        """
+        if config_id == "mode":
+            if value not in {"default", "plan"}:
+                raise AgentError(f"unknown mode {value!r}; choose default or plan")
+            changed = value != self.mode
+            self.options.setdefault("mode", {"id": "mode", "options": []})["currentValue"] = value
+            self.store.set_pref(self.key, "mode", value)
+            if changed and self.client is not None and not self.busy:
+                # the approval mode is a process argument: the same session resumes under it
+                await self.stop_process()
+                await self.ensure()
+            return self.options
+        if self.client is None:
+            raise AgentError("the agent is not running")
         self._asked.add((config_id, value))
         try:
-            result = await asyncio.to_thread(
-                self.client.set_config_option, self.session_id, config_id, value)
+            if config_id == "model":
+                provider, _, model_id = value.partition("/")
+                if not model_id:
+                    raise AgentError(f"model {value!r} is not provider/id")
+                await asyncio.to_thread(self.client.set_model, provider, model_id)
+            elif config_id == "thinking":
+                await asyncio.to_thread(self.client.set_thinking, value)
+            else:
+                raise AgentError(f"unknown option {config_id!r}")
         finally:
-            # the echo, if omp sends one, arrives before the reply; once the reply is in, a
-            # later update carrying the same value is someone else's change
+            # the echo arrives before the reply; once the reply is in, a later report carrying
+            # the same value is someone else's change
             self._loop.call_soon(self._asked.discard, (config_id, value))
-        # the reply carries the authoritative option set; without this the pickers keep
-        # showing the previous value after a restart or /new
-        updated = {opt.get("id"): opt for opt in (result.get("configOptions") or [])}
-        if updated:
-            self.options = updated
-        return result
+        await self._refresh_options()
+        return self.options
 
     async def _apply_preferences(self) -> None:
         stored = self.prefs()
@@ -506,36 +600,31 @@ class ChatAgent:
             value = stored.get(config_id) or str(self.config.get("agent", config_id, "") or "")
             if not value or self.client is None:
                 continue
+            if config_id == "model" and "/" not in value:
+                continue  # an ACP-era id without its provider; the agent's default stands
+            if value == (self.options.get(config_id) or {}).get("currentValue"):
+                continue
             try:
                 await self.set_option(config_id, value)
                 log.info("preference applied %s=%s (session=%s, source=%s, effective=%s)",
                          config_id, value, self.session_id[:8],
                          "store" if stored.get(config_id) else "config",
                          (self.options.get(config_id) or {}).get("currentValue"))
-            except AcpError as exc:
+            except AgentError as exc:
                 log.warning("set %s=%s failed: %s", config_id, value, exc)
 
     # ------------------------------------------------------- thread -> loop
-    def _on_update(self, update: AcpUpdate) -> None:
+    def _on_update(self, update: AgentUpdate) -> None:
         if update.kind == "available_commands_update":
-            names = [f"/{c.get('name')}" for c in (update.raw.get("availableCommands") or [])]
+            names = [f"/{c.get('name')}" for c in (update.raw.get("commands") or [])]
             self._loop.call_soon_threadsafe(self.advertised_commands.__setitem__, slice(None), names)
             return
-        if update.kind == "session_info_update":
+        if update.kind in {"queue_update", "session_settled", "agent_end", "notice"}:
             return
-        if update.kind in {"config_option_update", "current_mode_update"} and not self.busy:
+        if update.kind == "config_option_update" and not self.busy:
             # between turns nothing reads the turn queue; mid-turn they take it, so a notice
             # lands after the messages that came before it
             self._loop.call_soon_threadsafe(self._on_option_update, update)
-            return
-        if update.kind == "usage_update":
-            raw = update.raw
-            try:
-                used = int(raw.get("used") or 0)
-                size = int(raw.get("size") or 0)
-            except (TypeError, ValueError):
-                return
-            self._loop.call_soon_threadsafe(self._on_usage, used, size)
             return
         self._loop.call_soon_threadsafe(self._updates.put_nowait, update)
 
@@ -582,12 +671,11 @@ class ChatAgent:
             log.warning("context notice failed chat=%s", self.label, exc_info=True)
 
     # Option changes the chat should hear about when omp makes them on its own: a model falling
-    # back, plan mode ending once a plan is approved. Thinking is left out; it moves with the model.
-    WATCHED_OPTIONS = ("model", "mode")
+    # back to another. Thinking is left out; it moves with the model.
+    WATCHED_OPTIONS = ("model",)
 
-    def _on_options(self, raw: list[Any]) -> None:
+    def _on_options(self, updated: dict[str, dict[str, Any]]) -> None:
         """Runs on the loop thread. Keeps `options` current and names a change ompwire did not ask for."""
-        updated = {opt.get("id"): opt for opt in raw if isinstance(opt, dict)}
         if not updated:
             return
         changes = []
@@ -611,75 +699,74 @@ class ChatAgent:
             else:
                 self._loop.create_task(self._context_notice(text))
 
-    def _on_option_update(self, update: AcpUpdate) -> None:
-        if update.kind == "config_option_update":
-            self._on_options(update.raw.get("configOptions") or [])
-        else:
-            self._on_mode(str(update.raw.get("currentModeId") or ""))
+    def _on_option_update(self, update: AgentUpdate) -> None:
+        """model_changed or thinking_level_changed: fold the reported value into `options`."""
+        raw = update.raw
+        updated = {key: dict(value) for key, value in self.options.items()}
+        if raw.get("event") == "thinking_level_changed" and raw.get("thinkingLevel"):
+            updated.setdefault("thinking", {"id": "thinking", "options": []})[
+                "currentValue"] = str(raw["thinkingLevel"])
+        model = raw.get("model") if isinstance(raw.get("model"), dict) else {}
+        if raw.get("event") == "model_changed" and model.get("id"):
+            updated.setdefault("model", {"id": "model", "options": []})[
+                "currentValue"] = f"{model.get('provider')}/{model.get('id')}"
+        self._on_options(updated)
 
-    def _on_mode(self, mode: str) -> None:
-        """current_mode_update carries only the id; fold it into `options` like the full update."""
-        current = self.options.get("mode")
-        if not mode or current is None:
-            return
-        self._on_options([*(opt for key, opt in self.options.items() if key != "mode"),
-                          {**current, "currentValue": mode}])
+    def _on_dialog(self, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """A dialog the agent opened (reader thread). Tool approvals become buttons; any other
+        dialog has nobody to answer it in a chat, so it is cancelled and the agent carries on."""
+        if not is_approval(frame):
+            log.info("dialog cancelled chat=%s method=%s title=%r", self.label, frame.get("method"),
+                     str(frame.get("title") or "")[:120])
+            return None
+        option = self._on_permission(frame)
+        return {"value": option} if option else {"cancelled": True}
 
-    def _on_permission(self, params: dict[str, Any]) -> str | None:
+    def _on_permission(self, frame: dict[str, Any]) -> str | None:
+        """The option to answer an approval with: "Approve", "Deny", or None to cancel."""
+        tool, command = approval_detail(frame)
         policy = approval_policy(self.config)
-        title = params.get("title") or (params.get("toolCall") or {}).get("title") or "tool call"
         if policy in {"allow", "deny"}:
-            log.info("permission auto-%s chat=%s tool=%s", policy, self.label, title)
-            return pick_permission_option(params, policy)
+            log.info("permission auto-%s chat=%s tool=%s", policy, self.label, tool)
+            return APPROVE if policy == "allow" else DENY
+        if self.mode == "plan":
+            # plan mode explores and proposes; it runs with always-ask, so reads come here too
+            reads = tool in PLAN_READ_TOOLS or (tool == "bash" and allowlist.is_read_only(command))
+            log.info("permission %s in plan mode chat=%s tool=%s: %s",
+                     "allowed" if reads else "denied", self.label, tool, command[:120])
+            return APPROVE if reads else DENY
         # A read-only command is not worth a button. Asking for `git log` teaches the habit of
         # tapping Allow without reading, which is exactly what the gate exists to prevent.
-        command = str(((params.get("toolCall") or {}).get("rawInput") or {}).get("command") or "")
-        if command and allowlist.is_read_only(command):
+        if tool == "bash" and command and allowlist.is_read_only(command):
             log.info("permission auto-allow chat=%s (read-only): %s", self.label, command[:120])
-            return pick_permission_option(params, "allow")
+            return APPROVE
         token = f"perm-{uuid.uuid4().hex[:12]}"  # two requests can land in the same millisecond
+        params = {"tool": tool, "command": command, "options": list(frame.get("options") or [])}
         slot: dict[str, Any] = {"optionId": None, "params": params}
         self._pending_perm[token] = slot
         self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._ask_permission(token, params)))
-        log.info("permission requested chat=%s tool=%s options=%s", self.label, title,
-                 [o.get("kind") for o in (params.get("options") or [])])
+        log.info("permission requested chat=%s tool=%s: %s", self.label, tool, command[:120])
         deadline = time.time() + float(self.config.get("approval", "timeout", PERMISSION_TIMEOUT))
         while time.time() < deadline:
             if slot.get("optionId") is not None:
                 self._pending_perm.pop(token, None)
                 return slot["optionId"]
             time.sleep(0.2)
-        log.warning("permission timed out chat=%s tool=%s (denied)", self.label, title)
+        log.warning("permission timed out chat=%s tool=%s (denied)", self.label, tool)
         self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._expire_permission(token)))
         return None
 
-    OPTION_LABELS: ClassVar[dict[str, str]] = {
-        "allow_once": "✅ Allow once",
-        "allow_always": "✅ Always allow",
-        "reject_once": "⛔ Deny",
-        "reject_always": "⛔ Always deny",
-    }
+    OPTION_LABELS: ClassVar[dict[str, str]] = {APPROVE: "✅ Allow", DENY: "⛔ Deny"}
 
     @staticmethod
     def _permission_detail(params: dict[str, Any]) -> tuple[str, str]:
-        """Split a permission request into (headline, monospace body)."""
-        tool_call = params.get("toolCall") or {}
-        raw_input = tool_call.get("rawInput") or {}
-        kind = str(tool_call.get("kind") or params.get("kind") or "tool")
-        command = str(raw_input.get("command") or "").strip()
-        title = str(params.get("title") or tool_call.get("title") or "").strip()
-        if command:
-            return kind, command
-        if title:
-            return kind, title
-        return kind, ""
+        """(headline, monospace body): the tool and what it will run."""
+        return str(params.get("tool") or "tool"), str(params.get("command") or "")
 
-    def _option_label(self, option: dict[str, Any]) -> str:
-        kind = str(option.get("kind") or "")
-        known = self.OPTION_LABELS.get(kind)
-        if known:
-            return known
-        return str(option.get("name") or kind or "option")
+    def _option_label(self, option: str) -> str:
+        if option.startswith(f"{APPROVE} ") and "session" in option:
+            return "✅ Allow for this session"  # omp's "Approve write for this session"
+        return self.OPTION_LABELS.get(option, option)
 
     async def _ask_permission(self, token: str, params: dict[str, Any]) -> None:
         options = params.get("options") or []
@@ -797,8 +884,8 @@ class ChatAgent:
         options = slot["params"].get("options") or []
         if not (0 <= index < len(options)):
             return None
-        option = options[index]
-        slot["optionId"] = option.get("optionId")
+        option = str(options[index])
+        slot["optionId"] = option
         label = self._option_label(option)
         log.info("permission answered %s choice=%s", self.label, label)
         kind, detail = self._permission_detail(slot["params"])
@@ -825,6 +912,9 @@ class ChatAgent:
     # ------------------------------------------------------------------ turn
     async def ask(self, text: str, images: list[dict[str, Any]] | None = None,
                   resumes: int = 0, record: str | None = None) -> str:
+        text = await self._plan_turn(text)
+        if not text:
+            return ""
         await self.ensure()
         self.busy = True
         self._compact_turn = text.strip() == "/compact"
@@ -981,9 +1071,8 @@ class ChatAgent:
             entry = trace[call_id]
             posted.add(call_id)
             if entry.kind != "subagent":
-                seen = self._transcript()
-                named = seen.tools.get(call_id, "") if seen is not None else ""
-                entry.tool = tool_name(entry.kind, inputs.get(call_id, {}), named)
+                # the device path beats omp's name: "read" says less than "github"
+                entry.tool = tool_name(entry.kind, inputs.get(call_id, {}), entry.tool)
             # the start line logs the guess; this one logs the name the chat shows
             log.info("tool done %s tool=%s status=%s %r", self.label, entry.tool,
                      entry.status or "-", entry.title[:80])
@@ -1037,6 +1126,10 @@ class ChatAgent:
             await sender_task  # the buttons and files come after the last message, in order
             raw = "".join(answer)
             _, options = extract_options(raw)
+            if self.mode == "plan" and raw.strip() and not self._user_cancel:
+                # the plan's own question buttons would bypass the review; the review replaces them
+                options = list(PLAN_OPTIONS)
+                self.plan_review = "pending"
             if options:
                 await self.offer_options(options)
             await self.deliver_files(raw)
@@ -1065,7 +1158,7 @@ class ChatAgent:
                     answer.append(update.text)
                     if streams:
                         stream_delta(final=False)
-                elif update.kind in {"config_option_update", "current_mode_update"}:
+                elif update.kind == "config_option_update":
                     flush_thinking()
                     flush_segment()
                     self._on_option_update(update)
@@ -1088,18 +1181,19 @@ class ChatAgent:
                         state["tools"] += 1
                         self.tools_used += 1
                         entry.kind = str(raw.get("kind") or "tool")
+                        named = str(raw.get("toolName") or "")
                         entry.title = str(raw.get("title") or "")
                         raw_input = raw.get("rawInput") or {}
                         if not isinstance(raw_input, dict):
                             raw_input = {}
                         inputs[call_id] = raw_input
-                        entry.tool = tool_name(entry.kind, raw_input)
+                        entry.tool = tool_name(entry.kind, raw_input, named)
                         entry.command = str(raw_input.get("command") or "")
                         tasks = raw_input.get("tasks")
                         if isinstance(tasks, list) and tasks:
                             entry.kind = entry.tool = "subagent"
-                            # omp runs subagents through the `task` tool; ACP has no event of
-                            # its own for them, so the task list is the only place they appear
+                            # omp runs subagents through the `task` tool, with no event of
+                            # their own, so the task list is the only place they appear
                             entry.subagent = ", ".join(
                                 f"{item.get('name', '?')} ({item.get('agent', 'task')})"
                                 for item in tasks if isinstance(item, dict))[:80]
@@ -1137,16 +1231,15 @@ class ChatAgent:
         try:
             async with self.surface.typing():
                 result = await asyncio.to_thread(
-                    self.client.prompt, self.session_id, text,
+                    self.client.prompt, text,
                     images=images or None,
                     timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
                 )
-        except AcpError as exc:
+        except AgentError as exc:
             # A silent turn is abandoned here, so stop it in omp too: left running, its late
             # chunks land in the next turn's stream and the chat sees the answer twice.
             if self.client is not None and self.client.alive:
-                with contextlib.suppress(AcpError):
-                    self.client.cancel(self.session_id)
+                self.client.abort()
             # scheduled, not immediate: the sentinel must queue behind updates the reader thread
             # has already handed to the loop, or the last of a turn is dropped
             self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
@@ -1155,7 +1248,7 @@ class ChatAgent:
             self.busy = False
             # A crash or shutdown cut keeps the row, so the next start resumes it. A deliberate
             # stop and a silence timeout do not: the person has already been told it failed.
-            if self._user_cancel or isinstance(exc, AcpTimeout):
+            if self._user_cancel or isinstance(exc, AgentTimeout):
                 self.store.end_turn(self.key)
             raise
         except BaseException:
@@ -1168,6 +1261,7 @@ class ChatAgent:
         await finish()
         self.busy = False
         await self._report_compaction()
+        await self._read_context()
         self._compact_turn = False
         self.store.touch(self.key)
         # A cancel nobody asked for is the gateway going down (systemd signals the agent too).
@@ -1196,7 +1290,7 @@ class ChatAgent:
         if self.client is None or not self.session_id:
             return False
         self.forget_turn()
-        self.client.cancel(self.session_id)
+        self.client.abort()
         return True
 
     async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> tuple[str, str]:
@@ -1205,14 +1299,40 @@ class ChatAgent:
             return "promptRequired", ""
         try:
             outcome, reason = await asyncio.to_thread(
-                self.client.steer, self.session_id, text, images,
+                self.client.steer, text, images,
                 float(self.config.get("acp", "steer_timeout", 15.0)))
-        except AcpError as exc:
+        except AgentError as exc:
             log.warning("steer failed chat=%s: %s", self.label, exc)
             return "failed", str(exc)
         log.info("steer chat=%s outcome=%s chars=%s reason=%s", self.label, outcome, len(text),
                  reason or "-")
         return outcome, reason
+
+    async def _plan_turn(self, text: str) -> str:
+        """What a message means in plan mode; "" when it was handled without a turn.
+
+        Approve leaves plan mode and implements the plan. Deny asks for feedback, and the message
+        after it revises the plan. Anything else typed while a plan waits is feedback too, so a
+        review never blocks the chat.
+        """
+        if self.mode != "plan":
+            self.plan_review = ""
+            return text
+        if text == PLAN_OPTIONS[0] and self.plan_review == "pending":
+            self.plan_review = ""
+            await self.set_option("mode", "default")
+            await self.surface.notice("✅ plan approved · plan mode off, implementing")
+            log.info("plan approved chat=%s", self.label)
+            return PLAN_APPROVED
+        if text == PLAN_OPTIONS[1] and self.plan_review == "pending":
+            self.plan_review = "revise"
+            await self.surface.notice("✏️ what should change? Your next message revises the plan.")
+            return ""
+        if self.plan_review in {"pending", "revise"}:
+            self.plan_review = ""
+            log.info("plan feedback chat=%s chars=%s", self.label, len(text))
+            return PLAN_FEEDBACK.format(feedback=text)
+        return PLAN_PROMPT.format(prompt=text)
 
     def forget_turn(self) -> None:
         """The person ended this turn on purpose; a restart must not bring it back."""
@@ -1224,14 +1344,14 @@ class ChatAgent:
         self.store.set_pref(self.key, "yolo", "on" if yolo else "off")
         self.forget_turn()
         if self.client is not None:
-            await asyncio.to_thread(self.client.close, self.session_id)
+            await asyncio.to_thread(self.client.close)
         self.client = None
         await self.ensure(yolo=yolo)
 
     async def stop_process(self) -> None:
         """Close the agent process; the chat keeps its store and comes back on the next message."""
         if self.client is not None:
-            await asyncio.to_thread(self.client.close, self.session_id)
+            await asyncio.to_thread(self.client.close)
             self.client = None
 
     async def shutdown(self) -> None:
@@ -1254,8 +1374,14 @@ class ChatAgent:
         self._last_plan = []
         self._context_good = None
         self._context_warned = False
-        if self.client is not None and self.client.alive and self.session_id:
-            await asyncio.to_thread(self.client.close, self.session_id)
+        if self.client is not None and self.client.alive and not self.busy:
+            # the same process starts the new session; a closed one would resume the old one
+            self.session_id = await asyncio.to_thread(self.client.new_session)
+            self.store.put(self.key, self.session_id, self.cwd)
+            await self._refresh_options()
+            return self.session_id
+        if self.client is not None:
+            await asyncio.to_thread(self.client.close)
         self.client = None
         self.store.clear(self.key)
         await self.ensure()
@@ -1263,7 +1389,7 @@ class ChatAgent:
 
     async def load(self, session_id: str) -> None:
         if self.client is not None:
-            await asyncio.to_thread(self.client.close, self.session_id)
+            await asyncio.to_thread(self.client.close)
         self.client = None
         self._compactions_seen = None
         self._last_plan = []
@@ -1276,11 +1402,24 @@ class ChatAgent:
         await self.ensure()
         self._compactions_seen = None
         self._context_warned = False
-        result = await asyncio.to_thread(self.client.request, "session/fork",
-                                          {"sessionId": self.session_id, "cwd": self.cwd})
-        new_id = str(result.get("sessionId") or "")
+        new_id = await asyncio.to_thread(self.client.fork)
         if new_id:
             self.session_id = new_id
             self.store.put(self.key, new_id, self.cwd)
         return new_id
+
+    async def compact(self) -> dict[str, Any]:
+        """omp's `compact` command; returns its summary. The context numbers re-read after."""
+        await self.ensure()
+        result = await asyncio.to_thread(self.client.compact)
+        await self._refresh_options()
+        return result
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        """This cwd's omp transcripts, newest first: sessionId, updatedAt, size."""
+        return omp_sessions.listing(self.cwd)
+
+    @property
+    def mode(self) -> str:
+        return str((self.options.get("mode") or {}).get("currentValue") or "default")
 

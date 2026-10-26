@@ -14,10 +14,10 @@ import sys
 import time
 
 from . import __version__
-from .acp import AcpClient, AcpError
 from .cli import run_chat
 from .config import config_search_paths, load_config
 from .gateway_cli import cmd_gateway
+from .rpc import AgentClient, AgentError
 from .store import SessionStore
 
 
@@ -163,7 +163,7 @@ def _doctor_units(agent: str) -> None:
 
     A unit carries the PATH of the shell that generated it. When an agent lives in ~/.local/bin
     and the unit was written before that PATH was recorded, the poller starts, connects, and every
-    turn fails with "ACP command not found". The unit on disk is compared against what this
+    turn fails with "agent command not found". The unit on disk is compared against what this
     version would write, so a stale unit is named here instead of being discovered in the chat.
     """
     from pathlib import Path
@@ -230,35 +230,29 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"FAIL session store {owner}: {exc}")
             failures += 1
 
-    client = AcpClient(
+    from .engine import agent_args, mcp_server_names
+
+    client = AgentClient(
         command=command,
-        args=list(config.get("acp", "args") or []),
+        args=[*agent_args(config), "--no-session"],
         cwd=str(config.get("agent", "cwd") or os.path.expanduser("~")),
         startup_timeout=float(config.get("acp", "startup_timeout", 60.0)),
     )
     try:
-        info = client.initialize()
-        agent = info.get("agentInfo") or {}
-        caps = info.get("agentCapabilities") or {}
-        print(f"ok   ACP handshake: {agent.get('name')} {agent.get('version')} (protocol {info.get('protocolVersion')})")
-        print(f"     capabilities: loadSession={caps.get('loadSession')} sessions={sorted((caps.get('sessionCapabilities') or {}).keys())}")
-        session = client.new_session(str(config.get("agent", "cwd") or os.path.expanduser("~")), [])
-        session_id = session.get("sessionId")
-        options = {opt.get("id"): opt for opt in (session.get("configOptions") or [])}
-        print(f"ok   session/new: {str(session_id)[:8]} · config options {sorted(options)}")
-        if "model" in options:
-            print(f"     model now: {options['model'].get('currentValue')} ({len(options['model'].get('options') or [])} available)")
-        if session_id:
-            client.close_session(str(session_id))
-    except AcpError as exc:
-        print(f"FAIL ACP handshake: {exc}")
+        state = client.state()
+        model = state.get("model") or {}
+        print(f"ok   RPC handshake: session {str(state.get('sessionId'))[:8]} · model "
+              f"{model.get('provider')}/{model.get('id')} · thinking {state.get('thinkingLevel') or '-'}")
+        print(f"     models available: {len(client.models())} · "
+              f"thinking levels: {', '.join(client.thinking_levels()) or '-'}")
+    except AgentError as exc:
+        print(f"FAIL RPC handshake: {exc}")
         failures += 1
     finally:
         client.close()
 
-    if config.get("mcp", "servers"):
-        names = [str(server.get("name", "?")) for server in config.get("mcp", "servers", [])]
-        print(f"      mcp servers passed to session/new: {', '.join(names)}")
+    servers = mcp_server_names()
+    print(f"ok   mcp: omp loads {', '.join(servers) if servers else 'none'} from its own mcp.json")
 
     from . import gateways
 

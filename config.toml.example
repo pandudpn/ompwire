@@ -1,39 +1,31 @@
 # ompwire configuration
 #
-# Transport settings only. ompwire does not own memory, skills, tools or the
-# agent loop — the OMP agent does. Secrets (bot token) come from the environment,
-# see .env.example. Any key here can also be set with an OMPWIRE_* env var;
-# run `ompwire config` to see the merged result.
+# Transport settings only. ompwire does not own memory, skills, tools, MCP servers or the
+# agent loop — the OMP agent does. Secrets (bot tokens) live in each gateway's own .env.
+# Any key here can also be set with an OMPWIRE_* env var; run `ompwire config` to see the
+# merged result.
 
 [acp]
-# ACP agent to spawn. `--mode acp` is what turns omp into a protocol agent; it is
-# not listed in `omp --help`, so pin the omp version you tested against.
+# The agent process. omp runs in RPC mode; the section keeps its old name so existing
+# configs load, and an `--mode acp` left in one is read as `--mode rpc`.
 command = "omp"
-args = ["--mode", "acp"]
-startup_timeout = 60.0     # seconds for initialize / session new-or-load
-turn_timeout = 900.0       # seconds for one prompt turn
+args = ["--mode", "rpc"]
+startup_timeout = 60.0     # seconds for the agent to report ready
+turn_timeout = 900.0       # seconds of silence before a turn is given up
 
 [agent]
 cwd = "~"                  # working directory handed to the agent
-model = ""                 # empty = whatever the ACP session defaults to
-mode = ""                  # "" | "default" | "plan"
-approval_mode = "always-ask"       # forwarded to the agent as --approval-mode
-permission_policy = "ask"          # allow | deny | ask (Telegram shows buttons)
-
-[agent]
+model = ""                 # provider/id, e.g. "omniroute/chat"; empty = omp's default
+mode = "default"           # default | plan
+thinking = "xhigh"         # off | minimal | low | medium | high | xhigh
+approval_mode = "write"    # forwarded to the agent as --approval-mode
 # omp does not know it is answering inside a chat window, and on its own it writes
 # commands inline. This hint is what makes replies render as code blocks.
 append_system_prompt = """You are answering inside a Telegram chat. Format every reply as markdown: put shell commands, file paths, diffs and multi-line output inside fenced code blocks with a language tag, use short paragraphs and bullets, and never paste raw tables where a short list reads better. Keep prose tight."""
 # Set to "" to send omp's prompt untouched.
 
 [approval]
-# ask   = approval buttons in chat (waits [agent]
-# omp does not know it is answering inside a chat window, and on its own it writes
-# commands inline. This hint is what makes replies render as code blocks.
-append_system_prompt = """You are answering inside a Telegram chat. Format every reply as markdown: put shell commands, file paths, diffs and multi-line output inside fenced code blocks with a language tag, use short paragraphs and bullets, and never paste raw tables where a short list reads better. Keep prose tight."""
-# Set to "" to send omp's prompt untouched.
-
-[approval].timeout, then denies)
+# ask   = approval buttons in chat (waits [approval].timeout, then denies)
 # allow = auto-approve every tool call
 # deny  = auto-reject every tool call
 policy = "ask"
@@ -45,7 +37,7 @@ file = "~/.local/state/ompwire/ompwire.log"   # empty = stderr only
 
 [session]
 store = "~/.local/state/ompwire/sessions.db"
-idle_timeout = 1800        # drop the ACP subprocess after this many idle seconds
+idle_timeout = 1800        # stop a chat's agent process after this many idle seconds
 
 [stream]
 enabled = true
@@ -54,30 +46,5 @@ show_usage = false       # per-turn token line; use /usage instead
 min_gap = 1.0              # seconds between messages; Telegram allows about one a second per chat
 compaction_warn = 0.6     # fraction of the context window that triggers one ⚠️ notice per crossing
 
-[mcp]
-# Where the session's MCP servers come from:
-#   none    = no MCP servers
-#   inline  = the [[mcp.servers]] entries below
-#   mcp-hub = an mcp-hub servers.yaml (needs PyYAML: pip install ompwire[hub])
-source = "inline"
-hub_path = "~/mcp-hub/servers.yaml"
-include = []      # empty = every enabled server in the hub
-exclude = []      # names to leave out
-
-# Patch one hub entry without editing the shared hub file, e.g. point a server at
-# a working binary when its npx cache is broken:
-# [mcp.overrides.mongo-nonprod]
-# command = "/home/you/.local/share/ompwire/mcp/mongo/node_modules/.bin/mongodb-mcp-server"
-# args = []
-
-[[mcp.servers]]
-# Inline MCP server, passed straight through to session/new. Anything the agent
-# needs — memory, database, issue tracker — belongs here, not in this repo.
-name = "context7"
-command = "npx"
-args = ["-y", "@upstash/context7-mcp"]
-
-[telegram]
-bot_token = ""             # secret: set TELEGRAM_BOT_TOKEN instead
-allowed_users = []         # numeric Telegram user ids; empty = nobody can talk to it
-home_channel = ""
+# MCP servers are omp's: list them in ~/.omp/agent/mcp.json (`ompwire setup` can add one).
+# The agent loads them itself, so a hub there starts only the servers a turn calls.

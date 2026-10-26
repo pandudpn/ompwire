@@ -31,15 +31,15 @@ from typing import Any
 
 from . import __version__, engine, omp_config, omp_sessions
 from . import schedules as schedule_lib
-from .acp import AcpError
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
 from .audience import GROUP, PRIVATE, Audience
 from .config import Config, approval_policy, save_override
-from .engine import RESUME_PROMPT, mcp_label, resolve_mcp_servers
+from .engine import RESUME_PROMPT, mcp_label, mcp_server_names
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
 from .gateways import remember_chat, user_id
+from .rpc import AgentError
 from .telegram import COMMANDS, FORWARD_HINT, configure_logging
 from .wa_client import (
     GROUP_SERVER,
@@ -264,7 +264,7 @@ class Transport:
                     try:
                         await agent.ask(payload.prompt, images=payload.images or None,
                                         resumes=payload.resumes, record=payload.original)
-                    except AcpError as exc:
+                    except AgentError as exc:
                         if not self.stopping:
                             await self.send_text(chat, f"agent error: {exc}")
                     except Exception as exc:
@@ -275,7 +275,7 @@ class Transport:
                         await agent.load(payload)
                         await self.send_text(chat, self.session_card(agent, "⏪ resumed",
                                                                      "history lives in the agent session"))
-                    except AcpError as exc:
+                    except AgentError as exc:
                         await self.send_text(chat, f"resume failed: {exc}")
             finally:
                 queue.task_done()
@@ -463,7 +463,7 @@ class Transport:
                                                 [("previous", previous)],
                                                 "selection applied" if current != previous
                                                 else "already selected"))
-            except AcpError as exc:
+            except AgentError as exc:
                 await self.send_text(chat, f"{config_id} failed: {exc}")
             return True
         if choice.kind == "policy":
@@ -479,6 +479,12 @@ class Transport:
             self.answer_armed.discard(chat)
             await self._route(chat, agent, incoming)
             await self._release_held(chat)
+            return
+        if agent.pending_options and agent.plan_review == "pending":
+            # a plan waits for review: whatever is typed now is feedback on it, not a new topic
+            agent.pending_options = []
+            await agent.surface.retire_options("feedback sent; revising the plan")
+            await self._route(chat, agent, incoming)
             return
         if agent.pending_options:
             held = self.held.setdefault(chat, [])
@@ -637,7 +643,7 @@ class Transport:
 
     async def cmd_sessions(self, incoming: Incoming, agent: engine.ChatAgent, _args: list[str]) -> None:
         await agent.ensure()
-        data = await asyncio.to_thread(agent.client.list_sessions, agent.cwd)
+        data = {"sessions": await agent.list_sessions()}
         rows = (data.get("sessions") or [])[:10]
         if not rows:
             await self.reply(incoming, "no sessions recorded")
@@ -652,7 +658,7 @@ class Transport:
             await self.reply(incoming, "usage: /resume <session-id>")
             return
         await agent.ensure()
-        data = await asyncio.to_thread(agent.client.list_sessions, agent.cwd)
+        data = {"sessions": await agent.list_sessions()}
         match = next((str(r.get("sessionId")) for r in (data.get("sessions") or [])
                       if str(r.get("sessionId", "")).startswith(args[0])), None)
         if match is None:
@@ -672,7 +678,7 @@ class Transport:
             return
         try:
             await agent.fork()
-        except AcpError as exc:
+        except AgentError as exc:
             await self.reply(incoming, f"fork failed: {exc}")
             return
         await self.send_text(incoming.chat, self.session_card(agent, "🌿 forked",
@@ -802,7 +808,7 @@ class Transport:
             await self.reply(incoming, "no process running")
             return
         agent.forget_turn()
-        await asyncio.to_thread(agent.client.close, agent.session_id)
+        await agent.stop_process()
         agent.client = None
         await self.send_text(incoming.chat, "agent process stopped")
 
@@ -947,7 +953,7 @@ class Transport:
             rows.append(("agent", f"failed: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
         try:
-            servers = [str(server.get("name")) for server in resolve_mcp_servers(self.config)]
+            servers = mcp_server_names()
         except Exception:
             servers = []
         rows += [("approval", approval_policy(self.config)),

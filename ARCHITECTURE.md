@@ -6,7 +6,7 @@ back*, and where the seams are.
 
 ```
 +--------+        +---------+        +------------------+        +----------------------+
-| chat   | <----> | ompwire | <----> | omp --mode acp   | <----> | tools, skills, MCP   |
+| chat   | <----> | ompwire | <----> | omp --mode rpc   | <----> | tools, skills, MCP   |
 | surface|        |         | stdio  | loop, memory     |        | providers, files     |
 +--------+        +---------+        +------------------+        +----------------------+
                        |
@@ -19,12 +19,12 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 
 | Layer | Owns | When it fails |
 | --- | --- | --- |
-| Engine (`engine.py`) | the turn itself: ACP session lifecycle, update drain, pacing, permissions, schedules, files. Speaks `Surface`, never a platform | a turn fails: recorded, the next gateway start resumes it |
+| Engine (`engine.py`) | the turn itself: agent process lifecycle, update drain, pacing, approvals, plan mode, schedules, files. Speaks `Surface`, never a platform | a turn fails: recorded, the next gateway start resumes it |
 | Transport (`telegram.py`, `tg_*.py`) | Telegram routing and buttons: handlers, `TelegramSurface` (posting, cards, approvals), `TelegramDelivery`, pickers, per-chat prefs, what addresses the bot in a group, the `tg:` key prefix | markup is rejected (resent as plain text) or a send fails (logged as a WARNING, the turn goes on) |
 | Transport (`whatsapp.py`, `wa_*.py`) | WhatsApp: the linked device (neonize), what addresses the bot in a group, numbered answers in place of buttons, `WhatsAppSurface`, the outbox for scheduled reports, the `wa:` key prefix | WhatsApp ends the link (logged out, new QR asked): the gateway stops and says to relink; a send fails: logged as a WARNING, the turn goes on |
 | Audience (`audience.py`) | who is answered where, for every platform: allowed people, listed groups and channels, each chat's mode (`mention`, `all`, `read`) | a chat or person it does not know: dropped without a reply, the reason in the journal |
 | `sessions.db` (`store.py`) | chat key to session id, prefs, approval override, turns a restart left unfinished (read per key prefix) | unreadable: a new agent session, the chat key is kept |
-| ACP client (`acp.py`) | stdio framing, request ids, timeouts | the subprocess dies mid-turn: respawn, then `session/load` on the same id |
+| Agent client (`rpc.py`) | omp's RPC wire: framing, command ids, timeouts, translating events into updates | the subprocess dies mid-turn: respawn with `--resume` on the same session id |
 | Agent (`omp`) | loop, tools, MCP, compaction, skills, memory, prompt | provider or tool error: reported to the chat as the agent's own text |
 | Delivery (`delivery.py`) | how a scheduled run's report reaches a person: one `Delivery` per gateway kind, resolved from the gateway stored on the schedule | no implementation for that kind: the report fails, and the schedule status carries the reason |
 | Catalogs (`catalog.py`) | model, mode, thinking, provider, skill lists | the agent will not answer a probe: an empty list, and the command says so instead of inventing options |
@@ -48,7 +48,7 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `gateway_cli.py` | `ompwire gateway ...`: start, remove, list, status, logs, and `_run`, the unit's entry point |
 | `setup.py` | the wizard, `.env` writing token normalisation, `bot_identity` verification |
 | `update.py` | install mode detection, update, restart of running gateways |
-| `acp.py` | the ACP client over stdio |
+| `rpc.py` | the client for `omp --mode rpc` over stdio |
 | `gateways.py` | gateway definitions, credentials per gateway, selection rules |
 | `config.py` | layered config: defaults, `config.toml`, environment, redaction of dumps |
 | `service.py` | systemd unit rendering, start, stop, remove, state |
@@ -57,7 +57,6 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 | `uninstall.py` | what to remove, and what to leave alone |
 | `mdrender.py` | markdown to Telegram HTML |
 | `status.py` | one screen of current state, no handshake |
-| `mcp_hub.py` | `servers.yaml` to `session/new` `mcpServers` |
 | `login.py` | provider login on a pty, driven from chat |
 | `store.py` | sqlite: chat key to session id, per-chat prefs, unfinished turns per transport prefix |
 | `format.py` | neutral helpers: `uptime`, WIB clock, token counts (`58.6k`), the tool-trace clip |
@@ -79,11 +78,11 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 1. Telegram delivers an update. The transport drops it unless the sender is on the gateway's
    allow list. A message sent while a turn runs is steered into it or queued, with a reply
    saying which; one sent while a question is open is held until the question is settled.
-2. The chat key resolves to a session id in `sessions.db`, or a new ACP session is created.
-3. Stored prefs (model, mode, thinking, yolo) are replayed onto the session with
-   `session/set_config_option`.
-4. The message becomes a `session/prompt`. Images arrive as ACP image content blocks.
-5. `session/update` frames stream back. Nothing is edited after it is sent: the prose written
+2. The chat key resolves to a session id in `sessions.db`. The agent process starts with
+   `--resume <id>`, or with a new session when there is none or the transcript is gone.
+3. Stored prefs (model, thinking) are replayed with `set_model` and `set_thinking_level`.
+4. The message becomes a `prompt` command. Images travel as base64 image blocks on it.
+5. Event frames stream back, translated into updates. Nothing is edited after it is sent: the prose written
    before each tool call is posted as a message when the tool call starts, each tool call is
    posted as its own message when it finishes (with its output), and whatever is left goes out
    when the turn ends. Every message's timestamp is when that step happened. Telegram allows
@@ -91,8 +90,9 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
    `stream.min_gap` apart; tool traces that finish while it waits (the gap, or a flood window)
    go out together as one message, and a trace dropped after flood control is named in the
    chat ("… N tool call(s) not shown") instead of disappearing.
-6. `session/request_permission` becomes an inline keyboard. The answer is an option id from
-   what the agent offered, plus a persisted override so the same tool is not asked twice.
+6. An approval arrives as an `extension_ui_request` `select` (`Approve` / `Deny`) and becomes an
+   inline keyboard. The answer is the label omp offered, plus a persisted override so the same
+   tool is not asked twice.
 7. Every action lands in a rotating log with token-shaped strings redacted before the handler
    sees them.
 8. If the agent ends with `<<options: a | b>>`, the marker is stripped and turned into buttons,
@@ -103,7 +103,7 @@ One `omp` subprocess per conversation, one `ompwire` process per gateway. Nothin
 
 ## Attachments
 
-ACP has no way for the agent to attach a file and no general attachment block going the other way,
+omp's RPC has no way for the agent to attach a file and no general attachment block going the other way,
 so the transport owns both directions.
 
 Out: the agent names a path in its reply with `<<file: /abs/path>>`, one marker may carry several
@@ -118,8 +118,8 @@ that vanishes silently looks like a model that forgot.
 In: a document from the chat is written to `files.incoming_dir/<chat id>/` under a name reduced to
 `[A-Za-z0-9._-]` and without overwriting an earlier file, then the agent is told the path, the
 mime type and the size. The agent has a shell, so a readable path beats a content type the
-transport would have to guess at. Images keep their own path: they go to the agent as an ACP
-image content block.
+transport would have to guess at. Images keep their own path: they go to the agent as an image
+block on the `prompt` command.
 
 The markers are documented to the agent in `PROTOCOL_HINT`, appended to the session on top of the
 configured `append_system_prompt`. There is no switch and no `[files] enabled` key: a reply that
@@ -175,13 +175,16 @@ systemd already agreed to run.
 
 ## Who stops the agent
 
-`session/request_permission` is the only place a human can intervene, and omp only sends it in
-`write` and `yolo` (which sends none, since nothing is asked). Under `always-ask` and
-`always-ask-cached` a write is denied inside omp, with no request and therefore no button: the
-transport cannot ask for something it is never told about. `write` is the working gate.
+An approval is the only place a human can intervene. omp asks through an `extension_ui_request`
+`select` whose title names the tool (`Allow tool: bash\nCommand: …`, `Allow tool: write\nPath: …`)
+and whose options are `Approve`, `Deny` and often `Approve <tool> for this session`. In `write`
+mode omp asks before a shell command and lets its own write tool through; `yolo` asks nothing.
+Plan mode respawns the process with `--approval-mode=always-ask` so that every tool asks, then
+answers reads itself and denies the rest (see Plan mode below). Any other dialog (`input`,
+`editor`, a free-form question) is cancelled, since nobody in the chat is shown it.
 
-A denial is the safe default: the request expires after `[approval] timeout`, the slot reports
-`cancelled`, and omp fails that one tool call instead of the turn. That is why an approval left
+A denial is the safe default: the request expires after `[approval] timeout`, ompwire answers
+`Deny`, and omp fails that one tool call instead of the turn. That is why an approval left
 unanswered at 04:00 cannot silently approve itself.
 
 Not every shell command reaches a person. `allowlist.py` names the commands that cannot change
@@ -196,8 +199,9 @@ allows by design. The appended prompt is what keeps that honest, and `yolo` remo
 
 ## What the stream carries
 
-`session/update` notifications arrive with these `sessionUpdate` values, and each one has a
-decision behind it:
+omp's RPC events (`message_update`, `tool_execution_*`, `model_changed`, ...) are translated in
+`rpc.py` into the update kinds below, so the renderer and its tests never see the wire. Each one
+has a decision behind it:
 
 | Kind | What the transport does |
 | --- | --- |
@@ -205,23 +209,22 @@ decision behind it:
 | `agent_thought_chunk` | the reasoning, shown only with `/reasoning on`, kept to its tail |
 | `tool_call`, `tool_call_update` | one message per call, posted when it completes or fails, when `stream.show_tool_calls` is on; headed by the tool's own name and an icon |
 | `plan` | the agent's todo list, posted as a fresh checklist each time it changes; a repeat (omp's reminder) and the emptied list at the end are skipped |
-| `usage_update` | fills `agent.context` and drives the ⚠️ warning at `stream.compaction_warn`; a report under 5% of the last good one is held, since omp can anchor it on a few hundred tokens after `session/load`; never enters the turn queue |
-| `session_info_update` | read for accounting, never rendered |
 | `available_commands_update` | fills `/commands` |
-| `config_option_update`, `current_mode_update` | keep the pickers current; a model or mode change the chat did not ask for (a fallback, plan mode ending after approval) is posted as `⚙️ omp switched …`, while the echo of a chat's own `/model` or `/mode` stays silent |
+| `config_option_update` | from `model_changed` / `thinking_level_changed`; keeps the pickers current; a model change the chat did not ask for (a fallback) is posted as `⚙️ omp switched …`, while the echo of a chat's own `/model` stays silent |
 
-ACP gives a tool call only a coarse `kind`, and omp files most of its tools under `other` (`wait`,
-`ask`, `lsp`, every MCP tool) and its `todo` tool under `think`. omp's transcript records each call
-with its real name under the same id, so when a call finishes the transport reads the name from
-there (the same incremental read `/usage` uses). Until the transcript has it, only kinds that stand
-for one tool are named (`think` is `todo`, `fetch` is `web_search`); a call whose path is `xd://x`
-is named after the device. A finished `todo` call is held for one update: omp sends the list it
-produced right after, and the checklist replaces the trace. An omp that sends no list still gets
-the trace.
+RPC sends no usage event. After each turn the engine reads `get_state.contextUsage`, which fills
+`agent.context` and drives the ⚠️ warning at `stream.compaction_warn`; a report under 5% of the
+last good one is held, since omp can anchor it on a few hundred tokens after a resume.
+
+omp names the tool on every event (`toolName`), MCP tools included, so the trace is headed by the
+tool's own name; a call whose path is `xd://x` is named after the device instead of `read`. A
+finished `todo` call is held for one update: the todo result carries the whole list
+(`details.phases`), sent on as a `plan` update right after, and the checklist replaces the trace.
+A todo call that produces no list still gets the trace.
 
 A subagent has no event type of its own. omp runs one through its `task` tool, so a subagent shows
-up as a `tool_call` whose `rawInput.tasks[]` names it. The ACP `kind` for that call is `other`,
-which tells a reader nothing, so the transport relabels it `subagent` and prints the name plus the
+up as a `tool_call` named `task` whose `rawInput.tasks[]` names it. That name tells a reader
+little, so the transport relabels it `subagent` and prints the name plus the
 agent type. What the subagent is doing arrives on the same call as `tool_call_update` events whose
 `content` text reads `Spawned agent X`, `Running agent X`, `Background task X complete`; those are
 kept as a short trail, deduplicated and capped at four. The final `rawOutput` carries the
@@ -251,37 +254,51 @@ in three places, and uninstall never does:
 
 | Path | What ompwire does |
 | --- | --- |
-| `~/.omp/agent/mcp.json` | written once by setup with the MCP servers |
+| `~/.omp/agent/mcp.json` | written by setup when an MCP server is added; omp loads it on its own, ompwire injects nothing |
 | `~/.omp/agent/sessions/<cwd>/<ts>_<id>.jsonl` | read incrementally for `/usage` totals and compaction notices |
 | `~/.omp/agent/config.yml` | the `compaction:` block only, through `/compaction`, after a one-time `.ompwire-bak` |
 
-## The ACP surface used
+## The RPC surface used
 
-Verified against omp 18.12.6. `omp --mode acp` is not documented in `omp --help`, which is why
-`tests/test_acp_contract.py` asserts these shapes: an undocumented mode can change without a
-deprecation cycle.
+Verified against omp 18.12.6. RPC is newline-delimited JSON, not JSON-RPC: a command carries an
+`id` and gets a `response` with the same id; everything else is an event frame. The handshake
+negotiates protocol v2, which splits large frames into chunks that `rpc.py` reassembles.
 
-| Method | Direction | Used for |
+| Command or event | Direction | Used for |
 | --- | --- | --- |
-| `initialize` | to agent | handshake, agent name, `loadSession`, capabilities |
-| `session/new` | to agent | open a conversation, read `configOptions` |
-| `session/load` | to agent | resume after a restart |
-| `session/prompt` | to agent | one turn, returns `stopReason` and usage |
-| `session/cancel` | to agent | `/stop` |
-| `session/set_config_option` | to agent | model, mode, thinking |
-| `session/fork` | to agent | `/fork` |
-| `session/list` | to agent | `/sessions` |
-| `session/close` | to agent | idle eviction |
-| `_session/steering` | to agent | a message sent mid-turn, and `/steer` (request, not notification) |
-| `session/update` | from agent | prose chunks, tool calls, usage, available commands |
-| `session/request_permission` | from agent | approval prompts |
+| `--resume <id>` (argument) | to agent | reopen a session after a restart, `/resume`, a mode switch |
+| `get_state` | to agent | session id and file, model, thinking level, `contextUsage` |
+| `prompt` | to agent | one turn; acknowledged on admission, ended by `prompt_result` |
+| `steer` | to agent | a message sent mid-turn, and `/steer` |
+| `abort` | to agent | `/stop`; the turn ends with status `aborted` |
+| `set_model`, `get_available_models` | to agent | `/model` |
+| `set_thinking_level`, `get_available_thinking_levels` | to agent | `/thinking` |
+| `new_session`, `fork`, `compact` | to agent | `/new`, `/fork`, `/compact` |
+| `message_update`, `tool_execution_*` | from agent | prose, reasoning, tool calls and their output |
+| `model_changed`, `thinking_level_changed` | from agent | a switch the chat did not ask for |
+| `available_commands_update` | from agent | `/commands` |
+| `extension_ui_request` | from agent | approvals (`select`); every other dialog is cancelled |
+
+`/sessions` has no command behind it: omp's transcripts are listed from disk for the chat's cwd.
+`/plan` has no RPC handler either (omp's plan review is TUI-only), which is why plan mode is
+ompwire's own.
+
+## Plan mode
+
+`/mode plan` is a preference, not an omp setting. It respawns the agent with
+`--approval-mode=always-ask` on the same session and wraps the next message in a planning
+instruction. While it is on, reads (`read`, `grep`, `find`, `lsp`, `web_search`, `todo`, and
+read-only shell commands) are approved without a button and every other tool is denied, so the
+agent can look but not change anything. The answer ends with two buttons: ✅ Approve plan switches
+back to default mode and tells the agent to implement it; ✏️ Deny & revise asks what to change,
+and the next message (typed straight away works too) goes back as feedback for a revised plan.
 
 ## Decisions and their costs
 
 | Decision | Alternative rejected | Why | What it costs |
 | --- | --- | --- | --- |
 | Transport only | a chat client with its own loop and tools | OMP already owns the loop, the tools and compaction; a second copy is where frontends rot | features that need agent state must go upstream |
-| ACP over stdio | calling provider HTTP APIs here | the agent authenticates itself, so no provider keys live in this repo | the ACP shape is a contract to follow |
+| omp's RPC mode over stdio | ACP; calling provider HTTP APIs here | RPC loads omp's own `mcp.json` lazily, names every tool, and costs a fraction of ACP's memory per chat (about 390 MB against 2 GB measured); the agent authenticates itself, so no provider keys live in this repo | RPC is not a versioned protocol: `rpc.py` is the contract, and plan review has to live here |
 | One subprocess per conversation | one shared agent with multiplexed sessions | a stuck turn cannot block another chat, and `cwd` is per chat | memory per live conversation |
 | SQLite for routing | a database server | one row per chat, read once per message | no concurrent machines, no shared history |
 | HTML `parse_mode` | MarkdownV2 | MarkdownV2 needs 18 characters escaped, HTML needs 3, and `<pre>` content is never parsed | markup is built, not pasted |
@@ -302,32 +319,26 @@ deprecation cycle.
   from it, and an unlisted group's updates are dropped. `my_chat_member` (the bot added to a
   chat) is the one update that tells the owner the id; polling asks for it with
   `allowed_updates=Update.ALL_TYPES`, since it is not in Telegram's default set.
-- **`session/load` replays the transcript.** A resumed session re-emits earlier assistant
-  messages as `session/update` frames, so a frontend with its update handler still attached
-  dumps every old answer into the chat. `ChatAgent.ensure` mutes updates while loading.
-- **Permissions are option ids, not booleans.** `session/request_permission` returns options
-  with a `kind` (`allow_once`, `reject_once`, ...) and the reply is
-  `{outcome: {outcome: "selected", optionId}}`. Always pick from what the agent offered.
-- **Model selection is a config option.** There is no model field in ACP; it is the
-  `configOptions` entry with `id = "model"`, set through `session/set_config_option`.
-- **A second prompt into a running turn cancels it; steering is a request, not a notification.**
-  Measured: `session/prompt` while a turn is running ends that turn with `stopReason:
-  "cancelled"`. `_session/steering` works, but only as a JSON-RPC *request*
-  (`{sessionId, prompt: [content blocks]}`): omp's `extNotification` handler is empty, which is
-  why the earlier notification-based `/steer` never showed up in a reply. The request answers
-  `injected` (the running turn reads it, verified on omp 18.12.6), `promptRequired` (nothing was
-  running) or `failed`. A message sent while a turn runs is steered by default
-  (`[telegram] busy_message = "queue"` restores the FIFO); anything not injected falls back to
-  the queue, and `/queue` always queues. The message gets a reply saying which: `↪️ steered` or
-  `📥 queued #n`.
-- **Compaction is read from omp's transcript, not inferred from usage.** No compaction event
-  crosses ACP in omp 18.12.6 (`auto_compaction_*` reach RPC mode only; asked upstream in
-  can1357/oh-my-pi#16969). omp writes a `compaction` entry with `tokensBefore`/`tokensAfter` to
-  the session JSONL, so after each turn a new entry gets one `🗜️` notice. Entries present when
-  the process starts are not announced, and a `/compact` turn stays quiet because omp reports
-  it itself. `/usage` sums the same file, so its totals survive restarts and `/resume`.
-- **A permission answer must not block the reader.** The reply to `session/request_permission`
-  can take minutes; it is answered on its own thread so a steer sent during an approval returns.
+- **`--resume` with an unknown id kills the process.** omp exits with `Session … not found`
+  instead of starting fresh. `ChatAgent.ensure` catches that and starts a new session, so a
+  transcript deleted by hand costs the history, not the chat.
+- **Approvals are labels, not booleans.** The reply to a `select` is
+  `{"type": "extension_ui_response", "id", "value": "Approve"}`, or `{"cancelled": true}`.
+  Always answer with a label omp offered.
+- **Model selection is provider plus id.** `set_model` takes `{provider, modelId}`; the chat
+  shows and stores `provider/id`, so a stored value without the slash is skipped, not guessed.
+- **Steering goes through `steer`, never a second `prompt`.** `steer` is queued into the running
+  turn and shows up as a `queue_update`; nothing running answers `promptRequired`. A message sent
+  while a turn runs is steered by default (`[telegram] busy_message = "queue"` restores the
+  FIFO); anything not injected falls back to the queue, and `/queue` always queues. The message
+  gets a reply saying which: `↪️ steered` or `📥 queued #n`.
+- **Compaction is read from omp's transcript.** omp writes a `compaction` entry with
+  `tokensBefore`/`tokensAfter` to the session JSONL, so after each turn a new entry gets one `🗜️`
+  notice. Entries present when the process starts are not announced, and a `/compact` turn stays
+  quiet because omp reports it itself (`command_output`). `/usage` sums the same file, so its
+  totals survive restarts and `/resume`.
+- **An approval answer must not block the reader.** The reply to an `extension_ui_request` can
+  take minutes; it is answered on its own thread so a steer sent during an approval returns.
 - **A turn cut by a restart is resumed, per transport.** `ask()` writes an `inflight` row before
   the prompt and deletes it when the turn ends, unless it ended `cancelled` without `/stop`,
   `/kill` or `/new`: that is systemd signalling the agent along with the gateway. A transport
@@ -339,10 +350,6 @@ deprecation cycle.
   of discarded.
 - **Keep the process warm.** Each turn carries a large baseline of input tokens (the agent's own
   prompt), mostly cache-served on later turns. Spawning per message throws that away.
-- **`mcpServers` needs `env` as a list.** An entry whose `env` is an object, or missing, fails
-  `session/new` with `Internal error / undefined is not an object`. Dict-shaped config is
-  converted automatically, and a failure falls back to a session without MCP servers rather than
-  blocking the chat.
 - **Gateways share the agent, not the state.** Session keys are `tg:<chat id>`, and the same
   person talking to two bots has the same chat id in both. With one shared `sessions.db` the two
   bots resumed each other's session, and `/new` in one reset the other. `gateways.config_for()`
@@ -397,7 +404,7 @@ The unit is generated, never checked in: it needs this machine's `ompwire` path,
 working directory. `Restart=always`, `RestartSec=5`, `MemoryMax=4G` per gateway. It also carries
 `Environment=PATH=` built from where this install found the agent and `ompwire`, because a systemd
 user unit does not inherit an interactive shell's PATH: without it the poller connects and then
-every turn fails with `ACP command not found`.
+every turn fails with `agent command not found`.
 
 Because the unit is generated, `gateway restart` rewrites it before restarting. A plain
 `systemctl restart` would bring back the same process with the same stale paths, which is exactly

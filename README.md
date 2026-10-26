@@ -20,7 +20,7 @@
 </p>
 
 ```
-chat platforms  ─>  ompwire  <->  omp --mode acp  ->  tools, skills, MCP servers
+chat platforms  ─>  ompwire  <->  omp --mode rpc  ->  tools, skills, MCP servers
 ```
 
 Ask from your phone, then approve the deploy when the agent asks. ompwire carries the
@@ -124,7 +124,7 @@ The full threat model is in [SECURITY.md](SECURITY.md).
 
 - [Guide](docs/guide.md): gateways and platforms, chat commands, approvals, schedules,
   configuration, troubleshooting
-- [Architecture](ARCHITECTURE.md): how a turn flows, the ACP surface used, decisions and
+- [Architecture](ARCHITECTURE.md): how a turn flows, the RPC surface used, decisions and
   their costs
 - [Rules](RULES.md): how to change this repo without breaking a running install
 - [Security](SECURITY.md): threat model and private reporting

@@ -4,7 +4,7 @@ Design rule: this module owns transport concerns only (polling, posting each ste
 approvals, steering and queueing, session routing). Anything the agent can do itself is
 forwarded as a prompt.
 
-Threading model: the ACP client is synchronous and talks on its own reader thread;
+Threading model: the agent client is synchronous and talks on its own reader thread;
 Telegram is asyncio. The bridge is one asyncio.Queue fed by `loop.call_soon_threadsafe`.
 An approval is answered on its own thread, which waits for the button while the reader
 keeps delivering updates.
@@ -50,7 +50,6 @@ from telegram.ext import (
 
 from . import __version__, engine, omp_config, omp_sessions
 from . import schedules as schedule_lib
-from .acp import AcpError
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
 from .audience import CHANNEL, GROUP, PRIVATE, Audience
@@ -59,11 +58,12 @@ from .engine import (
     PERMISSION_TIMEOUT,
     RESUME_PROMPT,
     mcp_label,
-    resolve_mcp_servers,
+    mcp_server_names,
 )
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
 from .gateways import remember_chat
+from .rpc import AgentError
 from .tg_html import card, change, esc, help_sections
 from .tg_login import LoginMixin
 from .tg_pickers import PickerMixin
@@ -314,7 +314,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                                         images=getattr(payload, "images", None),
                                         resumes=int(getattr(payload, "resumes", 0)),
                                         record=getattr(payload, "original", None))
-                    except AcpError as exc:
+                    except AgentError as exc:
                         if not self.stopping:  # the shutdown killed it; the next start resumes
                             await message.reply_text(f"agent error: {exc}")
                     except Exception as exc:
@@ -329,7 +329,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                             self.session_card(agent, "⏪ resumed", "history lives in the agent session"),
                             parse_mode=ParseMode.HTML,
                         )
-                    except AcpError as exc:
+                    except AgentError as exc:
                         await message.reply_text(f"resume failed: {exc}")
             finally:
                 queue.task_done()
@@ -383,6 +383,12 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             self.answer_armed.discard(chat_id)
             await self._route(chat_id, agent, payload, message)
             await self._release_held(chat_id)
+            return
+        if agent.pending_options and agent.plan_review == "pending":
+            # a plan waits for review: whatever is typed now is feedback on it, not a new topic
+            agent.pending_options = []
+            await agent.surface.retire_options("feedback sent; revising the plan")
+            await self._route(chat_id, agent, payload, message)
             return
         if agent.pending_options:
             # the agent is waiting on its question; a message about something else must not
@@ -652,7 +658,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                                    "applies to every omp client, new agent processes"))
 
     async def on_photo(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Forward a Telegram photo to the agent as an ACP image block."""
+        """Forward a Telegram photo to the agent as an image block on the prompt."""
         if not self._authorized(update):
             return await self._deny(update)
         message = update.effective_message
@@ -683,7 +689,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
     async def on_document(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Save a document from the chat and hand the agent its path.
 
-        ACP has no general attachment block, and the agent has a shell: a readable path is more
+        omp's RPC has no general attachment block, and the agent has a shell: a readable path is more
         useful than a content type the transport would have to guess at.
         """
         if not self._authorized(update):
@@ -732,7 +738,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             return await self._deny(update)
         agent = self.agent_for(update.effective_chat.id)
         await agent.ensure()
-        data = await asyncio.to_thread(agent.client.list_sessions, agent.cwd)
+        data = {"sessions": await agent.list_sessions()}
         rows = (data.get("sessions") or [])[:10]
         if not rows:
             return await update.effective_message.reply_text("no sessions recorded")
@@ -754,7 +760,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         prefix = ctx.args[0]
         agent = self.agent_for(update.effective_chat.id)
         await agent.ensure()
-        data = await asyncio.to_thread(agent.client.list_sessions, agent.cwd)
+        data = {"sessions": await agent.list_sessions()}
         match = next((str(r.get("sessionId")) for r in (data.get("sessions") or [])
                       if str(r.get("sessionId", "")).startswith(prefix)), None)
         if match is None:
@@ -783,7 +789,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                 self.session_card(agent, "🌿 forked", "context copied into a new session id"),
                 parse_mode=ParseMode.HTML,
             )
-        except AcpError as exc:
+        except AgentError as exc:
             await update.effective_message.reply_text(f"fork failed: {exc}")
 
     async def cmd_cwd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -878,7 +884,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
     async def cmd_reasoning(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Show or hide the agent's thinking.
 
-        ACP sends it as agent_thought_chunk and the transport used to drop it. Off by default:
+        omp streams it as reasoning (agent_thought_chunk here) and the transport used to drop it. Off by default:
         at thinking=xhigh the thought stream is longer than the answer, and reading it every turn
         is noise. On demand, it is the most direct way to see what the agent is actually weighing.
         """
@@ -964,7 +970,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         agent = self.agent_for(update.effective_chat.id)
         if agent.client is not None:
             agent.forget_turn()
-            await asyncio.to_thread(agent.client.close, agent.session_id)
+            await agent.stop_process()
             agent.client = None
             log.info("agent killed by user chat=%s", update.effective_chat.id)
             await self.announce(update.effective_chat.id, "agent process stopped")
@@ -1154,7 +1160,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                     await self._show_config(agent, chat_id, config_id, screen="l",
                                             provider=a, page=b, edit=query.message)
                     return
-            except (AcpError, IndexError) as exc:
+            except (AgentError, IndexError) as exc:
                 await query.answer("failed", show_alert=False)
                 await self.app.bot.send_message(chat_id, f"{config_id} failed: {exc}")
                 return
@@ -1333,13 +1339,12 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         except Exception as exc:
             rows.append(("agent", f"failed: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
-        # The resolved list, not config["mcp"]["servers"]: with source = "mcp-hub" that inline
-        # list is empty while the hub supplies every server, and the banner said "none".
+        # omp loads these itself in RPC mode; the banner only names them
         try:
-            servers = [str(server.get("name")) for server in resolve_mcp_servers(self.config)]
+            servers = mcp_server_names()
         except Exception as exc:
             servers = []
-            log.warning("mcp resolution failed: %s", exc)
+            log.warning("mcp list unreadable: %s", exc)
         rows += [
             ("approval", self._agent_gate(agent)),
             ("yolo", "on" if agent.yolo else "off"),

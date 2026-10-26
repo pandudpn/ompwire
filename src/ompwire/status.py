@@ -136,27 +136,9 @@ def collect(config_path: str | None = None) -> list[tuple[str, str]]:
 
     rows.extend(_gateway_rows())
 
-    source = str(config.get("mcp", "source", "none") or "none")
-    servers = [str(server.get("name", "?")) for server in config.get("mcp", "servers") or []]
-    excludes = [str(name) for name in config.get("mcp", "exclude") or []]
-    detail = f"source {source}"
-    if servers:
-        detail += f" · {len(servers)} server(s) in config"
-    if source == "mcp-hub":
-        try:
-            from .mcp_hub import hub_servers
+    from .engine import mcp_label, mcp_server_names
 
-            merged = hub_servers(
-                config.get("mcp", "hub_path", "~/mcp-hub/servers.yaml"),
-                include=config.get("mcp", "include", []) or [],
-                exclude=config.get("mcp", "exclude", []) or [],
-            )
-            detail += f" · {len(merged)} server(s) from the hub"
-        except Exception as exc:
-            detail += f" · hub unreadable: {exc}"
-    if excludes:
-        detail += f" · excluded: {', '.join(excludes)}"
-    rows.append(("mcp", detail))
+    rows.append(("mcp", f"{mcp_label(mcp_server_names())} · omp's own mcp.json"))
 
     rows.append(("processes", _gateway_state()[1]))
     from . import gateways

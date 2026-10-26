@@ -13,8 +13,8 @@ import sys
 from typing import Any
 
 from . import engine, omp_config
-from .acp import AcpError
 from .config import Config
+from .rpc import AgentError
 
 OUTPUT_LINES = 3  # a tool's output here is a hint that it worked, not the report
 HELP = ("/new  fresh session · /stop  cancel turn · /model <id> · /mode <default|plan> · "
@@ -224,13 +224,13 @@ async def _repl(agent: engine.ChatAgent, surface: TerminalSurface) -> int:
             try:
                 await agent.ensure()
                 await agent.set_option(config_id, value)
-            except AcpError as exc:
+            except AgentError as exc:
                 print(f"error: {exc}", file=sys.stderr)
             continue
         text = answer or line
         try:
             await agent.ask(text)
-        except AcpError as exc:
+        except AgentError as exc:
             print(f"error: {exc}", file=sys.stderr)
 
 
@@ -239,7 +239,7 @@ async def _chat(agent: engine.ChatAgent, surface: TerminalSurface,
     if query:
         try:
             await agent.ask(query)
-        except AcpError as exc:
+        except AgentError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         return 0

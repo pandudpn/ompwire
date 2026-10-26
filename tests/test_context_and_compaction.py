@@ -12,8 +12,8 @@ import types
 import pytest
 
 from ompwire import engine, omp_config, telegram
-from ompwire.acp import PromptResult, Update
 from ompwire.config import load_config
+from ompwire.rpc import PromptResult, Update
 
 
 class Bot:
@@ -31,24 +31,23 @@ class Bot:
 class Client:
     alive = True
 
-    def __init__(self, updates):
+    def __init__(self, updates, context=None):
         self.updates = updates
         self.on_update = None
+        self.context = context or {}
 
-    def close(self, _sid):
+    def state(self):
+        return {"contextUsage": self.context}
+
+    def close(self):
         return None
 
-    def prompt(self, _sid, _text, images=None, timeout=900.0, collect=True):
+    def prompt(self, _text, images=None, timeout=900.0):
         for update in self.updates:
             if self.on_update is not None:
                 self.on_update(update)
         text = "".join(u.text for u in self.updates if u.kind == "agent_message_chunk")
         return PromptResult(stop_reason="end_turn", usage={}, text=text, updates=[])
-
-
-def usage(used, size):
-    return Update(kind="usage_update", session_id="s",
-                  raw={"sessionUpdate": "usage_update", "used": used, "size": size})
 
 
 def message(text):
@@ -123,17 +122,18 @@ def _update(text, user_id=1):
 # ------------------------------------------------------------------ engine
 
 
-def test_usage_update_updates_context_and_skips_the_turn_queue(tmp_path):
+def test_the_context_is_read_after_every_turn_and_warns_on_crossing(tmp_path):
+    """RPC sends no usage event, so the meter and the ⚠️ warning come from get_state."""
     async def go():
-        agent = _make_agent(_config(tmp_path), [])()
-        agent._on_usage(74886, 1048576)
+        agent = _make_agent(_config(tmp_path), [message("ok")])()
+        agent.client.context = {"tokens": 700_000, "contextWindow": 1_000_000}
+        await agent.ask("halo")
         await asyncio.sleep(0)
         return agent
 
     agent = asyncio.run(go())
-    assert agent.context == {"used": 74886, "size": 1048576}
-    # nothing queued: the turn reader must not see usage updates
-    assert agent._updates.empty()
+    assert agent.context == {"used": 700_000, "size": 1_000_000}
+    assert any("context at 70%" in body for body in agent.surface.app.bot.messages)
 
 
 def test_token_counts_read_like_a_person_wrote_them():
@@ -528,25 +528,23 @@ def test_the_transcript_names_each_tool_call_by_its_id():
     assert omp_sessions.usage("xyz").tools["toolu_2"] == "mcp__kaneo_get_task"
 
 
-def _options(model, mode="default"):
-    return [{"id": "model", "currentValue": model, "options": []},
-            {"id": "mode", "currentValue": mode, "options": []},
-            {"id": "thinking", "currentValue": "high", "options": []}]
+def _options(model):
+    return {"model": {"id": "model", "currentValue": model, "options": []},
+            "mode": {"id": "mode", "currentValue": "default", "options": []},
+            "thinking": {"id": "thinking", "currentValue": "high", "options": []}}
 
 
-def _option_update(model, mode="default"):
+def _model_changed(provider, model_id):
     return Update(kind="config_option_update", session_id="s",
-                  raw={"sessionUpdate": "config_option_update", "configOptions": _options(model, mode)})
+                  raw={"event": "model_changed", "model": {"provider": provider, "id": model_id}})
 
 
-def test_a_model_or_mode_switch_made_by_omp_is_told_to_the_chat(tmp_path):
-    """omp can change model or mode itself (a fallback, plan approval); it used to happen silently."""
+def test_a_model_switch_made_by_omp_is_told_to_the_chat(tmp_path):
+    """omp can change model itself (a fallback); it used to happen silently."""
     async def go():
         agent = _make_agent(_config(tmp_path), [])()
-        agent.options = {opt["id"]: opt for opt in _options("a/one")}
-        agent._on_update(_option_update("a/two"))
-        agent._on_update(Update(kind="current_mode_update", session_id="s",
-                                raw={"sessionUpdate": "current_mode_update", "currentModeId": "plan"}))
+        agent.options = _options("a/one")
+        agent._on_update(_model_changed("a", "two"))
         for _ in range(5):
             await asyncio.sleep(0)
         return agent
@@ -554,23 +552,24 @@ def test_a_model_or_mode_switch_made_by_omp_is_told_to_the_chat(tmp_path):
     agent = asyncio.run(go())
     sent = agent.surface.app.bot.messages
     assert any("model" in body and "a/one" in body and "a/two" in body for body in sent), sent
-    assert any("mode" in body and "default" in body and "plan" in body for body in sent), sent
     assert agent.options["model"]["currentValue"] == "a/two"
-    assert agent.options["mode"]["currentValue"] == "plan"
     assert agent._updates.empty()  # never reaches the turn renderer
 
 
 def test_a_switch_the_chat_asked_for_is_not_reported_back(tmp_path):
-    """omp echoes /model as config_option_update before it replies; that is not omp's own change."""
+    """omp reports /model as model_changed before set_model replies; that is not omp's own change."""
     async def go():
         agent = _make_agent(_config(tmp_path), [])()
-        agent.options = {opt["id"]: opt for opt in _options("a/one")}
+        agent.options = _options("a/one")
 
-        def set_config_option(_sid, config_id, value):
-            agent._on_update(_option_update(value))  # the echo arrives first
-            return {"configOptions": _options(value)}
+        def set_model(provider, model_id):
+            agent._on_update(_model_changed(provider, model_id))  # the echo arrives first
 
-        agent.client.set_config_option = set_config_option
+        async def refresh(state=None):
+            agent.options = _options("a/two")
+
+        agent.client.set_model = set_model
+        agent._refresh_options = refresh
         await agent.set_option("model", "a/two")
         for _ in range(5):
             await asyncio.sleep(0)

@@ -38,7 +38,7 @@ TEMPLATE = """# ompwire configuration — written by `ompwire setup`
 
 [acp]
 command = "omp"
-args = ["--mode", "acp"]
+args = ["--mode", "rpc"]
 startup_timeout = 60.0
 turn_timeout = 900.0
 
@@ -56,10 +56,6 @@ verbose = true
 show_tool_calls = true
 show_usage = false
 show_reasoning = {show_reasoning}
-
-[mcp]
-source = "{mcp_source}"
-hub_path = "{hub_path}"
 
 [files]
 max_mb = 20
@@ -213,31 +209,27 @@ def login_provider(yes: bool) -> bool:
 
 def agent_catalog(cwd: str, command: str = "omp") -> dict[str, Any]:
     """The options the agent actually offers, so setup picks from facts not guesses."""
-    from .acp import AcpClient
+    from .rpc import AgentClient
 
-    client = AcpClient(command=command, cwd=cwd, startup_timeout=60.0)
+    client = AgentClient(command=command, args=["--mode", "rpc", "--no-session"], cwd=cwd,
+                         startup_timeout=60.0)
     try:
-        client.initialize()
-        session = client.new_session(cwd, [])
-        options = {opt.get("id"): opt for opt in (session.get("configOptions") or [])}
-        session_id = str(session.get("sessionId") or "")
-        if session_id:
-            client.close_session(session_id)
+        state = client.state()
+        models = [f"{entry.get('provider')}/{entry.get('id')}" for entry in client.models()
+                  if entry.get("id")]
+        thinking = client.thinking_levels()
     except Exception:
         return {"models": [], "modes": [], "thinking": [], "current": {}}
     finally:
         client.close()
-
-    def values(name: str) -> list[str]:
-        option = options.get(name) or {}
-        return [str(choice.get("value")) for choice in (option.get("options") or [])
-                if choice.get("value")]
-
+    model = state.get("model") or {}
     return {
-        "models": values("model"),
-        "modes": values("mode"),
-        "thinking": values("thinking"),
-        "current": {name: (options.get(name) or {}).get("currentValue") for name in options},
+        "models": models,
+        "modes": ["default", "plan"],
+        "thinking": thinking,
+        "current": {"model": f"{model.get('provider')}/{model.get('id')}" if model.get("id") else "",
+                    "mode": "default",
+                    "thinking": state.get("thinkingLevel") or ""},
     }
 
 
@@ -416,7 +408,6 @@ def existing_settings(config_file: Path) -> dict[str, Any]:
         "approval_policy": str((data.get("approval") or {}).get("policy") or "ask"),
         "show_reasoning": bool((data.get("stream") or {}).get("show_reasoning", False)),
         "allowed": allowed,
-        "mcp_source": str((data.get("mcp") or {}).get("source") or "none"),
     }
 
 
@@ -521,25 +512,17 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
     cwd = _ask("agent working directory",
                str(current_settings.get("cwd") or os.path.expanduser("~")), yes=yes)
 
-    # 7. does the chat show what the agent is thinking? ACP carries it; the transport hid it
+    # 7. does the chat show what the agent is thinking?
     reasoning_default = "yes" if current_settings.get("show_reasoning", False) else "no"
     reasoning = _ask("show the agent's thinking in the chat (thinking=high is verbose)",
                      reasoning_default, yes=yes).strip().lower() in ("yes", "y", "true", "on", "1")
 
-    # 8. MCP belongs to omp itself
+    # 8. MCP belongs to omp itself; it loads its mcp.json on its own
     print(f"\nmcp: server definitions live in omp itself ({OMP_MCP_FILE})")
     _mcp_wizard(yes)
-    hub = Path("~/mcp-hub/servers.yaml").expanduser()
-    mcp_source = str(current_settings.get("mcp_source") or "none")
-    if mcp_source == "mcp-hub":
-        print(f"     merging {hub} at runtime (from the existing config)")
-    elif (not yes and hub.is_file()
-          and _confirm(f"     merge servers from {hub} at runtime too? [y/N]: ") in ("y", "yes")):
-        mcp_source = "mcp-hub"
 
     body = TEMPLATE.format(
         cwd=cwd, approval=approval, hint=default_hint(),
-        mcp_source=mcp_source, hub_path=str(hub) if mcp_source == "mcp-hub" else "",
         model=model, mode=mode, thinking=thinking, yolo="true" if yolo else "false",
         approval_policy=approval_policy,
         show_reasoning="true" if reasoning else "false",

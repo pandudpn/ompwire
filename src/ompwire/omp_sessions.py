@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 # overridable in tests
 SESSIONS_DIR = Path("~/.omp/agent/sessions")
@@ -89,6 +91,41 @@ def transcript(session_id: str) -> Path | None:
     root = Path(os.path.expanduser(str(SESSIONS_DIR)))
     matches = sorted(root.glob(f"*/*_{session_id}.jsonl"))
     return matches[-1] if matches else None
+
+
+def listing(cwd: str, limit: int = 50) -> list[dict[str, Any]]:
+    """omp's transcripts for one working directory, newest first.
+
+    RPC has no session list, and the folder name omp derives from a cwd is its own business, so
+    the cwd is read from each transcript's header (its second line) instead of guessed.
+    """
+    root = Path(os.path.expanduser(str(SESSIONS_DIR)))
+    wanted = os.path.realpath(os.path.expanduser(cwd))
+    found: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*/*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            with path.open("rb") as handle:
+                head = [handle.readline() for _ in range(3)]
+        except OSError:
+            continue
+        header = next((entry for entry in map(_json_or_none, head)
+                       if isinstance(entry, dict) and entry.get("type") == "session"), None)
+        if header is None or os.path.realpath(str(header.get("cwd") or "")) != wanted:
+            continue
+        stat = path.stat()
+        found.append({"sessionId": str(header.get("id") or ""),
+                      "updatedAt": time.strftime("%Y-%m-%dT%H:%M", time.localtime(stat.st_mtime)),
+                      "_meta": {"size": stat.st_size}})
+        if len(found) >= limit:
+            break
+    return found
+
+
+def _json_or_none(line: bytes) -> Any:
+    try:
+        return json.loads(line)
+    except ValueError:
+        return None
 
 
 _cache: dict[str, SessionUsage] = {}

@@ -13,8 +13,8 @@ import types
 import pytest
 
 from ompwire import engine, telegram
-from ompwire.acp import PromptResult, Update
 from ompwire.config import load_config
+from ompwire.rpc import PromptResult, Update
 
 
 class FakeBot:
@@ -48,7 +48,10 @@ class FakeClient:
         self.on_update = None
         self.cwd = "/tmp"
 
-    def prompt(self, _session_id, _text, images=None, timeout=900.0, collect=True):
+    def state(self):
+        return {}
+
+    def prompt(self, _text, images=None, timeout=900.0):
         for update in self.updates:
             if self.on_update is not None:
                 self.on_update(update)
@@ -288,15 +291,14 @@ def test_a_read_only_command_does_not_wait_for_a_click(rendered):
     async def go():
         agent = telegram.chat_agent(config, 1, key="readonly",
                                    app=_types.SimpleNamespace(bot=bot))
-        params = {"toolCall": {"kind": "execute", "title": "git log",
-                              "rawInput": {"command": "git log --oneline -3"}},
-                  "options": [{"optionId": "allow_once", "kind": "allow_once"},
-                              {"optionId": "reject_once", "kind": "reject_once"}]}
-        answered.append(agent._on_permission(params))
+        frame = {"method": "select", "title": "Allow tool: bash\nCommand: git log --oneline -3",
+                 "options": ["Approve", "Deny"]}
+        answered.append(agent._on_permission(frame))
         return agent
 
     asyncio.run(go())
-    assert answered == ["allow_once"]
+    assert answered == ["Approve"]
+    assert not bot.messages  # no button was posted
 
 
 def test_text_is_cut_at_each_tool_call_into_separate_messages(rendered):
@@ -319,7 +321,7 @@ class SpacedClient(FakeClient):
         super().__init__(updates)
         self.pause = pause
 
-    def prompt(self, _session_id, _text, images=None, timeout=900.0, collect=True):
+    def prompt(self, _text, images=None, timeout=900.0):
         import time as _time
 
         for update in self.updates:
@@ -461,10 +463,12 @@ def plan(*entries):
                     for text, status in entries]})
 
 
-def kinded_call(call_id, kind, title, raw_input):
-    return Update(kind="tool_call", session_id="s", raw={
-        "sessionUpdate": "tool_call", "toolCallId": call_id, "kind": kind, "title": title,
-        "status": "pending", "rawInput": raw_input})
+def kinded_call(call_id, kind, title, raw_input, name=""):
+    raw = {"toolCallId": call_id, "kind": kind, "title": title, "status": "pending",
+           "rawInput": raw_input}
+    if name:
+        raw["toolName"] = name
+    return Update(kind="tool_call", session_id="s", raw=raw)
 
 
 def test_the_todo_list_is_posted_as_a_checklist_each_time_it_changes(rendered):
@@ -497,31 +501,21 @@ def test_a_todo_call_with_no_list_after_it_still_shows(rendered):
     assert any(body.startswith("📋 <code>todo</code>") for body in messages), messages
 
 
-def test_a_tool_is_named_from_the_transcript_not_acp_kind(rendered, tmp_path):
-    """ACP files wait, ask, lsp and every MCP tool under "other"; omp's transcript has the name."""
-    import json
-
-    from ompwire import omp_sessions
-
-    folder = omp_sessions.SESSIONS_DIR / "-"
-    folder.mkdir(parents=True)
-    entry = {"type": "message", "message": {"role": "assistant", "content": [
-        {"type": "toolCall", "id": "t1", "name": "wait", "arguments": {}},
-        {"type": "toolCall", "id": "t2", "name": "mcp__kaneo_get_task", "arguments": {}}]}}
-    (folder / "2026-10-25T00-00-00-000Z_s.jsonl").write_text(json.dumps(entry) + "\n")
+def test_a_tool_is_named_by_omp_not_by_its_kind(rendered):
+    """omp names every call (wait, an MCP tool); the coarse kind is only the fallback."""
     messages = rendered([
-        kinded_call("t1", "other", "Collecting suite result", {}),
+        kinded_call("t1", "other", "Collecting suite result", {}, name="wait"),
         tool_progress("t1", "3 passed", status="completed"),
-        kinded_call("t2", "other", "Reading the ticket", {"id": "x"}),
+        kinded_call("t2", "other", "Reading the ticket", {"id": "x"}, name="mcp__kaneo_get_task"),
         tool_progress("t2", "", status="completed"),
-        kinded_call("t3", "other", "Listing devices", {"path": "xd://github/pulls"}),
+        kinded_call("t3", "other", "Listing devices", {"path": "xd://github/pulls"}, name="read"),
         tool_progress("t3", "", status="completed"),
         message("selesai"),
     ])
     traces = "\n".join(messages)
     assert "⏳ <code>wait</code>" in traces
     assert "🔌 <code>kaneo_get_task</code>" in traces
-    assert "<code>github</code>" in traces
+    assert "<code>github</code>" in traces  # a device names itself over the read tool
     assert "<code>other</code>" not in traces
 
 
@@ -538,19 +532,15 @@ def test_a_todo_call_that_changes_nothing_keeps_its_trace(rendered):
     assert any(body.startswith("📋 <code>todo</code>") for body in messages), messages
 
 
-def test_an_option_switch_mid_turn_lands_in_order_with_its_name(rendered, monkeypatch):
+def test_a_model_switch_mid_turn_lands_in_order_with_its_name(rendered, monkeypatch):
     """A notice sent straight to the platform jumped ahead of traces still waiting to go out."""
     from ompwire import engine as engine_mod
-
-    def options(model):
-        return [{"id": "model", "currentValue": model, "options": [
-            {"value": "a/one", "name": "Model One"}, {"value": "a/two", "name": "Model Two"}]},
-            {"id": "mode", "currentValue": "default", "options": []}]
 
     original = engine_mod.ChatAgent.ask
 
     async def ask(self, *args, **kwargs):
-        self.options = {opt["id"]: opt for opt in options("a/one")}
+        self.options = {"model": {"id": "model", "currentValue": "a/one", "options": [
+            {"value": "a/one", "name": "Model One"}, {"value": "a/two", "name": "Model Two"}]}}
         return await original(self, *args, **kwargs)
 
     monkeypatch.setattr(engine_mod.ChatAgent, "ask", ask)
@@ -558,7 +548,7 @@ def test_an_option_switch_mid_turn_lands_in_order_with_its_name(rendered, monkey
         kinded_call("t1", "execute", "ls", {"command": "ls"}),
         tool_progress("t1", "", status="completed"),
         Update(kind="config_option_update", session_id="s",
-               raw={"sessionUpdate": "config_option_update", "configOptions": options("a/two")}),
+               raw={"event": "model_changed", "model": {"provider": "a", "id": "two"}}),
         message("selesai"),
     ])
     order = [i for i, body in enumerate(messages) if "<code>ls</code>" in body or "$ ls" in body]

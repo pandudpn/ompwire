@@ -94,13 +94,13 @@ def test_config_is_written_and_parses(monkeypatch, tmp_path):
 
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert data["acp"]["command"] == "omp"
-    assert data["acp"]["args"] == ["--mode", "acp"]
+    assert data["acp"]["args"] == ["--mode", "rpc"]
     assert "gateway" not in data and "telegram" not in data
     assert data["agent"]["mode"] == "default"
     assert data["agent"]["thinking"] == "xhigh"
     assert data["agent"]["yolo"] is False  # approvals stay on unless someone asks for yolo
     assert "telegram" not in data
-    assert data["mcp"]["source"] == "none"      # omp owns its servers; no hub merge by default
+    assert "mcp" not in data  # omp owns its servers in its own mcp.json
     assert "fenced code" in data["agent"]["append_system_prompt"]
 
 

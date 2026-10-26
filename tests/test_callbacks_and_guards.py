@@ -6,8 +6,8 @@ import asyncio
 import types
 
 from ompwire import allowlist, telegram
-from ompwire.acp import PromptResult, Update
 from ompwire.config import load_config
+from ompwire.rpc import PromptResult, Update
 from ompwire.store import SessionStore
 
 
@@ -318,6 +318,7 @@ def test_two_answers_in_one_turn_stay_two_messages(tmp_path):
     class Client:
         alive = True
         on_update = None
+        state = staticmethod(dict)
 
         def prompt(self, *_a, **_k):
             for update in updates:

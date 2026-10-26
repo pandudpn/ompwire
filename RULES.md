@@ -23,7 +23,7 @@ is shaped this way; this file says what to do and what not to do.
   running the test.
 - A user-visible change is exercised for real: against the bot, `ompwire chat`, or the real
   `omp` binary. Passing tests are not proof that a chat works.
-- A claim about the ACP wire is measured against `omp`, then written into ARCHITECTURE.md
+- A claim about omp's RPC wire is measured against `omp`, then written into ARCHITECTURE.md
   with the version it was measured on.
 
 ## Tests never touch the machine

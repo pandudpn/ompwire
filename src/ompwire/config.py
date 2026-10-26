@@ -44,15 +44,16 @@ PROTOCOL_HINT = (
 )
 
 DEFAULTS: dict[str, dict[str, Any]] = {
+    # the agent process; the section name predates RPC and is kept so existing configs load
     "acp": {
         "command": "omp",
-        "args": ["--mode", "acp"],
+        "args": ["--mode", "rpc"],
         "startup_timeout": 60.0,
         "turn_timeout": 900.0,
     },
     "agent": {
         "cwd": "~",
-        "model": "",  # empty => whatever the ACP session defaults to
+        "model": "",  # provider/id; empty => whatever omp defaults to
         "mode": "default",  # default | plan
         "thinking": "xhigh",  # reasoning effort, agent-dependent
         # Approvals are ON by default. A coding agent with blanket approval and the home directory
@@ -115,9 +116,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "logging": {
         "level": "INFO",
         "file": "",  # empty = stderr only
-    },
-    "mcp": {
-        "servers": [],  # list of {name, command, args, env} passed to session/new
     },
     "gateway": {
         "platform": "telegram",  # the only transport implemented so far
