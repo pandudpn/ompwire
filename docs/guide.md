@@ -191,6 +191,15 @@ When OMP declines a steer or a follow-up, the message falls back to the queue. `
 the turn. `/btw` works while a turn runs: the side question is answered on its own and never
 enters the conversation.
 
+### Subagents
+
+When the agent runs subagents through its `task` tool, a verbose chat gets one summary message
+for the call (`🤖 subagent (spawned 2 background agents)`) and one card per job with its agent
+type, model, status and last action. Until every job has finished, the cards are refreshed once
+a minute, even while a job sits on one long command, and once more when a job ends, so a
+background job that outlives the turn still reports how it finished. A quiet chat (a group, or
+`/verbose` off) shows none of them.
+
 ### Questions
 
 OMP's `ask` tool arrives as buttons, one question at a time, with the question above them. A

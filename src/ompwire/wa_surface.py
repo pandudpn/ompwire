@@ -94,6 +94,8 @@ class WhatsAppSurface(engine.Surface):
         self.label = chat
         self.limit = WHATSAPP_LIMIT
         self.options_message: str | None = None
+        # the id of each job card's message: a later frame rewrites that message
+        self.job_messages: dict[str, str] = {}
         self.options_listed = ""
 
     async def post(self, body: str, *, kind: str) -> Any | None:
@@ -129,6 +131,32 @@ class WhatsAppSurface(engine.Surface):
 
     def join(self, blocks: list[str]) -> str:
         return "\n\n".join(blocks)
+
+    def job(self, card: engine.JobCard) -> str:
+        lines = [f"🤖 *subagent* - {card.name}",
+                 f"Job type: {card.agent or 'task'}",
+                 f"Model: {card.model or '?'}",
+                 f"_{engine.job_line(card)}_"]
+        action = engine.job_action(card)
+        if action:
+            lines += ["", f"Last action: {action}"]
+        return "\n".join(lines)
+
+    def jobs(self, group: list[engine.JobCard], spawned: int) -> str:
+        word = "agent" if spawned == 1 else "agents"
+        background = "background " if any(card.detached for card in group) else ""
+        lines = [f"🤖 *subagent* (spawned {spawned} {background}{word})"]
+        lines.extend(engine.job_row(card) for card in group)
+        return "\n".join(lines)
+
+    async def job_card(self, key: str, body: str) -> None:
+        message = self.job_messages.get(key)
+        if message is None:
+            sent = await self.transport.send_text(self.chat, body)
+            if sent:
+                self.job_messages[key] = sent
+            return
+        await self.transport.edit_text(self.chat, message, body)
 
     @contextlib.asynccontextmanager
     async def typing(self):

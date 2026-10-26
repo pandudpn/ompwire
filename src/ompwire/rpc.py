@@ -130,6 +130,8 @@ class AgentClient:
         self._turn: dict[str, Any] | None = None
         self.session_id = ""
         self.session_file = ""
+        # set by start(): omp accepted the subagent subscription, so job frames will come
+        self.subagent_frames = False
 
     # ---------------------------------------------------------------- process
     def start(self) -> None:
@@ -162,6 +164,13 @@ class AgentClient:
         # the ask tool speaks through `ask` dialogs; without this the model is told it is missing
         with contextlib.suppress(AgentError):
             self.request("set_ask_dialog", {"enabled": True}, timeout=10)
+        # lifecycle and progress of subagents the `task` tool spawns, for the chat's job cards;
+        # an omp that refuses it keeps the `task` trace as the only account of its subagents
+        try:
+            self.request("set_subagent_subscription", {"level": "progress"}, timeout=10)
+            self.subagent_frames = True
+        except AgentError:
+            self.subagent_frames = False
 
     def _stderr_loop(self) -> None:
         proc = self._proc
@@ -330,6 +339,8 @@ class AgentClient:
             self._emit("compaction", frame)
         elif kind in {"btw_delta", "btw_record"}:
             self._emit("btw", frame)
+        elif kind in {"subagent_lifecycle", "subagent_progress"}:
+            self._emit("subagent", frame)
         elif kind in {"queue_update", "available_commands_update", "agent_end", "session_settled"}:
             self._emit(str(kind), frame)
 
@@ -474,6 +485,12 @@ class AgentClient:
     def btw(self, question: str) -> dict[str, Any]:
         """Ask a side question that does not enter the main context; returns its record."""
         return self.request("btw", {"question": question}) or {}
+
+    def subagents(self) -> list[dict[str, Any]]:
+        """omp's registry of running subagents: one snapshot each, with its last progress."""
+        data = self.request("get_subagents", timeout=15) or {}
+        rows = data.get("subagents") if isinstance(data, dict) else data
+        return [row for row in (rows or []) if isinstance(row, dict)]
 
     def handoff(self, instructions: str = "") -> dict[str, Any]:
         params = {"customInstructions": instructions} if instructions else {}

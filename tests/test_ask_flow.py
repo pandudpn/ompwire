@@ -59,6 +59,12 @@ class FakeSurface(engine.Surface):
     def plan(self, items):
         return ""
 
+    def job(self, card):
+        return ""
+
+    def jobs(self, group, spawned):
+        return ""
+
     def dropped(self, count):
         return ""
 

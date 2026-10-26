@@ -217,6 +217,7 @@ has a decision behind it:
 | `notice` | omp's warning and error notices and extension errors, as `⚠️ …`; info notices (MCP mounts) are dropped |
 | `compaction` | `auto_compaction_start` as `🗜️ compacting…`; the end only when it failed, since the transcript-based notice reports before → after |
 | `btw` | `btw_delta` / `btw_record`, collected per record for `/btw`; never enters the turn |
+| `subagent` | `subagent_lifecycle` / `subagent_progress`: the job cards (see Subagents); never enters the turn |
 
 Notices from these kinds go through the turn's own outbox mid-turn, so they land in order with
 the traces around them, and a quiet chat sees none of them.
@@ -243,9 +244,9 @@ finished `todo` call is held for one update: the todo result carries the whole l
 (`details.phases`), sent on as a `plan` update right after, and the checklist replaces the trace.
 A todo call that produces no list still gets the trace.
 
-A subagent has no event type of its own. omp runs one through its `task` tool, so a subagent shows
-up as a `tool_call` named `task` whose `rawInput.tasks[]` names it. That name tells a reader
-little, so the transport relabels it `subagent` and prints the name plus the
+omp runs a subagent through its `task` tool, so in the turn's trace a subagent shows up as a
+`tool_call` named `task` whose `rawInput.tasks[]` names it. That name tells a reader little, so
+the transport relabels it `subagent` and prints the name plus the
 agent type. What the subagent is doing arrives on the same call as `tool_call_update` events whose
 `content` text reads `Spawned agent X`, `Running agent X`, `Background task X complete`; those are
 kept as a short trail, deduplicated and capped at four. The final `rawOutput` carries the
@@ -254,6 +255,21 @@ content is "waiting for the result" is dropped: it is the absence of a step, not
 `agent_thought_chunk` on turns where the model actually reasons, so an empty thinking block means
 the turn had none, not that the transport dropped it. That is also why the display is tested
 against a fake stream rather than the live model.
+
+## Subagents
+
+`rpc.py` subscribes with `set_subagent_subscription {level: "progress"}`, so omp also sends
+`subagent_lifecycle` (started, completed, failed, aborted) and `subagent_progress` for every job.
+A progress frame carries the agent type, the resolved model, the last intent, the recent tool
+calls, the tool count and the duration. A verbose chat gets one summary card per `task` call and
+one card per job, edited in place: at most once a minute while it runs, plus a final edit at a
+terminal status. omp sends a dozen or more progress frames for even a short job, which is why
+the edits are throttled. A job waiting on a long tool call sends none, so while any job is still
+running the engine also asks omp's registry (`get_subagents`) once a minute and refreshes the
+cards from it; a job that left the registry without an end frame is closed as done. The summary
+waits 1.5 s before its first post, since a call's start frames arrive a moment apart and it
+should count every job. Background (`detached`) jobs outlive the turn, so their cards are kept
+per chat and still get the final edit after the turn ends.
 
 ## Storage
 
@@ -301,6 +317,7 @@ negotiates protocol v2, which splits large frames into chunks that `rpc.py` reas
 | `message_update`, `tool_execution_*` | from agent | prose, reasoning, tool calls and their output |
 | `model_changed`, `thinking_level_changed` | from agent | a switch the chat did not ask for |
 | `auto_retry_*`, `retry_fallback_*`, `notice`, `auto_compaction_*` | from agent | the notices above |
+| `set_subagent_subscription`, `subagent_lifecycle`, `subagent_progress` | both | the job cards |
 | `available_commands_update` | from agent | `/commands` |
 | `extension_ui_request` | from agent | approvals (`select`) and questions (`ask`); other dialogs are cancelled |
 

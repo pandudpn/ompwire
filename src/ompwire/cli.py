@@ -83,6 +83,21 @@ class TerminalSurface(engine.Surface):
     def join(self, blocks: list[str]) -> str:
         return "\n".join(blocks)
 
+    def job(self, card: engine.JobCard) -> str:
+        head = f"[job] {card.name} · {card.agent or 'task'} · {card.model or '?'}"
+        lines = [head, f"  {engine.job_line(card)}"]
+        action = engine.job_action(card)
+        if action:
+            lines.append(f"  last: {action}")
+        return "\n".join(lines)
+
+    def jobs(self, group: list[engine.JobCard], spawned: int) -> str:
+        word = "agent" if spawned == 1 else "agents"
+        background = "background " if any(card.detached for card in group) else ""
+        lines = [f"[jobs] {spawned} {background}{word} spawned"]
+        lines.extend(f"  {engine.job_row(card)}" for card in group)
+        return "\n".join(lines)
+
     # ----------------------------------------------------------------- posting
     async def post(self, body: str, *, kind: str) -> Any | None:
         if not body:

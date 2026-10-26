@@ -27,7 +27,7 @@ from . import schedules as schedule_lib
 from .attachments import extract as extract_files
 from .attachments import hide_partial as hide_file_partial
 from .config import Config, approval_policy
-from .format import humanize_token_report, tokens, wib_time
+from .format import TOOL_LINE_WIDTH, _clip, humanize_token_report, tokens, wib_time
 from .mdrender import strip_agent_noise
 from .omp_sessions import plausible_context
 from .questions import extract as extract_options
@@ -327,6 +327,139 @@ class PlanItem:
     status: str
 
 
+JOB_FINAL = frozenset({"completed", "failed", "aborted"})
+JOB_EDIT_GAP = 60.0  # a running job's card moves at most this often; its last state always does
+JOB_OPEN_DELAY = 1.5  # the summary waits this long for the rest of a call's start frames
+
+
+@dataclass
+class JobCard:
+    """One subagent the `task` tool spawned, as the chat's own card shows it."""
+
+    name: str
+    agent: str = "task"
+    model: str = ""
+    status: str = ""
+    last_intent: str = ""
+    last_tool: str = ""
+    tool_count: int = 0
+    duration_ms: int = 0
+    # the call in flight and when it began: omp's durationMs stops while one long call runs
+    current_tool: str = ""
+    current_since_ms: int = 0
+    parent: str = ""  # the `task` call that spawned it: one summary card per call
+    detached: bool = False  # a background agent, which can outlive the turn that spawned it
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def job_from_frame(raw: dict[str, Any]) -> JobCard | None:
+    """The job one `subagent_lifecycle` or `subagent_progress` frame reports on.
+
+    omp splits a job over two frame types: lifecycle says it started or ended, progress says
+    what it is doing. Each frame carries the job id and the call that spawned it; the fields a
+    frame does not carry stay empty and the engine keeps what the earlier frames said.
+    """
+    payload = raw.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    frame = raw.get("type")
+    parent = str(payload.get("parentToolCallId") or "")
+    if frame == "subagent_lifecycle":
+        return JobCard(name=str(payload.get("id") or ""),
+                       agent=str(payload.get("agent") or ""),
+                       status=str(payload.get("status") or ""),
+                       parent=parent,
+                       detached=bool(payload.get("detached")))
+    if frame != "subagent_progress":
+        return None
+    progress = payload.get("progress")
+    if not isinstance(progress, dict):
+        return None
+    recent = [tool for tool in (progress.get("recentTools") or []) if isinstance(tool, dict)]
+    last = recent[-1] if recent else {}
+    last_tool = ""
+    if last.get("tool"):
+        args = _clip(" ".join(str(last.get("args") or "").split()), lines=1,
+                     width=TOOL_LINE_WIDTH - 20)
+        last_tool = f"{last['tool']}: {args}" if args else str(last["tool"])
+    current_tool = ""
+    if progress.get("currentTool"):
+        args = _clip(" ".join(str(progress.get("currentToolArgs") or "").split()), lines=1,
+                     width=TOOL_LINE_WIDTH - 20)
+        current_tool = f"{progress['currentTool']}: {args}" if args else str(progress["currentTool"])
+    intent = progress.get("currentToolIntent") if current_tool else None
+    return JobCard(
+        name=str(progress.get("id") or ""),
+        agent=str(progress.get("agent") or payload.get("agent") or ""),
+        model=str(progress.get("resolvedModel") or progress.get("resolvedModelIdentity") or ""),
+        status=str(progress.get("status") or ""),
+        last_intent=_clip(" ".join(str(intent or progress.get("lastIntent") or "").split()),
+                          lines=1, width=TOOL_LINE_WIDTH),
+        last_tool=current_tool or last_tool,
+        tool_count=_as_int(progress.get("toolCount")),
+        duration_ms=_as_int(progress.get("durationMs")),
+        current_tool=current_tool,
+        current_since_ms=_as_int(progress.get("currentToolStartMs")) if current_tool else 0,
+        parent=parent,
+    )
+
+
+def job_status(status: str) -> str:
+    """The word a card shows for a job's state."""
+    if status in {"", "started"}:
+        return "running"
+    return {"completed": "✅ done", "failed": "⛔ failed", "aborted": "⛔ aborted"}.get(
+        status, status)
+
+
+def job_duration(ms: int) -> str:
+    """How long a job has run, in the shape a card shows it: 42s, 1m20s, 1h05m."""
+    elapsed = max(0, int(ms))
+    if elapsed < 1000:
+        # a job that has just started reports a few hundred ms; "0s" reads like a bug
+        return "<1s" if elapsed else "0s"
+    total = elapsed // 1000
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{seconds:02d}s"
+    return f"{seconds}s"
+
+
+def job_line(card: JobCard) -> str:
+    """The status line of a job card: running · 1m20s · 3 tools, or how it ended."""
+    if card.status in JOB_FINAL:
+        return job_status(card.status)
+    parts = [job_status(card.status)]
+    if card.duration_ms:
+        parts.append(job_duration(card.duration_ms))
+    if card.tool_count:
+        parts.append(f"{card.tool_count} tool{'s' if card.tool_count > 1 else ''}")
+    return " · ".join(parts)
+
+
+def job_action(card: JobCard) -> str:
+    """What the job last did: what it was for, then the call behind it. A job that has not
+    called a tool yet says so, so every card has the line the person looks for."""
+    done = " · ".join(part for part in (card.last_intent, card.last_tool) if part)
+    if done:
+        return done
+    return "none" if card.status in JOB_FINAL else "starting…"
+
+
+def job_row(card: JobCard) -> str:
+    """One line of the summary card: name · agent type · status."""
+    return f"{card.name} · {card.agent or 'task'} · {job_status(card.status)}"
+
+
 class FloodWait(Exception):
     """The platform is rate limiting; `window` is how long to wait before sending again."""
 
@@ -340,7 +473,8 @@ class Surface(abc.ABC):
 
     `post` sends one message: kind "text" carries raw agent markdown the surface converts,
     the other kinds arrive already rendered by this surface. `trace`, `reasoning`, `dropped`
-    and `join` are the renderers the engine calls before posting.
+    and `join` are the renderers the engine calls before posting; `job` and `jobs` render the
+    subagent cards, which a surface with editable messages rewrites instead of reposting.
     """
 
     label: str
@@ -406,6 +540,21 @@ class Surface(abc.ABC):
 
     @abc.abstractmethod
     async def notice(self, text: str) -> Any | None: ...
+
+    # The cards for the subagents a `task` call spawned. The engine keeps their order and their
+    # pacing; a surface only has to show one card per key, editing the first message it sent.
+    @abc.abstractmethod
+    def job(self, card: JobCard) -> str:
+        """One subagent as a card of its own: what it is, what it last did, how it is doing."""
+
+    @abc.abstractmethod
+    def jobs(self, group: list[JobCard], spawned: int) -> str:
+        """The card that opens a `task` call: one line per job it spawned."""
+
+    async def job_card(self, key: str, body: str) -> Any | None:
+        """Show one job card under `key`: a surface that can edit keeps the message it posted
+        first and rewrites it; one that cannot (a terminal) posts every update as a new one."""
+        return await self.post(body, kind="job")
 
 class ChatAgent:
     """One chat's omp agent: subprocess, session id, queue and counters."""
@@ -488,6 +637,24 @@ class ChatAgent:
         self._btw_waiters: dict[str, asyncio.Future] = {}
         self._ask_slots: dict[str, dict[str, Any]] = {}
         self._btw_records: dict[str, dict[str, Any]] = {}
+        # the subagents the `task` tool spawned, by (call that spawned it, job name): one card
+        # each, plus one summary card per call. A detached job outlives the turn that made it,
+        # so its last frame still lands here after the turn is over.
+        self._jobs: dict[tuple[str, str], JobCard] = {}
+        self._job_groups: dict[str, list[str]] = {}
+        # how many jobs each `task` call asked for, by its tool call id, read from its arguments
+        self._job_spawned: dict[str, int] = {}
+        self._job_began: dict[tuple[str, str], float] = {}  # per job, on the engine's clock
+        self._job_written: dict[str, float] = {}
+        self._job_body: dict[str, str] = {}  # what each card says, so a repeat is not sent
+        self._job_queue: list[list[str]] = []
+        self._job_flush: asyncio.Task | None = None
+        # one poll per chat while any job runs: omp's registry, read once a minute
+        self._job_poll: asyncio.Task | None = None
+        self._job_opening: set[str] = set()  # calls whose summary is about to open
+        self._job_open_delay = JOB_OPEN_DELAY
+        self._clock: Callable[[], float] = time.monotonic
+        self._sleep: Callable[[float], Any] = asyncio.sleep
 
     # ------------------------------------------------------------------ setup
     def _build_client(self, yolo: bool = False, resume: str = "") -> AgentClient:
@@ -700,6 +867,19 @@ class ChatAgent:
             # a side question runs next to the turn; its frames must not touch the turn queue
             self._loop.call_soon_threadsafe(self._on_btw, update)
             return
+        if update.kind == "subagent":
+            # a subagent runs next to the turn and can outlive it; its frames are cards of their
+            # own, never part of the turn's outbox
+            self._loop.call_soon_threadsafe(self._on_subagent, update)
+            return
+        if update.kind == "tool_call":
+            tasks = (update.raw.get("rawInput") or {}).get("tasks")
+            if isinstance(tasks, list) and tasks:
+                # the jobs' own frames overtake the turn's drain, so how many the call spawns
+                # is noted here, in arrival order, before the first job reports
+                call_id = str(update.raw.get("toolCallId") or "")
+                spawned = sum(isinstance(task, dict) for task in tasks)
+                self._loop.call_soon_threadsafe(self._job_spawned.__setitem__, call_id, spawned)
         if update.kind in {"retry", "notice", "compaction"} and not self.busy:
             # outside a turn nothing reads the turn queue; a straight notice keeps its place.
             # Mid-turn they fall through to _updates, so drain() renders them in order.
@@ -765,6 +945,166 @@ class ChatAgent:
         if status == "error":
             return "the side question failed"
         return str(done.get("answer") or "").strip() or "no answer came back"
+
+    # ------------------------------------------------------------ job cards
+    def _on_subagent(self, update: AgentUpdate, *, polled: bool = False) -> None:
+        """Runs on the loop thread. omp reports every subagent the `task` tool spawns: a
+        lifecycle frame when it starts and one when it ends, and progress frames in between.
+        Each job becomes a card of its own under one summary card per `task` call; a chat that
+        shows no tool calls shows none of this. `polled` marks the minute's registry read,
+        which is already paced, so it always moves the card."""
+        if not self.verbose:
+            return
+        raw = update.raw or {}
+        fresh = job_from_frame(raw)
+        if fresh is None or not fresh.name:
+            return
+        key = (fresh.parent, fresh.name)
+        job = self._jobs.get(key)
+        previous = job.status if job is not None else None
+        if job is None:
+            job = self._jobs[key] = fresh
+            self._job_groups.setdefault(fresh.parent, []).append(fresh.name)
+            # when this chat first heard of the job, minus what omp says it already ran:
+            # the card's age keeps counting while omp's durationMs stands still
+            self._job_began[key] = self._clock() - fresh.duration_ms / 1000
+        else:
+            job.agent = fresh.agent or job.agent
+            job.model = fresh.model or job.model
+            job.status = fresh.status or job.status
+            job.last_intent = fresh.last_intent or job.last_intent
+            job.last_tool = fresh.last_tool or job.last_tool
+            job.tool_count = max(job.tool_count, fresh.tool_count)
+            job.detached = job.detached or fresh.detached
+            if raw.get("type") == "subagent_progress":
+                job.current_tool = fresh.current_tool
+                job.current_since_ms = fresh.current_since_ms
+        if job.status not in JOB_FINAL:
+            elapsed = int((self._clock() - self._job_began[key]) * 1000)
+            job.duration_ms = max(job.duration_ms, fresh.duration_ms, elapsed)
+        if previous != job.status:
+            log.info("subagent %s job=%s status=%s tools=%s", self.label, job.name,
+                     job.status or "-", job.tool_count)
+            if f"group:{job.parent}" in self._job_body or job.status in JOB_FINAL:
+                self._write_group(job.parent)
+            elif job.parent not in self._job_opening:
+                # omp starts a call's jobs one frame apart; the summary waits a moment so its
+                # first post already counts all of them instead of "spawned 1"
+                self._job_opening.add(job.parent)
+                self._loop.call_later(self._job_open_delay, self._open_group, job.parent)
+        # A lifecycle start frame only says the job exists. Its card opens on the first frame
+        # that shows the work (or on the end of a job that never reported any), so nobody is
+        # left looking at a card whose last action is nothing.
+        reported = previous is not None or raw.get("type") == "subagent_progress"
+        if job.status not in JOB_FINAL and (self._job_poll is None or self._job_poll.done()):
+            self._job_poll = self._loop.create_task(self._poll_jobs())
+        if job.parent in self._job_opening:
+            # the summary goes first; this card follows when it opens (_open_group)
+            return
+        if reported or job.status in JOB_FINAL:
+            # the end of a job goes out at once: the minute between edits is for the steps in
+            # between, and the frame that ends a job is the one a person is waiting for
+            self._job_write(f"job:{job.parent}:{job.name}", self.surface.job(job),
+                            force=polled or job.status in JOB_FINAL)
+
+    def _has_job_cards(self, call_id: str) -> bool:
+        """Whether job cards account for this `task` call. A call's trace can finish before
+        its jobs' first frame arrives, so an omp that took the subagent subscription counts as
+        covered; one that refused it (or a call with no jobs reported, in a test) keeps the
+        trace. parentToolCallId carries the call id before a `|`."""
+        if not self.verbose:
+            return False
+        if getattr(self.client, "subagent_frames", False):
+            return True
+        return any(parent.split("|", 1)[0] == call_id for parent in self._job_groups)
+
+    def _open_group(self, parent: str) -> None:
+        self._job_opening.discard(parent)
+        self._write_group(parent)
+        # the cards held while the summary waited, in the order their jobs started
+        for name in self._job_groups.get(parent, []):
+            job = self._jobs[(parent, name)]
+            if job.model or job.last_intent or job.status in JOB_FINAL:
+                self._job_write(f"job:{parent}:{name}", self.surface.job(job), force=True)
+
+    def _write_group(self, parent: str) -> None:
+        group = [self._jobs[(parent, name)] for name in self._job_groups.get(parent, [])]
+        if not group:
+            return
+        # omp's parentToolCallId is "<call id>|fc_<call id>"; the trace knows the first part
+        spawned = self._job_spawned.get(parent.split("|", 1)[0], 0)
+        self._job_write(f"group:{parent}", self.surface.jobs(group, max(spawned, len(group))),
+                        force=True)
+
+    async def _poll_jobs(self) -> None:
+        """Until every job has ended, ask omp for its subagents once a minute and refresh their
+        cards. Progress frames stop while a job waits on a long tool call; the card still has to
+        show that it is alive and what it is on, so the poll does not wait for omp to speak."""
+        while any(job.status not in JOB_FINAL for job in self._jobs.values()):
+            await self._sleep(JOB_EDIT_GAP)
+            client = self.client
+            if client is None or not client.alive:
+                return
+            try:
+                rows = await asyncio.to_thread(client.subagents)
+            except AgentError as exc:
+                log.info("subagent poll failed chat=%s: %s", self.label, exc)
+                continue
+            listed = set()
+            for row in rows:
+                progress = dict(row.get("progress") or {})
+                progress.setdefault("id", row.get("id"))
+                progress.setdefault("agent", row.get("agent"))
+                progress.setdefault("status", row.get("status"))
+                frame = {"type": "subagent_progress",
+                         "payload": {"parentToolCallId": row.get("parentToolCallId"),
+                                     "agent": row.get("agent"), "progress": progress}}
+                job = job_from_frame(frame)
+                if job is not None and job.name:
+                    listed.add((job.parent, job.name))
+                    self._on_subagent(AgentUpdate(kind="subagent", session_id=self.session_id,
+                                                  raw=frame), polled=True)
+            # omp lists only running subagents; one that left the list without an end frame
+            # (the process restarted, a frame was lost) ended without saying how
+            for key, job in list(self._jobs.items()):
+                if job.status not in JOB_FINAL and key not in listed:
+                    log.info("subagent %s job=%s gone from omp's list", self.label, job.name)
+                    self._on_subagent(AgentUpdate(kind="subagent", session_id=self.session_id,
+                                                  raw={"type": "subagent_lifecycle", "payload": {
+                                                      "id": job.name, "parentToolCallId": job.parent,
+                                                      "agent": job.agent, "status": "completed"}}))
+
+    def _job_write(self, key: str, body: str, *, force: bool) -> None:
+        """Queue one card under `key`, at most once a minute unless `force`. A card that would
+        say exactly what it already says is not sent again: Telegram answers an unchanged edit
+        with an error, and a terminal would print the same block twice. Cards go out in the
+        order their frames arrived: the summary stays above the jobs it names, and an edit
+        never overtakes the send of the message it means to change."""
+        if self._job_body.get(key) == body:
+            return
+        now = self._clock()
+        last = self._job_written.get(key)
+        if last is not None and not force and now - last < JOB_EDIT_GAP:
+            return
+        self._job_written[key] = now
+        self._job_body[key] = body
+        for queued in self._job_queue:
+            if queued[0] == key:
+                queued[1] = body  # the newest state wins, and still goes out in its own place
+                break
+        else:
+            self._job_queue.append([key, body])
+        if self._job_flush is None or self._job_flush.done():
+            self._job_flush = self._loop.create_task(self._flush_jobs())
+
+    async def _flush_jobs(self) -> None:
+        while self._job_queue:
+            key, body = self._job_queue.pop(0)
+            try:
+                await self.surface.job_card(key, body)
+            except Exception:
+                # a card is a progress report; a platform refusing one must not stop the work
+                log.warning("job card failed chat=%s key=%s", self.label, key, exc_info=True)
 
     def _on_usage(self, used: int, size: int) -> None:
         """Runs on the loop thread. Tracks the context window, the warning crossing and
@@ -1304,6 +1644,10 @@ class ChatAgent:
                 # whether the list came; an omp that sends none still gets the trace.
                 held_todo.append(entry)
                 return
+            if entry.kind == "subagent" and self._has_job_cards(call_id):
+                # the job cards already show this call: a summary with every job, then a card
+                # each; the trace would be a second "spawned" message saying less
+                return
             show_tool(entry)
 
         def show_tool(entry: ToolTrace) -> None:
@@ -1424,8 +1768,8 @@ class ChatAgent:
                         tasks = raw_input.get("tasks")
                         if isinstance(tasks, list) and tasks:
                             entry.kind = entry.tool = "subagent"
-                            # omp runs subagents through the `task` tool, with no event of
-                            # their own, so the task list is the only place they appear
+                            # the trace names the jobs this call spawned; their progress has
+                            # cards of its own (see _on_subagent)
                             entry.subagent = ", ".join(
                                 f"{item.get('name', '?')} ({item.get('agent', 'task')})"
                                 for item in tasks if isinstance(item, dict))[:80]
