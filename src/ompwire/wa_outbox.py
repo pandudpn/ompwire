@@ -20,7 +20,7 @@ from typing import Any
 
 from .attachments import Outgoing
 from .delivery import Delivery
-from .wa_client import PHONE_SERVER, chunks, to_whatsapp
+from .wa_client import PHONE_SERVER, chunks, markdown_messages
 from .wa_surface import WHATSAPP_LIMIT, card
 
 log = logging.getLogger("ompwire.whatsapp")
@@ -39,16 +39,27 @@ def outbox_dir(gateway: str) -> Path:
 class Report:
     path: Path
     chat: str
-    text: str
+    messages: list[str]
     files: list[dict[str, Any]]
 
 
 def render(*, title: str, when: str, ok: bool, word: str, rows: Iterable[tuple[str, str]],
-           body_markdown: str, error: str, footer: str) -> str:
+           body_markdown: str, error: str, footer: str) -> list[str]:
+    """The report as WhatsApp messages: the card, the answer cut on its markdown so a code
+    block split across messages stays code, and the footer."""
     status = f"{'✅' if ok else '⛔'} *{word}*"
-    head = card(f"🗓️ {title}", f"{when} · {status}", list(rows))
-    body = f"```{error[:400]}```" if error else to_whatsapp(body_markdown)
-    return "\n\n".join(part for part in (head, body, f"_{footer}_" if footer else "") if part)
+    messages = [card(f"🗓️ {title}", f"{when} · {status}", list(rows))]
+    if error:
+        body = [f"```{error[:400]}```"]
+    else:
+        body = markdown_messages(body_markdown, WHATSAPP_LIMIT) if body_markdown.strip() else []
+    for part in body + ([f"_{footer}_"] if footer else []):
+        # parts share a message while they fit, as the single text they used to be
+        if len(messages[-1]) + 2 + len(part) <= WHATSAPP_LIMIT:
+            messages[-1] += "\n\n" + part
+        else:
+            messages.append(part)
+    return messages
 
 
 class WhatsAppDelivery(Delivery):
@@ -66,20 +77,20 @@ class WhatsAppDelivery(Delivery):
             # nothing would send it; say so on the schedule instead of piling up reports
             raise RuntimeError(f"gateway '{self.gateway}' is not running, so the report "
                                f"cannot be sent (start it: ompwire gateway start {self.gateway})")
-        text = render(title=title, when=when, ok=ok, word=word, rows=rows,
-                      body_markdown=body_markdown, error=error, footer=footer)
+        messages = render(title=title, when=when, ok=ok, word=word, rows=rows,
+                          body_markdown=body_markdown, error=error, footer=footer)
         if rejected:
-            text += "\n\nskipped: " + " · ".join(rejected[:4])
+            messages[-1] += "\n\nskipped: " + " · ".join(rejected[:4])
         directory = outbox_dir(self.gateway)
         directory.mkdir(parents=True, exist_ok=True)
-        payload = {"chat": f"{target}@{PHONE_SERVER}", "text": text, "at": time.time(),
+        payload = {"chat": f"{target}@{PHONE_SERVER}", "messages": messages, "at": time.time(),
                    "files": [{"path": str(item.path), "photo": item.as_photo} for item in files]}
         # written aside, then renamed: the gateway never reads half a report
         name = f"{time.time_ns()}-{os.getpid()}.json"
         partial = directory / f".{name}"
         partial.write_text(json.dumps(payload), encoding="utf-8")
         partial.rename(directory / name)
-        return len(chunks(text, WHATSAPP_LIMIT)) + len(files)
+        return len(messages) + len(files)
 
 
 def pending(gateway: str) -> list[Report]:
@@ -98,12 +109,14 @@ def pending(gateway: str) -> list[Report]:
             log.warning("outbox report %s is older than %ss, dropped", path.name, MAX_AGE)
             path.unlink(missing_ok=True)
             continue
-        reports.append(Report(path, str(data["chat"]), str(data["text"]), list(data.get("files") or [])))
+        # "text" is the shape written before reports were pre-split; still sent as before
+        messages = list(data.get("messages") or chunks(str(data.get("text") or ""), WHATSAPP_LIMIT))
+        reports.append(Report(path, str(data["chat"]), messages, list(data.get("files") or [])))
     return reports
 
 
 async def send(transport: Any, report: Report) -> None:
-    for part in chunks(report.text, WHATSAPP_LIMIT):
+    for part in report.messages:
         if await transport.send_text(report.chat, part) is None:
             raise RuntimeError("WhatsApp refused the message")
     for item in report.files:

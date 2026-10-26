@@ -29,7 +29,7 @@ from .attachments import extract as extract_files
 from .attachments import hide_partial as hide_file_partial
 from .config import Config, approval_policy
 from .format import TOOL_LINE_WIDTH, _clip, humanize_token_report, tokens, wib_time
-from .mdrender import strip_agent_noise
+from .mdrender import split_markdown, strip_agent_noise
 from .omp_sessions import plausible_context
 from .questions import extract as extract_options
 from .questions import hide_partial
@@ -172,51 +172,6 @@ def _pref(prefs: dict[str, str], name: str, default: bool) -> bool:
     """A per-chat on/off choice; the default applies until the chat sets it."""
     value = prefs.get(name)
     return default if value is None else value == "on"
-
-
-def _chunks(text: str, limit: int) -> list[str]:
-    """Cut a long answer into messages at line breaks. A cut inside a code block closes the
-    block in this message and opens it again, same fence and language, in the next, so every
-    message renders its code as code instead of one unclosed block and bare lines after it."""
-    from .mdrender import FENCE_OPEN_RE
-
-    out: list[str] = []
-    current: list[str] = []
-    size = 0
-    opener = marker = ""  # the open fence ("```bash", "```"), or "" outside a code block
-
-    def cut() -> None:
-        nonlocal current, size
-        if opener and current and current[-1] == opener and len(current) > 1:
-            current.pop()  # a fence that just opened moves with its code, not left empty here
-            out.append("\n".join(current).rstrip("\n"))
-        else:
-            out.append("\n".join(current + ([marker] if marker else [])))
-        current, size = ([opener], len(opener) + 1) if opener else ([], 0)
-
-    for line in text.split("\n"):
-        closing = len(marker) + 1 if marker else 0
-        while size + len(line) + closing > limit:
-            if current and current != [opener]:
-                cut()
-                continue
-            room = max(1, limit - size - closing)  # one line too long even alone
-            current.append(line[:room])
-            size += room + 1
-            line = line[room:]
-            cut()
-        current.append(line)
-        size += len(line) + 1
-        stripped = line.strip()
-        if marker:
-            if stripped and set(stripped) == {marker[0]} and len(stripped) >= len(marker):
-                opener = marker = ""
-        elif (opened := FENCE_OPEN_RE.match(line)) is not None:
-            marker = opened.group("fence")
-            opener = marker + opened.group("info")
-    if current:
-        out.append("\n".join(current))
-    return out or [""]
 
 
 def mcp_server_names() -> list[str]:
@@ -1701,7 +1656,7 @@ class ChatAgent:
             segment.clear()
             if not text.strip():
                 return
-            for part in _chunks(text, 3600):
+            for part in split_markdown(text, 3600):
                 enqueue("text", part, essential=True)
 
         def post_tool(call_id: str) -> None:

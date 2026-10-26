@@ -189,6 +189,52 @@ def to_html(text: str) -> str:
     return "".join(parts)
 
 
+def split_markdown(text: str, limit: int) -> list[str]:
+    """Cut a long answer into messages at line breaks. A cut inside a code block closes the
+    block in this message and opens it again, same fence and language, in the next, so every
+    message renders its code as code instead of one unclosed block and bare lines after it.
+    Splitting happens on the markdown, before any transport converts it."""
+
+    out: list[str] = []
+    current: list[str] = []
+    size = 0
+    opener = marker = ""  # the open fence ("```bash", "```"), or "" outside a code block
+
+    def cut() -> None:
+        nonlocal current, size
+        if opener and current and current[-1] == opener and len(current) > 1:
+            current.pop()  # a fence that just opened moves with its code, not left empty here
+            out.append("\n".join(current).rstrip("\n"))
+        else:
+            out.append("\n".join(current + ([marker] if marker else [])))
+        current, size = ([opener], len(opener) + 1) if opener else ([], 0)
+
+    for line in text.split("\n"):
+        closing = len(marker) + 1 if marker else 0
+        while size + len(line) + closing > limit:
+            if current and current != [opener]:
+                cut()
+                continue
+            room = max(1, limit - size - closing)  # one line too long even alone
+            current.append(line[:room])
+            size += room + 1
+            line = line[room:]
+            cut()
+        current.append(line)
+        size += len(line) + 1
+        stripped = line.strip()
+        if marker:
+            if stripped and set(stripped) == {marker[0]} and len(stripped) >= len(marker):
+                opener = marker = ""
+        elif (opened := FENCE_OPEN_RE.match(line)) is not None:
+            marker = opened.group("fence")
+            opener = marker + opened.group("info")
+    if current:
+        out.append("\n".join(current))
+    return out or [""]
+
+
+
 def split_blocks(text: str, limit: int = 3200) -> list[str]:
     """Split on blank lines so a table or a fence is never cut in half.
 

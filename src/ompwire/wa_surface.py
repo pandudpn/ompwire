@@ -17,7 +17,7 @@ from . import engine
 from .engine import PlanItem, ToolTrace
 from .format import TOOL_LINE_WIDTH, _clip, now_wib
 from .tg_html import tool_icon, tool_label
-from .wa_client import chunks, to_whatsapp
+from .wa_client import chunks, markdown_messages
 
 log = logging.getLogger("ompwire.whatsapp")
 
@@ -99,9 +99,10 @@ class WhatsAppSurface(engine.Surface):
         self.options_listed = ""
 
     async def post(self, body: str, *, kind: str) -> Any | None:
-        text = to_whatsapp(body) if kind == "text" else body
+        # an answer is cut on its markdown, so a code block split across messages stays code
+        parts = markdown_messages(body, self.limit) if kind == "text" else chunks(body, self.limit)
         sent = None
-        for part in chunks(text, self.limit):
+        for part in parts:
             sent = await self.transport.send_text(self.chat, part)
         return sent
 

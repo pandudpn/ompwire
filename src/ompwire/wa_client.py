@@ -261,48 +261,41 @@ def to_whatsapp(text: str) -> str:
 
 
 def chunks(text: str, limit: int) -> list[str]:
-    """Cut WhatsApp markup at line breaks. A cut inside a ``` block closes it in this message
-    and opens it again in the next, so the code after a cut is still code, not stray backticks."""
+    """Cut already-converted WhatsApp text at line breaks (a card, a report header). Agent
+    markdown goes through `markdown_messages` instead, which knows where its code blocks are."""
     if len(text) <= limit:
         return [text]
     parts: list[str] = []
-    current: list[str] = []
-    size = 0
-    inside = False
-
-    def cut(open_block: bool) -> None:
-        nonlocal current, size
-        parts.append("\n".join(current) + ("\n```" if open_block else ""))
-        current, size = [], 0
-
+    current = ""
     for line in text.split("\n"):
-        closes = inside and line.strip() == "```"
-        toggles = line.count("```") % 2 == 1
-        # after the first piece of a line that opens a block, the rest is inside it
-        after = inside != toggles if not closes else False
-        first = True
-        while True:
-            state = inside if first else (inside or after)
-            head = "```" if state and not current and not closes else ""
-            piece = head + line
-            # four characters stay free for the "\n```" that closes a block cut here
-            if closes or size + len(piece) + 4 <= limit:
-                current.append(piece)
-                size += len(piece) + 1
-                break
+        while len(line) > limit:
             if current:
-                cut(state)
-                continue
-            room = max(1, limit - len(head) - 4)  # one line too long even alone
-            current.append(head + line[:room])
-            line = line[room:]
-            first = False
-            cut(inside or after)
-        if toggles:
-            inside = not inside
+                parts.append(current)
+                current = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            parts.append(current)
+            current = line
+        else:
+            current = candidate
     if current:
-        parts.append("\n".join(current))
+        parts.append(current)
     return parts
+
+
+def markdown_messages(markdown: str, limit: int) -> list[str]:
+    """Agent markdown as WhatsApp messages. The cut happens on the markdown, where a fence is
+    known for what it is, and each part is converted on its own, so a code block cut across
+    messages is closed in one and opened again in the next. Conversion can lengthen a line
+    (a bullet, a link's url in brackets), so the parts are cut a little short of the limit."""
+    from .mdrender import split_markdown
+
+    out: list[str] = []
+    for part in split_markdown(markdown, max(1, limit - 64)):
+        out.extend(chunks(to_whatsapp(part), limit))
+    return out
 
 
 def strip_mention(text: str, ids: set[str]) -> str:

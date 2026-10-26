@@ -14,7 +14,7 @@ import pytest
 from ompwire import wa_surface, whatsapp
 from ompwire.config import load_config
 from ompwire.rpc import AgentError
-from ompwire.wa_client import chunks, strip_mention, to_whatsapp
+from ompwire.wa_client import chunks, markdown_messages, strip_mention, to_whatsapp
 
 ME_PHONE = "6283875181609"
 ME_LID = "132220769575140"
@@ -219,7 +219,7 @@ def test_a_long_message_is_cut_on_lines():
 
 def test_a_long_code_block_is_closed_and_reopened_across_messages():
     code = "\n".join(f"line {i}" for i in range(400))
-    parts = chunks(to_whatsapp("Intro.\n\n```bash\n" + code + "\n```\n\nOutro."), 500)
+    parts = markdown_messages("Intro.\n\n```bash\n" + code + "\n```\n\nOutro.", 500)
     assert len(parts) > 2 and all(len(part) <= 500 for part in parts)
     for part in parts:
         assert part.count("```") % 2 == 0, part[-40:]  # every message closes what it opens
@@ -227,6 +227,14 @@ def test_a_long_code_block_is_closed_and_reopened_across_messages():
     assert [line for line in joined.split("\n") if line.startswith("line")] == \
         [f"line {i}" for i in range(400)]
 
+
+def test_a_long_nested_fence_stays_one_code_block_per_message():
+    """Inside ```` the ``` lines are content; reading converted markup mistook them for the end."""
+    inner = "\n".join(f"line {i}" for i in range(200))
+    parts = markdown_messages("````md\n```bash\n" + inner + "\n```\n" + inner + "\n````", 500)
+    assert len(parts) > 2
+    for part in parts:
+        assert part.startswith("```") and part.endswith("```"), part[:30]
 
 
 def test_the_bots_own_mention_is_removed_and_others_are_kept():
