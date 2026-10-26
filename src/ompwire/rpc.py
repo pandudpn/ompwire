@@ -309,6 +309,11 @@ class AgentClient:
             # a local slash command (/compact, /usage) answers here and starts no turn
             self._emit("agent_message_chunk", {"content": {"type": "text",
                                                            "text": str(frame["text"])}})
+            turn = self._turn
+            if turn is not None:
+                turn["output"] = True
+                if turn.get("local"):
+                    turn["done"].set()
         elif kind in {"auto_compaction_start", "auto_compaction_end", "notice", "queue_update",
                       "available_commands_update", "agent_end", "session_settled"}:
             self._emit(str(kind), frame)
@@ -451,8 +456,14 @@ class AgentClient:
             if not ack.get("success"):
                 raise AgentError(f"prompt failed: {ack.get('error') or 'refused'}")
             if (ack.get("data") or {}).get("agentInvoked") is False:
+                # a local command (/compact, /context) is acknowledged first and answers after,
+                # in a command_output frame; ending here would leak that into the next turn
+                turn["local"] = True
                 turn["status"] = "completed"
-                turn["done"].set()
+                if turn.get("output"):  # the reader may already have passed the output on
+                    turn["done"].set()
+                if not turn["done"].wait(timeout):
+                    raise AgentTimeout(f"{text.split()[0]} gave no output in {timeout:.0f}s")
             while not turn["done"].wait(0.25):
                 if time.monotonic() - self._last_activity > timeout:
                     raise AgentTimeout(f"prompt silent for {timeout:.0f}s ({self._stderr_hint()})")
