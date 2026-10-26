@@ -20,7 +20,7 @@ from typing import Any
 
 from .attachments import Outgoing
 from .delivery import Delivery
-from .wa_client import PHONE_SERVER, chunks, markdown_messages
+from .wa_client import PHONE_SERVER, markdown_messages
 from .wa_surface import WHATSAPP_LIMIT, card
 
 log = logging.getLogger("ompwire.whatsapp")
@@ -109,8 +109,7 @@ def pending(gateway: str) -> list[Report]:
             log.warning("outbox report %s is older than %ss, dropped", path.name, MAX_AGE)
             path.unlink(missing_ok=True)
             continue
-        # "text" is the shape written before reports were pre-split; still sent as before
-        messages = list(data.get("messages") or chunks(str(data.get("text") or ""), WHATSAPP_LIMIT))
+        messages = [str(part) for part in (data.get("messages") or [])]
         reports.append(Report(path, str(data["chat"]), messages, list(data.get("files") or [])))
     return reports
 

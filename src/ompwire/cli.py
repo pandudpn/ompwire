@@ -71,6 +71,9 @@ class TerminalSurface(engine.Surface):
     def reasoning(self, text: str) -> str:
         return _dim(f"… reasoning\n{text}")
 
+    def advisor(self, notes: list[dict[str, str]]) -> str:
+        return "\n".join(["[advisor]", *(f"  {note['severity']}: {note['note']}" for note in notes)])
+
     def plan(self, items: list[engine.PlanItem]) -> str:
         marks = {"completed": "[x]", "in_progress": "[>]"}
         done = sum(1 for item in items if item.status == "completed")

@@ -56,6 +56,9 @@ class FakeSurface(engine.Surface):
     def reasoning(self, text):
         return text
 
+    def advisor(self, notes):
+        return "\n".join(note["note"] for note in notes)
+
     def plan(self, items):
         return ""
 
@@ -293,7 +296,7 @@ def _message(text):
                   raw={"content": {"type": "text", "text": text}})
 
 
-def _render(tmp_path, updates, verbose):
+def _render(tmp_path, updates, verbose, *, advisor=True):
     config = _config(tmp_path)
     config.data.setdefault("stream", {})["min_gap"] = 0.0
     bot_messages: list[str] = []
@@ -323,6 +326,7 @@ def _render(tmp_path, updates, verbose):
         surface.streams = False
         agent = engine.ChatAgent(config, "t", surface)
         agent.verbose = verbose
+        agent.advisor = advisor
         agent.client = EventClient(updates)
         agent.client.on_update = agent._on_update
         agent.session_id = "s"
@@ -342,6 +346,42 @@ def test_a_retry_event_shows_in_a_verbose_chat_in_order(tmp_path):
 def test_a_retry_event_is_silent_in_a_quiet_chat(tmp_path):
     messages = _render(tmp_path, [_message("sebentar"), _retry(), _message("selesai")], False)
     assert not any("retry" in m for m in messages)
+
+
+def _advice(severity, note):
+    return Update(kind="advisor", session_id="s",
+                  raw={"notes": [{"severity": severity, "note": note}]})
+
+
+def test_an_advisor_note_shows_in_order_as_a_code_block(tmp_path):
+    """Asked for in chat: the advisor's notes went nowhere, unlike reasoning."""
+    messages = _render(tmp_path, [_message("sebentar"),
+                                  _advice("concern", "the 400 is from your own <probe>"),
+                                  _message("selesai")], True)
+    card = next(m for m in messages if "advisor" in m)
+    assert "⚠️ <i>concern</i>\n<pre>the 400 is from your own &lt;probe&gt;</pre>" in card
+    assert 0 < messages.index(card) < len(messages) - 1, "between the text around it"
+
+
+def test_advisor_off_hides_the_notes(tmp_path):
+    config_dir = tmp_path
+    messages = _render(config_dir, [_message("ok"), _advice("nit", "x")], True,
+                       advisor=False)
+    assert not any("advisor" in m for m in messages)
+
+
+def test_a_skill_change_names_the_action_and_the_skill(tmp_path):
+    call = Update(kind="tool_call", session_id="s", raw={
+        "toolCallId": "t1", "toolName": "manage_skill", "kind": "manage_skill",
+        "title": "Recording the deploy findings",
+        "rawInput": {"action": "update", "name": "superset-embed", "body": "..."},
+        "status": "in_progress"})
+    done = Update(kind="tool_call_update", session_id="s", raw={
+        "toolCallId": "t1", "toolName": "manage_skill", "status": "completed",
+        "rawOutput": {"content": [{"type": "text", "text": "Updated managed skill"}]}})
+    messages = _render(tmp_path, [call, done, _message("done")], True)
+    trace = next(m for m in messages if "manage_skill" in m)
+    assert "🎓" in trace and "update superset-embed" in trace
 
 
 # --------------------------------------------------------------- btw isolation

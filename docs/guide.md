@@ -8,7 +8,7 @@ not installed yet.
 - [In a chat app](#in-a-chat-app)
 - [Approval](#approval)
 - [Schedules](#schedules)
-- [Thinking and subagents](#thinking-and-subagents)
+- [Thinking, advisor and subagents](#thinking-advisor-and-subagents)
 - [Terminal](#terminal)
 - [Configuration](#configuration)
 - [Update and remove](#update-and-remove)
@@ -170,6 +170,7 @@ The terminal has its own smaller set, described under [Terminal](#terminal).
 | `/stop`, `/kill` | cancel the turn, or stop this chat's agent process |
 | `/approve`, `/verbose`, `/yolo` | approval policy, activity in this chat (trace, todo list, notices), approvals off for this chat |
 | `/reasoning [on\|off]` | show the agent's thinking above the answer, in this chat |
+| `/advisor [on\|off]` | show omp's advisor notes on each turn, in this chat (on by default) |
 | `/skills [query]`, `/commands` | what the agent can do |
 | `/schedule [run\|rm <name>]` | list scheduled turns, run one now, remove one |
 | `/login` | sign in to a model provider |
@@ -198,7 +199,7 @@ for the call and one card per job. The summary (`🤖 subagent (spawned 2 backgr
 lists each job with its type, status, age and tool count, the task it was given, and a totals
 line (running, done, failed, tools, tokens). A job card shows the status line, then the task,
 type, model with its thinking level, usage (requests, tokens, cost as omp reports them) and the
-last action, as plain text. Each update is a new message, like the rest of the chat: until every
+last action, in a code block. Each update is a new message, like the rest of the chat: until every
 job has finished, a card is posted again at most once a minute, even while a job sits on one
 long command, and once more when a job ends, so a background job that outlives the turn still
 reports how it finished. A quiet chat (a group, or `/verbose` off) shows none of them.
@@ -282,11 +283,16 @@ timeout.
 writes files, `yolo` (the default) asks nothing. You can also ask in the chat ("every morning
 at 7, summarise the repo"); the agent proposes it and nothing is installed until you confirm.
 
-## Thinking and subagents
+## Thinking, advisor and subagents
 
-`/reasoning on` shows the agent's thinking above the answer in a collapsed block.
-`[stream] show_reasoning` sets the default. Subagents need no switch: OMP runs them through its
-`task` tool, and the trace labels that call `subagent` with its name and progress.
+`/reasoning on` shows the agent's thinking above the answer in a code block.
+`[stream] show_reasoning` sets the default. When omp's advisor is enabled (`advisor.enabled` in
+`~/.omp/agent/config.yml`), its notes on a turn show as `⚖️ advisor`, one code block per note
+with its severity (🛑 blocker, ⚠️ concern, 💡 nit). `/advisor off` hides them in this chat;
+`[stream] show_advisor` sets the default (on). Subagents need no switch: OMP runs them through
+its `task` tool, and each job gets its own card (see Subagents). A skill the agent creates,
+updates or deletes (`manage_skill`, `learn`) shows in the trace as `🎓` with the action and the
+skill's name.
 
 ## Terminal
 

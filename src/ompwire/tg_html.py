@@ -151,26 +151,38 @@ def plan_card(items: Iterable[Any]) -> str:
 
 
 def job_group(group: Iterable[engine.JobCard], spawned: int) -> str:
-    """The card that opens a `task` call: one line per job, then the totals so far."""
+    """The card that opens a `task` call: one row per job with its task, then the totals."""
     group = list(group)
     word = "agent" if spawned == 1 else "agents"
     background = "background " if any(card.detached for card in group) else ""
-    lines = [f"🤖 <b>subagent</b> (spawned {spawned} {background}{word})"]
+    lines: list[str] = []
     for card in group:
-        lines.append(f"• {esc(engine.job_row(card))}")
+        lines.append(engine.job_row(card))
         if card.task:
-            lines.append(f"  <i>{esc(card.task)}</i>")
+            lines.append(f"  {card.task}")
     totals = engine.group_totals(group)
     if totals:
-        lines += ["", esc(totals)]
-    return "\n".join(lines)
+        lines += ["", totals]
+    return (f"🤖 <b>subagent</b> (spawned {spawned} {background}{word})\n"
+            f"<pre>{esc(chr(10).join(lines))}</pre>")
 
 
 def job_block(card: engine.JobCard) -> str:
     """One subagent as a card of its own: what it is, what it last did, how it is doing."""
-    lines = [f"🤖 <b>subagent</b> - {esc(card.name)}", f"<i>{esc(engine.job_line(card))}</i>", ""]
-    lines += [f"<b>{esc(label)}:</b> {esc(value)}" for label, value in engine.job_details(card)]
-    return "\n".join(lines)
+    details = engine.job_details(card)
+    width = max((len(label) for label, _ in details), default=0)
+    body = "\n".join(f"{label.ljust(width)}  {value}" for label, value in details)
+    return (f"🤖 <b>subagent</b> - {esc(card.name)} · <i>{esc(engine.job_line(card))}</i>\n"
+            f"<pre>{esc(body)}</pre>")
+
+
+def advisor_block(notes: list[dict[str, str]]) -> str:
+    """The advisor model's notes on the turn, one block each with its severity."""
+    parts = ["⚖️ <b>advisor</b>"]
+    for note in notes:
+        parts.append(f"{engine.severity_mark(note['severity'])} <i>{esc(note['severity'])}</i>\n"
+                     f"<pre>{esc(note['note'])}</pre>")
+    return "\n".join(parts)
 
 
 def help_sections(sections: Iterable[tuple[str, Iterable[tuple[str, str]]]]) -> str:

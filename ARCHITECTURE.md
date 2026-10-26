@@ -209,6 +209,7 @@ has a decision behind it:
 | --- | --- |
 | `agent_message_chunk` | the answer, buffered and posted as a new message at the next tool call or the end of the turn |
 | `agent_thought_chunk` | the reasoning, shown only with `/reasoning on`, kept to its tail |
+| `advisor` | omp's advisor card: a `message_end` whose message is `role: "custom"`, `customType: "advisor"`, notes in `details.notes` (`{note, severity}`); shown with `/advisor on` (the default) in a verbose chat, mid-turn in order, after the turn straight away |
 | `tool_call`, `tool_call_update` | one message per call, posted when it completes or fails, when `stream.show_tool_calls` is on; headed by the tool's own name and an icon |
 | `plan` | the agent's todo list, posted as a fresh checklist each time it changes; a repeat (omp's reminder) and the emptied list at the end are skipped |
 | `available_commands_update` | fills `/commands` |

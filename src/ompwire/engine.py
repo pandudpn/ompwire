@@ -40,6 +40,9 @@ from .store import SessionStore
 log = logging.getLogger("ompwire.engine")
 
 REASONING_CHARS = 1200  # the tail matters; the beginning usually restates the question
+ADVISOR_CHARS = 1500  # per note; the advisor writes a paragraph, not a report
+# Tools whose call changes what the agent knows next time; the trace names the skill touched.
+SKILL_TOOLS = frozenset({"manage_skill", "learn"})
 PERMISSION_TIMEOUT = 120.0
 # One more try after a restart is worth it; a turn that keeps dying with the gateway is the cause.
 RESUME_LIMIT = 2
@@ -260,6 +263,7 @@ def agent_rows(agent: ChatAgent) -> list[tuple[str, str]]:
         ("trace", "verbose" if agent.verbose else "quiet"),
         # off by default; shown either way so a missing thinking block has a visible reason
         ("reasoning", "on" if agent.reasoning else "off · /reasoning on"),
+        ("advisor", "on" if agent.advisor else "off · /advisor on"),
         ("busy", agent.busy_mode),
         ("mcp", mcp_label(servers)),
         ("cwd", agent.cwd),
@@ -514,6 +518,14 @@ def job_row(card: JobCard) -> str:
     return " · ".join(parts)
 
 
+SEVERITY_MARKS = {"blocker": "🛑", "concern": "⚠️", "nit": "💡"}
+
+
+def severity_mark(severity: str) -> str:
+    """The mark an advisor note carries in the chat, by how much it should weigh."""
+    return SEVERITY_MARKS.get(severity, "📝")
+
+
 def job_usage(card: JobCard) -> str:
     """What a job has spent so far: requests, tokens, cost. Empty until omp reports any."""
     parts = []
@@ -600,6 +612,10 @@ class Surface(abc.ABC):
     def reasoning(self, text: str) -> str: ...
 
     @abc.abstractmethod
+    def advisor(self, notes: list[dict[str, str]]) -> str:
+        """The advisor model's notes on the turn: each a severity and the note itself."""
+
+    @abc.abstractmethod
     def plan(self, items: list[PlanItem]) -> str:
         """The agent's todo list, posted again whenever it changes."""
 
@@ -676,6 +692,10 @@ class ChatAgent:
         prefs = self.store.prefs(key)
         self.reasoning = _pref(prefs, "reasoning",
                                not shared and bool(config.get("stream", "show_reasoning", False)))
+        # the advisor's notes: on by default in a direct chat, since omp only sends them when
+        # its advisor is enabled, and a correction the agent got is one the person should see
+        self.advisor = _pref(prefs, "advisor",
+                             not shared and bool(config.get("stream", "show_advisor", True)))
         # the todo list last shown; omp repeats it as a reminder, and a repeat is not news
         self._last_plan: list[PlanItem] = []
         # the bot that receives a scheduled result defaults to the bot being talked to
@@ -990,6 +1010,13 @@ class ChatAgent:
             return
         if update.kind in {"queue_update", "session_settled", "agent_end"}:
             return
+        if update.kind == "advisor" and not self.busy:
+            # a card can land after the turn yielded; nothing reads the turn queue then
+            body = self._advisor_body(update)
+            if body:
+                self._loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._post_between_turns(body, "advisor")))
+            return
         if update.kind == "config_option_update" and not self.busy:
             # between turns nothing reads the turn queue; mid-turn they take it, so a notice
             # lands after the messages that came before it
@@ -1242,6 +1269,24 @@ class ChatAgent:
         if isinstance(threshold, int):
             return f"⚠️ context at {pct}% · omp compacts at {threshold}%"
         return f"⚠️ context at {pct}% ({line})"
+
+    def _advisor_body(self, update: AgentUpdate) -> str:
+        """The advisor's notes as this surface shows them, or "" when the chat hides them."""
+        if not (self.verbose and self.advisor):
+            return ""
+        notes = [{"severity": str(note.get("severity") or "note"),
+                  "note": _clip(str(note.get("note") or "").strip(), lines=40,
+                                width=ADVISOR_CHARS)}
+                 for note in (update.raw.get("notes") or []) if isinstance(note, dict)]
+        notes = [note for note in notes if note["note"]]
+        return self.surface.advisor(notes) if notes else ""
+
+    async def _post_between_turns(self, body: str, kind: str) -> None:
+        """A rendered card that lands after the turn yielded, posted as-is."""
+        try:
+            await self.surface.post(body, kind=kind)
+        except Exception:
+            log.warning("%s card failed chat=%s", kind, self.label, exc_info=True)
 
     async def _context_notice(self, text: str) -> None:
         """A notice outside a turn: surface.notice goes straight to the platform, so it is
@@ -1852,6 +1897,13 @@ class ChatAgent:
                         if text:
                             self._turn_notice(text)
                     continue
+                elif update.kind == "advisor":
+                    body = self._advisor_body(update)
+                    if body:
+                        flush_thinking()
+                        flush_segment()
+                        enqueue("advisor", body, essential=False)
+                    continue
                 elif update.kind == "plan":
                     flush_thinking()
                     flush_segment()
@@ -1879,6 +1931,10 @@ class ChatAgent:
                         inputs[call_id] = raw_input
                         entry.tool = tool_name(entry.kind, raw_input, named)
                         entry.command = str(raw_input.get("command") or "")
+                        if named in SKILL_TOOLS and raw_input.get("name"):
+                            # the intent says why; the action and the skill say what changed
+                            entry.command = " ".join(str(part) for part in (
+                                raw_input.get("action") or "", raw_input.get("name")) if part)
                         tasks = raw_input.get("tasks")
                         if isinstance(tasks, list) and tasks:
                             entry.kind = entry.tool = "subagent"

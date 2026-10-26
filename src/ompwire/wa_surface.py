@@ -121,9 +121,12 @@ class WhatsAppSurface(engine.Surface):
         return "\n".join(lines)
 
     def reasoning(self, text: str) -> str:
-        # no collapsible block on WhatsApp: a quote keeps it visibly apart from the answer
-        quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in text.splitlines())
-        return f"🧠 _reasoning_\n{quoted}"
+        return f"🧠 *reasoning*\n```{text}```"
+
+    def advisor(self, notes: list[dict[str, str]]) -> str:
+        body = "\n\n".join(f"{engine.severity_mark(note['severity'])} {note['severity']}\n"
+                           f"{note['note']}" for note in notes)
+        return f"⚖️ *advisor*\n```{body}```"
 
     def dropped(self, count: int) -> str:
         return f"_… {count} tool call(s) not shown_"
@@ -132,22 +135,24 @@ class WhatsAppSurface(engine.Surface):
         return "\n\n".join(blocks)
 
     def job(self, card: engine.JobCard) -> str:
-        lines = [f"🤖 *subagent* - {card.name}", f"_{engine.job_line(card)}_", ""]
-        lines += [f"*{label}:* {value}" for label, value in engine.job_details(card)]
-        return "\n".join(lines)
+        details = engine.job_details(card)
+        width = max((len(label) for label, _ in details), default=0)
+        body = "\n".join(f"{label.ljust(width)}  {value}" for label, value in details)
+        return f"🤖 *subagent* - {card.name} · _{engine.job_line(card)}_\n```{body}```"
 
     def jobs(self, group: list[engine.JobCard], spawned: int) -> str:
         word = "agent" if spawned == 1 else "agents"
         background = "background " if any(card.detached for card in group) else ""
-        lines = [f"🤖 *subagent* (spawned {spawned} {background}{word})"]
+        lines: list[str] = []
         for card in group:
-            lines.append(f"• {engine.job_row(card)}")
+            lines.append(engine.job_row(card))
             if card.task:
-                lines.append(f"  _{card.task}_")
+                lines.append(f"  {card.task}")
         totals = engine.group_totals(group)
         if totals:
             lines += ["", totals]
-        return "\n".join(lines)
+        return f"🤖 *subagent* (spawned {spawned} {background}{word})\n```" + \
+            "\n".join(lines) + "```"
 
     @contextlib.asynccontextmanager
     async def typing(self):

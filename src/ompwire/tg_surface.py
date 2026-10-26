@@ -24,7 +24,17 @@ from .delivery import Delivery
 from .engine import FloodWait, ToolTrace
 from .format import now_wib
 from .mdrender import strip_html, to_html, to_plain
-from .tg_html import card, esc, job_block, job_group, plan_card, run_card, run_status, tool_block
+from .tg_html import (
+    advisor_block,
+    card,
+    esc,
+    job_block,
+    job_group,
+    plan_card,
+    run_card,
+    run_status,
+    tool_block,
+)
 
 log = logging.getLogger("ompwire.telegram")
 
@@ -116,9 +126,12 @@ class TelegramSurface(engine.Surface):
         return plan_card(items)
 
     def reasoning(self, text: str) -> str:
-        # prose, so not a code block: monospace reads badly on a phone and a <pre> cannot
-        # collapse. An expandable quote stays one line until tapped.
-        return f"🧠 <i>reasoning</i>\n<blockquote expandable>{esc(text)}</blockquote>"
+        # in a code block like every other card the agent's activity produces, so it reads
+        # apart from the answer at a glance
+        return f"🧠 <b>reasoning</b>\n<pre>{esc(text)}</pre>"
+
+    def advisor(self, notes: list[dict[str, str]]) -> str:
+        return advisor_block(notes)
 
     def dropped(self, count: int) -> str:
         return f"<i>… {count} tool call(s) not shown (Telegram flood control)</i>"

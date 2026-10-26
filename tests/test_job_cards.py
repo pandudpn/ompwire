@@ -88,6 +88,9 @@ class Cards(engine.Surface):
     def reasoning(self, text):
         return ""
 
+    def advisor(self, notes):
+        return ""
+
     def plan(self, items):
         return ""
 
@@ -611,39 +614,55 @@ def test_telegram_posts_every_job_card_update_as_a_new_message():
     assert all(message.edits == [] for message in bot.messages)
 
 
+def _pre(body):
+    """What a Telegram card shows inside its code block, unescaped."""
+    import html
+
+    assert body.count("<pre>") == 1 and body.endswith("</pre>")
+    return html.unescape(body.split("<pre>", 1)[1][:-len("</pre>")])
+
+
 def test_telegram_renders_the_job_card():
     card = running_card(task="List the Go modules and their entry points", thinking="high",
                         model="omniroute/coding-worker", requests=4, tokens=58_600, cost=0.12)
     body = tg_surface_with(FakeBot()).job(card)
-    assert body.splitlines()[0] == "🤖 <b>subagent</b> - CountPy"
-    assert "running · 1m20s · 3 tools" in body
-    for label, value in [("Task", "List the Go modules and their entry points"),
-                         ("Type", "task"), ("Model", "omniroute/coding-worker · thinking high"),
-                         ("Usage", "4 requests · 58.6k tokens · $0.12"),
-                         ("Last action", "Counting py files · bash: find . -name '*.py'")]:
-        assert f"<b>{label}:</b> {value}" in body
-    assert "<pre>" not in body and "<code>" not in body, "details read as text, not a code block"
+    assert body.splitlines()[0] == "🤖 <b>subagent</b> - CountPy · <i>running · 1m20s · 3 tools</i>"
+    rows = {line.split("  ", 1)[0].strip(): line.split("  ", 1)[1].strip()
+            for line in _pre(body).splitlines()}
+    assert rows == {"Task": "List the Go modules and their entry points", "Type": "task",
+                    "Model": "omniroute/coding-worker · thinking high",
+                    "Usage": "4 requests · 58.6k tokens · $0.12",
+                    "Last action": "Counting py files · bash: find . -name '*.py'"}
 
 
 def test_telegram_renders_the_summary_with_each_task_and_the_totals():
     done = running_card(name="DateNow", status="completed", tool_count=1, tokens=2_000)
     running = running_card(task="Count the python files", tokens=10_000)
     body = tg_surface_with(FakeBot()).jobs([running, done], 2)
-    lines = body.splitlines()
-    assert lines[0] == "🤖 <b>subagent</b> (spawned 2 background agents)"
-    assert "• CountPy · task · running · 1m20s · 3 tools" in lines
-    assert "  <i>Count the python files</i>" in lines
-    assert "• DateNow · task · ✅ done · 1 tool" in lines
-    assert lines[-1] == "1 running · 1 done · 4 tools · 12k tokens"
+    assert body.splitlines()[0] == "🤖 <b>subagent</b> (spawned 2 background agents)"
+    assert _pre(body).splitlines() == ["CountPy · task · running · 1m20s · 3 tools",
+                                       "  Count the python files",
+                                       "DateNow · task · ✅ done · 1 tool",
+                                       "",
+                                       "1 running · 1 done · 4 tools · 12k tokens"]
 
 
 def test_telegram_marks_a_job_without_known_type_and_model():
     body = tg_surface_with(FakeBot()).job(engine.JobCard(name="<odd&name>", status="running"))
-    assert "<b>Type:</b> task" in body and "<b>Model:</b> ?" in body
     assert "&lt;odd&amp;name&gt;" in body, "a job name is escaped like any other text"
+    shown = _pre(body)
     # the line is always there: a job that has not called a tool yet says it is starting
-    assert "<b>Last action:</b> starting…" in body
-    assert "Usage" not in body and "Task" not in body, "nothing reported yet, no empty label"
+    assert [line.split()[0] for line in shown.splitlines()] == ["Type", "Model", "Last"]
+    assert "starting…" in shown and "?" in shown
+
+
+def test_telegram_shows_each_advisor_note_with_its_severity_in_a_code_block():
+    body = tg_surface_with(FakeBot()).advisor([
+        {"severity": "blocker", "note": "`rm -rf /usr` would <destroy> the system"},
+        {"severity": "nit", "note": "say which file"}])
+    assert body.startswith("⚖️ <b>advisor</b>")
+    assert "🛑 <i>blocker</i>\n<pre>`rm -rf /usr` would &lt;destroy&gt; the system</pre>" in body
+    assert "💡 <i>nit</i>\n<pre>say which file</pre>" in body
 
 
 # ------------------------------------------------------------- whatsapp surface
@@ -677,15 +696,14 @@ def test_whatsapp_posts_every_job_card_update_as_a_new_message():
 def test_whatsapp_renders_the_card_in_its_own_markup():
     surface = wa_surface.WhatsAppSurface(WaTransport(), "6281234")
     body = surface.job(running_card(task="Count the python files", tokens=7_274))
-    assert body.splitlines()[0] == "🤖 *subagent* - CountPy"
-    assert "_running · 1m20s · 3 tools_" in body
-    assert "*Task:* Count the python files" in body and f"*Model:* {MODEL}" in body
-    assert "*Usage:* 7.27k tokens" in body
-    assert "*Last action:* Counting py files · bash: find . -name '*.py'" in body
-    assert "```" not in body
+    assert body.splitlines()[0] == "🤖 *subagent* - CountPy · _running · 1m20s · 3 tools_"
+    assert body.count("```") == 2 and body.endswith("```")
+    assert "Task         Count the python files" in body and "Usage        7.27k tokens" in body
     summary = surface.jobs([running_card()], 1)
     assert summary.splitlines()[0] == "🤖 *subagent* (spawned 1 background agent)"
-    assert summary.splitlines()[-1] == "1 running · 3 tools"
+    assert summary.count("```") == 2 and summary.endswith("1 running · 3 tools```")
+    advice = surface.advisor([{"severity": "concern", "note": "check the exit code"}])
+    assert advice == "⚖️ *advisor*\n```⚠️ concern\ncheck the exit code```"
 
 
 # ------------------------------------------------------------------ terminal

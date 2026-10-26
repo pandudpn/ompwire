@@ -84,3 +84,18 @@ def test_a_prompt_while_omp_is_still_busy_waits_its_turn(tmp_path):
     finally:
         client.close()
     assert result.text == "queued and answered"
+
+
+def test_an_advisor_card_becomes_an_advisor_update():
+    """omp 18.12.6 injects the advisor's review as its own record: role custom, customType
+    advisor, the notes in details (read from the bundled source and a session transcript)."""
+    seen = []
+    client = AgentClient(on_update=seen.append)
+    client._dispatch({"type": "message_end", "messageId": "m7", "message": {
+        "role": "custom", "customType": "advisor", "display": True, "content": "<advisory>…",
+        "details": {"notes": [{"note": "check the exit code", "severity": "concern"},
+                              {"severity": "nit"}]}}})
+    client._dispatch({"type": "message_end", "message": {
+        "role": "custom", "customType": "irc:incoming", "details": {}}})
+    assert [(update.kind, update.raw["notes"]) for update in seen] == [
+        ("advisor", [{"note": "check the exit code", "severity": "concern"}])]

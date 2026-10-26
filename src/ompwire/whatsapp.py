@@ -70,7 +70,7 @@ IDLE_CHECK_INTERVAL = 60.0
 MIN_GAP = 1.5
 # commands the WhatsApp transport answers itself; anything else starting with "/" is the agent's
 HANDLED = {"new", "stop", "status", "usage", "context", "sessions", "fork", "cwd",
-           "model", "mode", "thinking", "approve", "verbose", "reasoning", "busy", "stats",
+           "model", "mode", "thinking", "approve", "verbose", "reasoning", "advisor", "busy", "stats",
            "name", "export", "handoff", "btw", "compact", "compaction", "yolo", "kill",
            "whoami", "help", "schedule"}
 
@@ -877,6 +877,13 @@ class Transport:
         await self.send_text(incoming.chat, f"reasoning: {'on' if agent.reasoning else 'off'}"
                                             + ("" if wanted else " · /reasoning on|off"))
 
+    async def cmd_advisor(self, incoming: Incoming, agent: engine.ChatAgent, args: list[str]) -> None:
+        wanted = (args[0].lower() if args else "").strip()
+        if wanted in {"on", "off"}:
+            agent.set_display("advisor", wanted == "on")
+        await self.send_text(incoming.chat, f"advisor: {'on' if agent.advisor else 'off'}"
+                                            + ("" if wanted else " · /advisor on|off"))
+
     async def _set_busy_mode(self, chat: str, agent: engine.ChatAgent, value: str) -> None:
         try:
             mode = agent.set_busy_mode(value)
@@ -955,7 +962,8 @@ class Transport:
         names = dict(COMMANDS)
         groups = [
             ("session", ["new", "sessions", "fork", "cwd", "handoff", "name", "export", "kill"]),
-            ("agent", ["model", "mode", "thinking", "approve", "verbose", "reasoning", "yolo"]),
+            ("agent", ["model", "mode", "thinking", "approve", "verbose", "reasoning", "advisor",
+                       "yolo"]),
             ("running", ["stop", "busy", "btw", "status", "usage", "stats", "context", "compact",
                          "compaction", "schedule"]),
             ("info", ["whoami", "help"]),

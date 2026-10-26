@@ -107,6 +107,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("compaction", "show or set omp's auto-compaction threshold"),
     ("schedule", "scheduled turns: list, run now, remove"),
     ("reasoning", "show or hide the agent's thinking"),
+    ("advisor", "show or hide the advisor's notes on each turn"),
     ("yolo", "respawn the agent with approvals off, for this chat only"),
     ("kill", "stop the agent process for this chat"),
     ("whoami", "ids and transport info"),
@@ -922,6 +923,22 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             update.effective_chat.id,
             f"reasoning: {'on' if agent.reasoning else 'off'} · `/reasoning on` or `off`")
 
+    async def cmd_advisor(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show or hide the notes omp's advisor model writes on each turn (when it is enabled
+        in omp's config): a second model's corrections are worth seeing next to the answer."""
+        if not self._authorized(update):
+            return await self._deny(update)
+        agent = self.agent_for(update.effective_chat.id)
+        wanted = (ctx.args[0].lower() if ctx.args else "").strip()
+        if wanted in {"on", "off", "1", "0", "true", "false", "yes", "no"}:
+            value = wanted in {"on", "1", "true", "yes"}
+            agent.set_display("advisor", value)
+            return await self.announce(update.effective_chat.id,
+                                       f"advisor: {'on' if value else 'off'} · this chat")
+        await self.announce(
+            update.effective_chat.id,
+            f"advisor: {'on' if agent.advisor else 'off'} · `/advisor on` or `off`")
+
     async def cmd_commands(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Search the slash commands the agent advertises (about a thousand)."""
         if not self._authorized(update):
@@ -1145,7 +1162,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             ("session", ["new", "sessions", "name", "handoff", "export", "fork", "cwd",
                          "schedule", "kill"]),
             ("agent", ["model", "mode", "thinking", "approve", "trace", "verbose", "reasoning",
-                       "yolo"]),
+                       "advisor", "yolo"]),
             ("catalog", ["skills", "login", "commands"]),
             ("running", ["stop", "busy", "btw", "status", "usage", "stats", "context",
                          "compact", "compaction"]),
@@ -1394,6 +1411,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         app.add_handler(CommandHandler("busy", self.cmd_busy))
         app.add_handler(CommandHandler("verbose", self.cmd_verbose))
         app.add_handler(CommandHandler("reasoning", self.cmd_reasoning))
+        app.add_handler(CommandHandler("advisor", self.cmd_advisor))
         app.add_handler(CommandHandler("schedule", self.cmd_schedule))
         app.add_handler(CommandHandler("btw", self.cmd_btw, block=False))
         app.add_handler(CommandHandler("yolo", self.cmd_yolo))

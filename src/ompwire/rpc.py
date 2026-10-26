@@ -282,6 +282,13 @@ class AgentClient:
                 usage = message.get("usage") or {}
                 if usage:
                     self._turn["usage"] = _usage(usage)
+            elif message.get("role") == "custom" and message.get("customType") == "advisor":
+                # the advisor model's review of the turn, injected mid-stream as its own record
+                notes = (message.get("details") or {}).get("notes")
+                if isinstance(notes, list) and notes:
+                    self._emit("advisor", {"notes": [note for note in notes
+                                                     if isinstance(note, dict) and note.get("note")],
+                                           "messageId": frame.get("messageId")})
         elif kind == "tool_execution_start":
             args = frame.get("args") if isinstance(frame.get("args"), dict) else {}
             name = str(frame.get("toolName") or "")

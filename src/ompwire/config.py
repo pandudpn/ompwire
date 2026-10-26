@@ -101,6 +101,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # the agent's thinking arrives over ACP as agent_thought_chunk; off by default because
         # at thinking=xhigh it is long, and /reasoning turns it on for the turns that need it
         "show_reasoning": False,
+        # the advisor model's notes on a turn; omp sends them only when its advisor is enabled
+        "show_advisor": True,
         # fraction of the context window that triggers one ⚠️ notice per crossing
         "compaction_warn": 0.6,
     },
