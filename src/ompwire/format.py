@@ -82,3 +82,8 @@ def _clip(text: str, lines: int = TOOL_OUTPUT_LINES, width: int = TOOL_LINE_WIDT
     if len(parts) > lines:
         parts = parts[:lines] + [f"… +{len(parts) - lines} more line(s)"]
     return "\n".join(parts)
+
+
+def percent(part: int, whole: int) -> str:
+    """Share of `whole` as a whole-number percentage, for the context meter."""
+    return f"{part * 100 // whole}%"
