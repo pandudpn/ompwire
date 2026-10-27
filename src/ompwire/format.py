@@ -86,4 +86,7 @@ def _clip(text: str, lines: int = TOOL_OUTPUT_LINES, width: int = TOOL_LINE_WIDT
 
 def percent(part: int, whole: int) -> str:
     """Share of `whole` as a whole-number percentage, for the context meter."""
+    # The meter can render before omp reports the window size.
+    if not whole:
+        return "0%"
     return f"{part * 100 // whole}%"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ompwire.format import uptime
+from ompwire.format import percent, uptime
 from ompwire.tg_html import (
     TOOL_LINE_WIDTH,
     card,
@@ -132,3 +132,12 @@ class TestHelpSections:
 
     def test_no_trailing_blank_lines(self):
         assert not help_sections([("A", [("x", "y")])]).endswith("\n")
+
+
+class TestPercent:
+    def test_share_of_the_window(self):
+        assert percent(586, 1000) == "58%"
+
+    def test_unknown_window_size_reads_zero(self):
+        assert percent(0, 0) == "0%"
+        assert percent(1200, 0) == "0%"
