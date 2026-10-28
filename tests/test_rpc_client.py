@@ -99,3 +99,16 @@ def test_an_advisor_card_becomes_an_advisor_update():
         "role": "custom", "customType": "irc:incoming", "details": {}}})
     assert [(update.kind, update.raw["notes"]) for update in seen] == [
         ("advisor", [{"note": "check the exit code", "severity": "concern"}])]
+
+
+def test_a_failing_update_callback_is_logged_not_swallowed(caplog):
+    """The reader thread must survive a broken callback, and the failure must be visible."""
+    def broken(update):
+        raise ValueError("renderer blew up")
+
+    client = AgentClient(on_update=broken)
+    with caplog.at_level("ERROR", logger="ompwire.rpc"):
+        client._dispatch({"type": "message_update", "messageId": "m1",
+                          "assistantMessageEvent": {"type": "text_delta", "delta": "hi"}})
+    assert any("update callback failed" in record.getMessage() and record.exc_info
+               for record in caplog.records)

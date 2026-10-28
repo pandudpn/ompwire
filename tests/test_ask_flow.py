@@ -385,6 +385,58 @@ def test_answering_with_other_keeps_the_question_on_the_card(tmp_path):
     assert "type your answer" in edits[0]
 
 
+def _idle_chat(tmp_path, updates_after):
+    """A chat whose agent runs on its own between turns, then gets a prompt."""
+    config = _config(tmp_path)
+    config.data.setdefault("stream", {})["min_gap"] = 0.0
+    sent: list[str] = []
+
+    class Bot:
+        async def send_message(self, _chat, text, **_kw):
+            sent.append(text)
+            return types.SimpleNamespace()
+
+    async def go():
+        surface = telegram.TelegramSurface.__new__(telegram.TelegramSurface)
+        surface.app = types.SimpleNamespace(bot=Bot())
+        surface.chat_id, surface.label, surface.limit, surface.streams = 1, "t", 4000, False
+        agent = engine.ChatAgent(config, "t", surface)
+        agent.verbose = True
+        agent.client = EventClient([_message("jawaban baru")])
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        agent._on_update(Update(kind="tool_call", session_id="s", raw={
+            "toolCallId": "bg1", "toolName": "bash", "kind": "bash", "title": "background",
+            "status": "completed", "rawInput": {"command": "echo from-the-job"}}))
+        agent._on_update(_message("hasil job"))
+        for update in updates_after:
+            agent._on_update(update)
+        await asyncio.sleep(0.1)
+        between = list(sent)
+        await agent.ask("pesan berikutnya")
+        return between, sent[len(between):]
+
+    return asyncio.run(go())
+
+
+def test_a_run_the_agent_starts_on_its_own_posts_when_it_ends(tmp_path):
+    """A background job's result woke the agent between turns; its tool cards and text waited
+    for the person's next message and arrived with it as a burst."""
+    end = Update(kind="agent_end", session_id="s", raw={"isTerminal": True, "yielded": True})
+    between, next_turn = _idle_chat(tmp_path, [end])
+    assert any("from-the-job" in m for m in between)
+    assert any("hasil job" in m for m in between)
+    assert next_turn == ["jawaban baru"]
+
+
+def test_a_prompt_during_a_self_started_run_does_not_take_its_messages(tmp_path):
+    """No agent_end yet: the prompt closes that run first, so its answer stands alone."""
+    between, next_turn = _idle_chat(tmp_path, [])
+    assert any("from-the-job" in m for m in between + next_turn)
+    assert next_turn[-1] == "jawaban baru"
+    assert not any("hasil job" in m and "jawaban baru" in m for m in next_turn)
+
+
 def _advice(severity, note):
     return Update(kind="advisor", session_id="s",
                   raw={"notes": [{"severity": severity, "note": note}]})

@@ -21,6 +21,7 @@ import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 from . import allowlist, gateways, omp_sessions
@@ -757,6 +758,9 @@ class ChatAgent:
         self._lock = asyncio.Lock()
         self._btw_waiters: dict[str, asyncio.Future] = {}
         self._ask_slots: dict[str, dict[str, Any]] = {}
+        # a run omp started on its own (a background job's result woke the agent): its renderer,
+        # open from its first update until omp says the run ended
+        self._idle_run: SimpleNamespace | None = None
         self._btw_records: dict[str, dict[str, Any]] = {}
         # the subagents the `task` tool spawned, by (call that spawned it, job name): one card
         # each, plus one summary card per call. A detached job outlives the turn that made it,
@@ -1006,6 +1010,10 @@ class ChatAgent:
                     self._loop.call_soon_threadsafe(
                         lambda: asyncio.create_task(self._context_notice(text)))
             return
+        if update.kind == "agent_end" and not self.busy and update.raw.get("isTerminal") is not False:
+            # the run omp started on its own is over; its messages go out now
+            self._loop.call_soon_threadsafe(self._close_idle_run)
+            return
         if update.kind in {"queue_update", "session_settled", "agent_end"}:
             return
         if update.kind == "advisor" and not self.busy:
@@ -1020,7 +1028,36 @@ class ChatAgent:
             # lands after the messages that came before it
             self._loop.call_soon_threadsafe(self._on_option_update, update)
             return
+        if not self.busy:
+            # Nothing reads the turn queue between turns. Queued, these waited for the next
+            # message the person sent and arrived with it as a burst of old tool cards; a run
+            # omp starts on its own gets a renderer of its own instead.
+            self._loop.call_soon_threadsafe(self._idle_update, update)
+            return
         self._loop.call_soon_threadsafe(self._updates.put_nowait, update)
+
+    def _idle_update(self, update: AgentUpdate) -> None:
+        """An update from a run nobody prompted; ask() may have started since it was scheduled."""
+        if self.busy:
+            self._updates.put_nowait(update)
+            return
+        if self._idle_run is None:
+            log.info("run started by the agent chat=%s", self.label)
+            self._idle_run = self._open_renderer()
+        self._updates.put_nowait(update)
+
+    def _close_idle_run(self) -> None:
+        run, self._idle_run = self._idle_run, None
+        if run is None:
+            return
+        self._updates.put_nowait(None)
+        # held so the loop cannot drop the task before the run's last messages are posted
+        run.closing = asyncio.create_task(self._finish_idle_run(run))
+
+    async def _finish_idle_run(self, run: SimpleNamespace) -> None:
+        await run.drain
+        await run.finish()
+        log.info("run started by the agent ended chat=%s tools=%s", self.label, run.state["tools"])
 
     BTW_FINAL = frozenset({"complete", "error", "cancelled"})
 
@@ -1631,24 +1668,12 @@ class ChatAgent:
                 log.debug("could not rewrite the expired approval prompt: %s", exc)
 
     # ------------------------------------------------------------------ turn
-    async def ask(self, text: str, images: list[dict[str, Any]] | None = None,
-                  resumes: int = 0, record: str | None = None) -> str:
-        text = await self._plan_turn(text)
-        if not text:
-            return ""
-        await self.ensure()
-        self.busy = True
-        self._compact_turn = text.strip() == "/compact"
-        self._user_cancel = False
-        self.last_used = time.time()
-        started = time.time()
-        self.turns += 1
-        # written before the prompt goes out, deleted only when the turn really ends: a gateway
-        # restart in between leaves the row, and the next start picks the turn back up. A resume
-        # records the person's words, not the resume wrapper, so a second restart does not nest it.
-        self.store.begin_turn(self.key, record or text, resumes)
-        log.info("turn start chat=%s session=%s input_chars=%s", self.label,
-                 self.session_id[:8], len(text))
+    def _open_renderer(self) -> SimpleNamespace:
+        """Turn one run's updates into chat messages: a drain that reads the turn queue and a
+        sender that posts in order, both started here. ask() opens one per prompt; a run omp
+        starts on its own (a background job woke the agent) opens one between turns, so its
+        messages go out as they happen instead of riding on the next message the person sends.
+        """
         # Every message is posted once and never edited, so its timestamp is when that step
         # happened. Answer text is cut into segments at each tool call; each tool call is its own
         # message, posted when it finishes so it carries its output.
@@ -1976,6 +2001,35 @@ class ChatAgent:
         drain_task = asyncio.create_task(drain())
         # markdown, like surface.notice between turns
         self._turn_notice = lambda body: enqueue("text", body, essential=True)
+        return SimpleNamespace(state=state, drain=drain_task, sender=sender_task,
+                               finish=finish)
+
+    async def ask(self, text: str, images: list[dict[str, Any]] | None = None,
+                  resumes: int = 0, record: str | None = None) -> str:
+        text = await self._plan_turn(text)
+        if not text:
+            return ""
+        await self.ensure()
+        if self._idle_run is not None:
+            # a run omp started on its own is still open: what it posted stays its own, and the
+            # prompt's renderer starts on an empty queue (the prompt queues behind that run)
+            run, self._idle_run = self._idle_run, None
+            self._updates.put_nowait(None)
+            await self._finish_idle_run(run)
+        self.busy = True
+        self._compact_turn = text.strip() == "/compact"
+        self._user_cancel = False
+        self.last_used = time.time()
+        started = time.time()
+        self.turns += 1
+        # written before the prompt goes out, deleted only when the turn really ends: a gateway
+        # restart in between leaves the row, and the next start picks the turn back up. A resume
+        # records the person's words, not the resume wrapper, so a second restart does not nest it.
+        self.store.begin_turn(self.key, record or text, resumes)
+        log.info("turn start chat=%s session=%s input_chars=%s", self.label,
+                 self.session_id[:8], len(text))
+        run = self._open_renderer()
+        state, drain_task, sender_task, finish = run.state, run.drain, run.sender, run.finish
         try:
             async with self.surface.typing():
                 result = await asyncio.to_thread(
@@ -2031,7 +2085,8 @@ class ChatAgent:
                     f"cached {tokens(usage.get('cachedReadTokens', 0))}"
                 )
             except Exception:
-                pass
+                # a missing usage line is cosmetic, but a surface that cannot post one is not
+                log.warning("usage notice failed chat=%s", self.label, exc_info=True)
         return result.text
 
     async def cancel(self) -> bool:

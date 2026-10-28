@@ -200,7 +200,9 @@ def _agent_choices(cwd: str) -> dict[str, list[str]]:
 
     try:
         catalog = agent_catalog(cwd or str(Path.home()))
-    except Exception:
+    except Exception as exc:
+        # an empty list here read as "the agent offers nothing" and hid a broken agent
+        print(f"warn could not ask the agent for its models: {exc}; type the value instead")
         return {}
     return {"models": catalog.get("models") or [], "thinking": catalog.get("thinking") or []}
 
