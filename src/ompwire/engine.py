@@ -784,7 +784,7 @@ class ChatAgent:
         if self.mode == "plan":
             # every tool call asks, and _on_permission refuses each write: plan mode only reads
             approval = "always-ask"
-        hint = system_prompt(self.config, None)
+        hint = system_prompt(self.config)
         if approval:
             args.append(f"--approval-mode={approval}")
         if hint:

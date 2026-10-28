@@ -14,7 +14,9 @@ from pathlib import Path
 
 from .config import SOUL_FILENAME
 
-GENERATE_TIMEOUT = 180.0
+# a measured draft on omniroute/chat took about 140s; a slow model must not fall back to the
+# template just for being slow
+GENERATE_TIMEOUT = 300.0
 
 TEMPLATE = """<!--
 SOUL.md: the persona this bot speaks with. Whatever you write below this comment is added to the

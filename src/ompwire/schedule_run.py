@@ -44,7 +44,7 @@ def _client(item: schedules.Schedule, config: Any) -> AgentClient:
     # so whatever the mode still asks for is cancelled at once instead of waiting for a human
     # who is asleep.
     args.append(f"--approval-mode={schedules.agent_approval(item.approval)}")
-    args += ["--append-system-prompt", system_prompt(config, None)]
+    args += ["--append-system-prompt", system_prompt(config)]
     cwd = str(config.get("agent", "cwd", "") or "") or "~"
 
     return AgentClient(

@@ -76,7 +76,7 @@ def persona_for(config: Any, state_dir: str | Path | None = None) -> str:
     return text.strip() or str(config.get("agent", "persona", "") or "").strip()
 
 
-def system_prompt(config: Any, state_dir: str | Path) -> str:
+def system_prompt(config: Any, state_dir: str | Path | None = None) -> str:
     """Everything appended to the agent's system prompt, composed once for every spawn:
     persona first (who the agent is), then the chat-format hint (how output renders), then the
     protocol markers the transport parses."""
@@ -102,8 +102,6 @@ def persona_label(config: Any) -> str:
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     # the agent process; the section name predates RPC and is kept so existing configs load
-
-
     "acp": {
         "command": "omp",
         "args": ["--mode", "rpc-ui"],
@@ -124,19 +122,14 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # the agent just refuses. `write` allows reads and file writes, and sends a permission
         # request for every shell command, which is the part that can clone, delete, or deploy.
         "approval_mode": "write",
-        # omp has no idea it is talking through a chat window, and its default voice
-        # leaves commands inline. This hint is what makes replies render as code.
-        # It also sets the scope rule. omp's own system prompt already pushes hard toward acting
-        # without asking; an earlier hint added "do the work instead of asking" on top, and a
-        # question in chat ("bisa ga sih...?") came back as edits, restarts and commits.
         # The persona of the chat: who the agent is, how it talks. Empty by default; gateways
         # and `ompwire chat` read SOUL.md from their state directory first and fall back here.
         "persona": "",
         # omp has no idea it is talking through a chat window, and its default voice leaves
-        # commands inline. This hint makes replies render as code, and sets the scope rule.
-        # It also sets the scope rule. omp's own system prompt already pushes hard toward acting
-        # without asking; an earlier hint added "do the work instead of asking" on top, and a
-        # question in chat ("bisa ga sih...?") came back as edits, restarts and commits.
+        # commands inline. This hint makes replies render as code. It also sets the scope rule:
+        # omp's own system prompt already pushes hard toward acting without asking; an earlier
+        # hint added "do the work instead of asking" on top, and a question in chat ("bisa ga
+        # sih...?") came back as edits, restarts and commits.
         "chat_format_hint": (
             "You are answering inside a chat window. Format every reply as markdown: "
             "put shell commands, file paths, diffs and multi-line output inside fenced code "
@@ -355,8 +348,6 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
     if path is None and explicit:
         warnings.append(f"config file not found: {explicit} (using defaults + env)")
 
-    # Order matters: a runtime toggle (/yolo, /approval, /model) is a decision made after the file
-    # was written, so it must beat the file. Only the environment outranks it.
     # `append_system_prompt` was split into persona + chat_format_hint; a config written before
     # that keeps its prose as the format hint, with a nudge to rename it
     for source in (file_data, layer or {}):
@@ -365,6 +356,8 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
             agent.setdefault("chat_format_hint", agent.pop("append_system_prompt"))
             warnings.append("[agent] append_system_prompt is now chat_format_hint; "
                             "rename it (a persona goes in SOUL.md)")
+    # Order matters: a runtime toggle (/yolo, /approval, /model) is a decision made after the file
+    # was written, so it must beat the file. Only the environment outranks it.
     merged = _deep_merge(DEFAULTS, file_data)
     if layer:
         merged = _deep_merge(merged, layer)
