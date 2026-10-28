@@ -287,8 +287,9 @@ jobs:
           remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}"
           git push --atomic "$remote" "refs/tags/${TAG}^{commit}:refs/heads/${GITHUB_REF_NAME}" "refs/tags/${TAG}"
       - name: Create or update the release
-        # Generated notes come from the commits, so there is no hand-written summary to drift or
-        # to mangle. Re-running replaces the assets instead of failing.
+        # The machine writes every entry, link and credit; a hand-written SUMMARY.md may speak
+        # above them, and nothing else is ever edited by hand. Re-running replaces the assets
+        # instead of failing.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No checkout in this job: it only moves artifacts. gh still needs to know which
