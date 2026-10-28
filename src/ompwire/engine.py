@@ -27,7 +27,7 @@ from . import allowlist, gateways, omp_sessions
 from . import schedules as schedule_lib
 from .attachments import extract as extract_files
 from .attachments import hide_partial as hide_file_partial
-from .config import Config, approval_policy
+from .config import Config, approval_policy, persona_label, system_prompt
 from .format import TOOL_LINE_WIDTH, _clip, humanize_token_report, tokens, wib_time
 from .mdrender import split_markdown, strip_agent_noise
 from .omp_sessions import plausible_context
@@ -260,6 +260,8 @@ def agent_rows(agent: ChatAgent) -> list[tuple[str, str]]:
         ("mode", agent.mode),
         ("thinking", str((options.get("thinking") or {}).get("currentValue") or "-")),
         ("approval", approval_gate(agent)),
+        # SOUL.md is read when the agent starts, so an edit shows here before it takes effect
+        ("persona", persona_label(agent.config)),
         ("trace", "verbose" if agent.verbose else "quiet"),
         # off by default; shown either way so a missing thinking block has a visible reason
         ("reasoning", "on" if agent.reasoning else "off · /reasoning on"),
@@ -782,11 +784,7 @@ class ChatAgent:
         if self.mode == "plan":
             # every tool call asks, and _on_permission refuses each write: plan mode only reads
             approval = "always-ask"
-        hint = str(self.config.get("agent", "append_system_prompt", "") or "").strip()
-        from .config import PROTOCOL_HINT
-
-        # always: the markers are how a reply carries a file or a question, not a preference
-        hint = f"{hint}\n\n{PROTOCOL_HINT}".strip()
+        hint = system_prompt(self.config, None)
         if approval:
             args.append(f"--approval-mode={approval}")
         if hint:

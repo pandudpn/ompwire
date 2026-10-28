@@ -212,8 +212,10 @@ def _client_args(prose=None, mode="default"):
     from ompwire.engine import ChatAgent
 
     config = load_config(env={})
+    # SOUL.md is looked up beside the session store; keep a real one on this machine out of it
+    config.data["session"]["store"] = "/nonexistent/ompwire-test/sessions.db"
     if prose is not None:
-        config.data.setdefault("agent", {})["append_system_prompt"] = prose
+        config.data.setdefault("agent", {})["chat_format_hint"] = prose
     agent = ChatAgent.__new__(ChatAgent)
     agent.config = config
     agent.cwd = "/tmp"

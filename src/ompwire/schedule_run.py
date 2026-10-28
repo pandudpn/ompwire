@@ -20,10 +20,11 @@ import logging
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from . import attachments, delivery, gateways, schedules
-from .config import PROTOCOL_HINT, load_config
+from .config import load_config, system_prompt
 from .engine import agent_args, child_env
 from .format import now_wib, tokens
 from .rpc import AgentClient, AgentError
@@ -43,10 +44,8 @@ def _client(item: schedules.Schedule, config: Any) -> AgentClient:
     # so whatever the mode still asks for is cancelled at once instead of waiting for a human
     # who is asleep.
     args.append(f"--approval-mode={schedules.agent_approval(item.approval)}")
-    hint = str(config.get("agent", "append_system_prompt", "") or "").strip()
-    args += ["--append-system-prompt", f"{hint}\n\n{PROTOCOL_HINT}".strip()]
+    args += ["--append-system-prompt", system_prompt(config, None)]
     cwd = str(config.get("agent", "cwd", "") or "") or "~"
-    from pathlib import Path
 
     return AgentClient(
         command=str(config.get("acp", "command", "omp")),

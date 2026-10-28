@@ -127,12 +127,21 @@ mime type and the size. The agent has a shell, so a readable path beats a conten
 transport would have to guess at. Images keep their own path: they go to the agent as an image
 block on the `prompt` command.
 
-The markers are documented to the agent in `PROTOCOL_HINT`, appended to the session on top of the
-configured `append_system_prompt`. There is no switch and no `[files] enabled` key: a reply that
-cannot carry a file is a reply this transport does not understand, so attachments are part of the
-protocol rather than a preference. The hint is appended rather than stored in the config because
-setup writes the config once: a marker added later would otherwise never reach an install that
-upgraded.
+The markers are documented to the agent in `PROTOCOL_HINT`. `config.system_prompt` builds the one
+`--append-system-prompt` value every spawn uses, the chat engine and scheduled runs alike, in this
+order: the persona, the configured `chat_format_hint`, then `PROTOCOL_HINT`. There is no switch and
+no `[files] enabled` key: a reply that cannot carry a file is a reply this transport does not
+understand, so attachments are part of the protocol rather than a preference. The hint is appended
+rather than stored in the config because setup writes the config once: a marker added later would
+otherwise never reach an install that upgraded.
+
+The persona is `SOUL.md` beside the owner's session store (`gateways/<name>/SOUL.md`, or
+`cli/SOUL.md` for `ompwire chat`); without the file, `[agent] persona` from the config applies.
+HTML comments in the file are dropped. It is a spawn argument, so an edit applies when the agent
+process next starts (a gateway restart, or the idle timeout closing it), not mid-session and not on
+`/new`, which reuses the process. `gateway start` and `setup` offer to draft it: one
+`omp -p --no-tools --no-session` call with the chosen model, shown in full, written only after the
+person accepts it; a failed or declined draft leaves an empty template.
 
 ## Scheduled turns
 

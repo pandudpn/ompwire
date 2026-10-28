@@ -360,6 +360,35 @@ model = "anthropic/claude-sonnet"
 cwd = "~/work"
 ```
 
+### Persona (SOUL.md)
+
+Each gateway can speak with its own persona, kept in `SOUL.md` in its state folder:
+
+```text
+~/.local/state/ompwire/gateways/<name>/SOUL.md   one bot
+~/.local/state/ompwire/cli/SOUL.md               ompwire chat
+```
+
+When `gateway start` creates a profile (and when `ompwire setup` runs), it asks for the persona
+in your own words, has the chosen model draft `SOUL.md`, and prints the draft. Nothing is written
+until you answer:
+
+- `y` writes the draft
+- `r` drafts again, optionally with what to change
+- `n` writes an empty template instead
+
+A draft that fails or times out also leaves the empty template, and the gateway is created anyway.
+An existing `SOUL.md` is kept unless you confirm replacing it.
+
+The agent receives the persona first, then `[agent] chat_format_hint` (the formatting and scope
+rules), then the file/options marker protocol. Without a `SOUL.md`, `[agent] persona` from the
+config is used. `/status` names the active source. The persona is passed when the agent process
+starts, so an edit applies after `ompwire gateway restart <name>` (or once the idle timeout closes
+the process), not on `/new`.
+
+An older config with `append_system_prompt` still works: it is read as `chat_format_hint`, and
+`ompwire chat` and each gateway's log warn until the key is renamed.
+
 ### Changing a gateway
 
 `ompwire gateway update [NAME]` changes a gateway that exists, the same way on every

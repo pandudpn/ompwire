@@ -21,6 +21,8 @@ def _sandbox(monkeypatch, tmp_path):
     monkeypatch.setattr(setup, "providers", lambda: {"zai": ("api_key", "2026-10-24")})
     monkeypatch.setattr(setup, "login_provider", lambda yes: False)
     monkeypatch.setattr(setup, "_mcp_wizard", lambda yes, path=None: None)
+    # the persona step has its own tests; here it must not touch the real state dir
+    monkeypatch.setattr("ompwire.soul.wizard", lambda state_dir, model="", **kwargs: None)
     monkeypatch.setattr(setup, "agent_catalog", lambda cwd, command="omp": CATALOG)
     return tmp_path
 
@@ -101,7 +103,8 @@ def test_config_is_written_and_parses(monkeypatch, tmp_path):
     assert data["agent"]["yolo"] is False  # approvals stay on unless someone asks for yolo
     assert "telegram" not in data
     assert "mcp" not in data  # omp owns its servers in its own mcp.json
-    assert "fenced code" in data["agent"]["append_system_prompt"]
+    assert "fenced code" in data["agent"]["chat_format_hint"]
+    assert data["agent"]["persona"] == ""
 
 
 EXISTING = """[agent]
