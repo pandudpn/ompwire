@@ -361,7 +361,10 @@ def _start_profile(args: argparse.Namespace, gateways, kind: str, items) -> tupl
             print(f"FAIL {exc}", file=sys.stderr)
             return None
     if not mine:
-        return _new_name(args, gateways, kind, items), True
+        # the first gateway of a platform gets a name too: it names the unit and the logs, and
+        # renaming later means a new gateway, so the question belongs here and not after
+        name = _new_name(args, gateways, kind, items, ask=True)
+        return (name, True) if name else None
     if args.yes:
         if len(mine) == 1:
             return mine[0].name, False
@@ -396,7 +399,8 @@ def _new_name(args, gateways, kind: str, items, ask: bool = False) -> str | None
     if not ask or args.yes:
         return suggestion
     while True:
-        answer = input(f"name for the new {kind} gateway [{suggestion}]: ").strip().lower()
+        answer = input(f"name for the new {kind} gateway, used for its service and logs "
+                       f"[{suggestion}]: ").strip().lower()
         name = answer or suggestion
         if name in taken:
             print(f"     {name!r} already exists; pick another name")

@@ -38,12 +38,15 @@ change. It asks only what it does not know:
 2. Which profile, when that platform already has gateways: each is listed with its credential
    masked (`1234…alue`), plus "add a new profile". A platform can run several bots, each with
    its own name, credential and unit.
-3. The credential, when there is none or the platform rejects the stored one. Numbered steps
+3. The name of a new gateway, the first one on a platform included. It names the systemd unit
+   (`ompwire-<name>`), the state directory and the logs, so it is asked before anything is
+   written; Enter keeps the suggestion (the platform, then `<platform>-2`, …).
+4. The credential, when there is none or the platform rejects the stored one. Numbered steps
    for getting one on that platform (for Telegram: @BotFather, `/newbot`) are printed first. For an existing
    profile it shows the current one masked and asks whether to replace it. Nothing is saved
    until the platform accepts it, and a running gateway is stopped before its credential
    changes, so the old one never keeps polling next to the new one.
-4. The allow list, when it is empty, again with the steps to find a user id (for Telegram:
+5. The allow list, when it is empty, again with the steps to find a user id (for Telegram:
    send any message to @userinfobot).
 
 Then it writes the systemd unit and starts it, or restarts it when it is already running.
