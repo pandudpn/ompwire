@@ -96,6 +96,9 @@ jobs:
             exit 1
           fi
           git add pyproject.toml src/ompwire/__init__.py
+          # The summary speaks for one release only; the bump clears the previous one so a
+          # release pushed later cannot inherit words that were never written for it.
+          git rm -q --ignore-unmatch SUMMARY.md
           if git diff --cached --quiet; then
             echo "files already say ${version}, no bump commit needed"
           else
@@ -284,8 +287,9 @@ jobs:
           remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}"
           git push --atomic "$remote" "refs/tags/${TAG}^{commit}:refs/heads/${GITHUB_REF_NAME}" "refs/tags/${TAG}"
       - name: Create or update the release
-        # Generated notes come from the commits, so there is no hand-written summary to drift or
-        # to mangle. Re-running replaces the assets instead of failing.
+        # The machine writes every entry, link and credit; a hand-written SUMMARY.md may speak
+        # above them, and nothing else is ever edited by hand. Re-running replaces the assets
+        # instead of failing.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No checkout in this job: it only moves artifacts. gh still needs to know which
@@ -296,8 +300,10 @@ jobs:
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           # Notes come from the main line: a merged pull request is one entry linked to it, a
-          # commit on main links the commit, and the authors are credited by GitHub login.
-          python -m scripts.release.notes --to "$TAG" --write RELEASE_NOTES.md
+          # commit on main links the commit, and the authors are credited by GitHub login. A
+          # SUMMARY.md committed with the release prep adds the hand-written title and short
+          # version above them; the bump commit cleared the previous release's copy.
+          python -m scripts.release.notes --to "$TAG" --summary SUMMARY.md --write RELEASE_NOTES.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file RELEASE_NOTES.md
           elif [ "$PRERELEASE" = "true" ]; then

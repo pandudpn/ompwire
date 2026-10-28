@@ -138,3 +138,23 @@ def test_a_scope_is_bold_and_a_plain_subject_is_not():
     plain = release_notes.render([release_notes.parse("abc1234", "no prefix here")], "", "v1", "u")
     assert "- **x**: y" in scoped
     assert "- no prefix here" in plain
+
+
+def test_a_summary_file_is_prepended_to_the_written_notes(repo, tmp_path):
+    summary = tmp_path / "SUMMARY.md"
+    summary.write_text("## The short version\n\n- personas per bot\n", encoding="utf-8")
+    out = tmp_path / "RELEASE_NOTES.md"
+    rc = release_notes.main(["--from", "v1.0.0", "--to", "v1.1.0",
+                             "--summary", str(summary), "--write", str(out)])
+    assert rc == 0
+    body = out.read_text(encoding="utf-8")
+    assert body.startswith("## The short version")
+    assert body.index("personas per bot") < body.index("### Features")
+
+
+def test_a_missing_summary_file_changes_nothing(repo, tmp_path):
+    out = tmp_path / "RELEASE_NOTES.md"
+    rc = release_notes.main(["--from", "v1.0.0", "--to", "v1.1.0",
+                             "--summary", str(tmp_path / "absent.md"), "--write", str(out)])
+    assert rc == 0
+    assert "The short version" not in out.read_text(encoding="utf-8")
