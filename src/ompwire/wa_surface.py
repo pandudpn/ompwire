@@ -95,6 +95,7 @@ class WhatsAppSurface(engine.Surface):
         self.limit = WHATSAPP_LIMIT
         self.options_message: str | None = None
         self.options_listed = ""
+        self.options_question = ""
 
     async def post(self, body: str, *, kind: str) -> Any | None:
         # an answer is cut on its markdown, so a code block split across messages stays code
@@ -179,7 +180,8 @@ class WhatsAppSurface(engine.Surface):
         """The question (omp's ask tool sends one) and its numbered answers."""
         listed = numbered(options)
         self.options_listed = listed
-        title = "❓ " + (question.strip() or "pick an answer")
+        self.options_question = question.strip()
+        title = "❓ " + (self.options_question or "pick an answer")
         body = (card(title, "reply with a number, your own words, or 0 to skip")
                 + f"\n\n{listed}\n\n_messages sent before you answer wait for it_")
         self.options_message = await self.transport.send_text(self.chat, body)
@@ -190,7 +192,8 @@ class WhatsAppSurface(engine.Surface):
         if message is None:
             return
         await self.transport.edit_text(self.chat, message,
-                                       card("❓ question", note) + f"\n\n{self.options_listed}")
+                                       card(f"❓ {self.options_question or 'question'}", note)
+                                       + f"\n\n{self.options_listed}")
 
     async def ask_permission(self, token: str, kind: str, detail: str, labels: list[str]) -> Any:
         body = card("🛡️ approval needed", kind, footer="reply with the number · the run waits")
