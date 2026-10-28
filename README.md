@@ -83,7 +83,8 @@ ompwire doctor           # one line per check
 ```
 
 `gateway start` asks only what it does not know yet. The first time it asks for the platform,
-the credential (checked with the platform before anything is saved; on WhatsApp, a QR to scan)
+a name for the gateway (it names the service and the logs), the credential (checked with the
+platform before anything is saved; on WhatsApp, a QR to scan)
 and the allow list, then runs the gateway under systemd. Run it again to restart a gateway, replace its credential, or
 add another profile on the same platform.
 

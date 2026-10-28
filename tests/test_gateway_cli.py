@@ -192,20 +192,34 @@ def _answers(monkeypatch, *replies, secrets=()):
     return asked
 
 
-def test_first_start_asks_platform_credential_and_users_then_starts(sandbox, monkeypatch, capsys):
+def test_first_start_asks_platform_name_credential_and_users_then_starts(sandbox, monkeypatch,
+                                                                         capsys):
     _identifies(monkeypatch, "first_bot")
     units = Units(monkeypatch, sandbox)
-    asked = _answers(monkeypatch, "1", "42", secrets=["123:abcdef"])
+    asked = _answers(monkeypatch, "1", "", "42", secrets=["123:abcdef"])
 
     assert cli.main(["gateway", "start"]) == 0
 
     assert any("platform" in prompt for prompt in asked)
+    assert any("used for its service and logs [telegram]" in prompt for prompt in asked)
     assert any("bot token" in prompt for prompt in asked)
     item = gateways.load()[0]
     assert (item.name, item.kind, item.allowed) == ("telegram", "telegram", ["42"])
     assert "123:abcdef" in _envs(sandbox)
     assert units.calls[-1][:2] == ("start", "telegram")
     assert "credential valid: @first_bot" in capsys.readouterr().out
+
+
+def test_the_first_gateway_of_a_platform_takes_the_typed_name(sandbox, monkeypatch):
+    """It used to be named after its platform with no question; renaming meant a new gateway."""
+    _identifies(monkeypatch)
+    units = Units(monkeypatch, sandbox)
+    _answers(monkeypatch, "1", "Vidura", "42", secrets=["123:abcdef"])
+
+    assert cli.main(["gateway", "start"]) == 0
+
+    assert [(item.name, item.kind) for item in gateways.load()] == [("vidura", "telegram")]
+    assert units.calls[-1][:2] == ("start", "vidura")
 
 
 def test_a_rejected_credential_writes_nothing(sandbox, monkeypatch, capsys):
@@ -227,7 +241,7 @@ def test_a_rejected_credential_is_asked_again(sandbox, monkeypatch):
     monkeypatch.setattr("ompwire.setup.bot_identity",
                         lambda token, timeout=10.0: accepted.get(token, ""))
     Units(monkeypatch, sandbox)
-    _answers(monkeypatch, "1", "7", secrets=["bad:token", "good:token"])
+    _answers(monkeypatch, "1", "", "7", secrets=["bad:token", "good:token"])
 
     assert cli.main(["gateway", "start"]) == 0
     assert "good:token" in _envs(sandbox)
@@ -387,7 +401,7 @@ def test_every_implemented_platform_explains_its_credential_and_user_ids():
 def test_first_start_shows_how_to_get_a_token_and_a_user_id(sandbox, monkeypatch, capsys):
     _identifies(monkeypatch)
     Units(monkeypatch, sandbox)
-    _answers(monkeypatch, "1", "42", secrets=["123:abcdef"])
+    _answers(monkeypatch, "1", "", "42", secrets=["123:abcdef"])
 
     assert cli.main(["gateway", "start"]) == 0
 
