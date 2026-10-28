@@ -78,6 +78,16 @@ jobs:
             exit 1
           fi
 
+      - name: Snapshot the release summary
+        # Every path to a release runs this — push a tag, dispatch with or without a bump. The
+        # file may not exist (no narrative this time) but the artifact must, because Publish
+        # downloads it unconditionally. The tagged bump clears SUMMARY.md, so the tag itself
+        # never carries the words.
+        run: |
+          if [ -f SUMMARY.md ]; then
+            cp SUMMARY.md "$RUNNER_TEMP/release-summary.md"
+          fi
+          touch "$RUNNER_TEMP/release-summary.md"
       - name: Stage the bump commit and the tag, without pushing
         if: github.event_name == 'workflow_dispatch' && (inputs.version != '' || inputs.bump != 'none')
         env:
@@ -86,12 +96,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Snapshot this release's summary before the bump clears it: the tag must not carry
-          # the file, but Publish still needs its words.
-          if [ -f SUMMARY.md ]; then
-            cp SUMMARY.md "$RUNNER_TEMP/release-summary.md"
-          fi
-          touch "$RUNNER_TEMP/release-summary.md"
           if [ -n "$WANTED" ]; then
             version=$(python -m scripts.release.version bump "$WANTED")
           else
