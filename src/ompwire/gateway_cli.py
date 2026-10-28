@@ -775,6 +775,12 @@ def _gateway_start_steps(args: argparse.Namespace, gateways, service) -> int:
     print(f"ok   groups and channels: {', '.join(groups) or 'none'} · mode {group_mode}{own}")
     own = ", ".join(f"{key}={value}" for values in settings.values() for key, value in values.items())
     print(f"ok   settings: {own or 'shared config.toml'} · state in {gateways.state_dir(name)}")
+    if is_new and not args.yes:
+        from . import soul
+
+        model = str((settings.get("agent") or {}).get("model") or config.get("agent", "model", "")
+                    or "")
+        soul.wizard(gateways.state_dir(name), model)
 
     if args.no_start:
         print(f"--   not started (--no-start); `ompwire gateway start {name}` starts it")

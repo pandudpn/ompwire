@@ -49,7 +49,8 @@ mode = "{mode}"
 thinking = "{thinking}"
 yolo = {yolo}
 approval_mode = "{approval}"
-append_system_prompt = \"\"\"{hint}\"\"\"
+persona = \"\"\"{persona}\"\"\"
+chat_format_hint = \"\"\"{hint}\"\"\"
 
 [stream]
 verbose = true
@@ -268,7 +269,7 @@ def choose(prompt: str, choices: list[str], default: str, *, yes: bool, limit: i
 def default_hint() -> str:
     from .config import DEFAULTS
 
-    return str((DEFAULTS.get("agent") or {}).get("append_system_prompt", ""))
+    return str((DEFAULTS.get("agent") or {}).get("chat_format_hint", ""))
 
 
 def read_mcp_servers(path: Path | None = None) -> dict[str, Any]:
@@ -522,7 +523,7 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
     _mcp_wizard(yes)
 
     body = TEMPLATE.format(
-        cwd=cwd, approval=approval, hint=default_hint(),
+        cwd=cwd, approval=approval, hint=default_hint(), persona="",
         model=model, mode=mode, thinking=thinking, yolo="true" if yolo else "false",
         approval_policy=approval_policy,
         show_reasoning="true" if reasoning else "false",
@@ -544,6 +545,13 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
         "cwd": cwd,
     }
     print(f"     now: {_summary(written)}")
+
+    # 9. persona for `ompwire chat`; each gateway gets its own when it is added
+    if not yes:
+        from . import soul
+        from .config import default_state_dir
+
+        soul.wizard(default_state_dir() / "cli", model)
 
     _gateway_hint()
     _next_steps()

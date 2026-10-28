@@ -22,6 +22,8 @@ def sandbox(monkeypatch, tmp_path):
     monkeypatch.setattr("ompwire.setup._paths", Paths())
     monkeypatch.setattr(gateways, "gateways_file", lambda: config_dir / "gateways.toml")
     monkeypatch.setattr("ompwire.service._systemd_available", lambda: False)
+    # the persona step has its own tests; here it must not read input or touch the state dir
+    monkeypatch.setattr("ompwire.soul.wizard", lambda state_dir, model="", **kwargs: None)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     return config_dir
 

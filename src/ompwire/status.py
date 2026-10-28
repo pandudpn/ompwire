@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 
 from . import __version__
-from .config import approval_policy, load_config
+from .config import approval_policy, load_config, persona_label
 
 
 def _config_file() -> Path:
@@ -133,6 +133,7 @@ def collect(config_path: str | None = None) -> list[tuple[str, str]]:
                                   f"{config.get('agent', 'approval_mode', 'always-ask')}"
                                   f" · ompwire policy {approval_policy(config)}"))
     rows.append(("cwd", str(config.get("agent", "cwd", "") or "") or os.path.expanduser("~")))
+    rows.append(("persona", persona_label(config)))
 
     rows.extend(_gateway_rows())
 

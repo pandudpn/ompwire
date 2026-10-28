@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +43,62 @@ PROTOCOL_HINT = (
     "- <<options: first | second | third>> asks the user to choose; the transport turns it into "
     "buttons and removes the line."
 )
+SOUL_FILENAME = "SOUL.md"
+# the SOUL.md template explains itself in an HTML comment; the agent never sees it
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def soul_path(state_dir: str | Path) -> Path:
+    """Where one owner (a gateway, or `ompwire chat`) keeps its persona file."""
+    return Path(state_dir).expanduser() / SOUL_FILENAME
+
+
+def soul_path_for(config: Any) -> Path:
+    """SOUL.md location for whichever owner this config runs as: beside its session store
+    (a gateway's state dir, or ~/.local/state/ompwire/cli for `ompwire chat`)."""
+    store = str(config.get("session", "store", "") or "")
+    if store:
+        return Path(store).expanduser().parent / SOUL_FILENAME
+    return default_state_dir() / "cli" / SOUL_FILENAME
+
+
+def persona_for(config: Any, state_dir: str | Path | None = None) -> str:
+    """The active persona text: SOUL.md when present, else the configured [agent].persona.
+    Without an explicit directory the file is looked up beside the session store."""
+    text = ""
+    path = soul_path(state_dir) if state_dir is not None else soul_path_for(config)
+    try:
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    text = _HTML_COMMENT.sub("", text)
+    return text.strip() or str(config.get("agent", "persona", "") or "").strip()
+
+
+def system_prompt(config: Any, state_dir: str | Path | None = None) -> str:
+    """Everything appended to the agent's system prompt, composed once for every spawn:
+    persona first (who the agent is), then the chat-format hint (how output renders), then the
+    protocol markers the transport parses."""
+    parts = [persona_for(config, state_dir),
+             str(config.get("agent", "chat_format_hint", "") or "").strip(),
+             PROTOCOL_HINT]
+    return "\n\n".join(part for part in parts if part).strip()
+
+
+def persona_label(config: Any) -> str:
+    """Where the active persona comes from, for status cards: SOUL.md, config, or none."""
+    path = soul_path_for(config)
+    try:
+        text = _HTML_COMMENT.sub("", path.read_text(encoding="utf-8")).strip()
+    except OSError:
+        text = ""
+    if text:
+        return f"{path} ({len(text)} chars)"
+    if str(config.get("agent", "persona", "") or "").strip():
+        return "config [agent].persona"
+    return f"none · write {path}"
+
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     # the agent process; the section name predates RPC and is kept so existing configs load
@@ -65,13 +122,16 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # the agent just refuses. `write` allows reads and file writes, and sends a permission
         # request for every shell command, which is the part that can clone, delete, or deploy.
         "approval_mode": "write",
-        # omp has no idea it is talking through a chat window, and its default voice
-        # leaves commands inline. This hint is what makes replies render as code.
-        # It also sets the scope rule. omp's own system prompt already pushes hard toward acting
-        # without asking; an earlier hint added "do the work instead of asking" on top, and a
-        # question in chat ("bisa ga sih...?") came back as edits, restarts and commits.
-        "append_system_prompt": (
-            "You are answering inside a Telegram chat. Format every reply as markdown: "
+        # The persona of the chat: who the agent is, how it talks. Empty by default; gateways
+        # and `ompwire chat` read SOUL.md from their state directory first and fall back here.
+        "persona": "",
+        # omp has no idea it is talking through a chat window, and its default voice leaves
+        # commands inline. This hint makes replies render as code. It also sets the scope rule:
+        # omp's own system prompt already pushes hard toward acting without asking; an earlier
+        # hint added "do the work instead of asking" on top, and a question in chat ("bisa ga
+        # sih...?") came back as edits, restarts and commits.
+        "chat_format_hint": (
+            "You are answering inside a chat window. Format every reply as markdown: "
             "put shell commands, file paths, diffs and multi-line output inside fenced code "
             "blocks with a language tag, use short paragraphs and bullets, and never paste "
             "raw tables where a short list reads better. Keep prose tight. "
@@ -83,7 +143,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "one question, only when two paths differ in a way the machine cannot settle, with "
             "the choices attached as a single trailing line of the form "
             "<<options: first | second | third>>, because I get them as buttons."
-        ),  # forwarded as --append-system-prompt
+        ),
         "permission_policy": "ask",  # allow | deny | ask
         "extra_instructions": "",
     },
@@ -288,6 +348,14 @@ def load_config(explicit: str | Path | None = None, env: dict[str, str] | None =
     if path is None and explicit:
         warnings.append(f"config file not found: {explicit} (using defaults + env)")
 
+    # `append_system_prompt` was split into persona + chat_format_hint; a config written before
+    # that keeps its prose as the format hint, with a nudge to rename it
+    for source in (file_data, layer or {}):
+        agent = source.get("agent")
+        if isinstance(agent, dict) and "append_system_prompt" in agent:
+            agent.setdefault("chat_format_hint", agent.pop("append_system_prompt"))
+            warnings.append("[agent] append_system_prompt is now chat_format_hint; "
+                            "rename it (a persona goes in SOUL.md)")
     # Order matters: a runtime toggle (/yolo, /approval, /model) is a decision made after the file
     # was written, so it must beat the file. Only the environment outranks it.
     merged = _deep_merge(DEFAULTS, file_data)
