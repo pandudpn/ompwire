@@ -147,11 +147,14 @@ class TelegramSurface(engine.Surface):
         stop = asyncio.Event()
 
         async def loop() -> None:
+            failed = False
             while not stop.is_set():
                 try:
                     await self.app.bot.send_chat_action(self.chat_id, ChatAction.TYPING)
-                except TelegramError:
-                    pass
+                except TelegramError as exc:
+                    if not failed:  # once per stretch; the loop retries every 4s
+                        log.warning("typing indicator failed chat=%s: %s", self.chat_id, exc)
+                    failed = True
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=4.0)
                 except TimeoutError:

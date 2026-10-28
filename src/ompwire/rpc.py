@@ -350,7 +350,9 @@ class AgentClient:
             self._emit("btw", frame)
         elif kind in {"subagent_lifecycle", "subagent_progress"}:
             self._emit("subagent", frame)
-        elif kind in {"queue_update", "available_commands_update", "agent_end", "session_settled"}:
+        elif kind in {"queue_update", "available_commands_update", "agent_start", "agent_end",
+                      "session_settled"}:
+            # agent_start/agent_end bound every run, the ones omp starts on its own included
             self._emit(str(kind), frame)
 
     def _finish_turn(self, status: str, error: str = "") -> None:

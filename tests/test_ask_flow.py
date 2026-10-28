@@ -385,56 +385,225 @@ def test_answering_with_other_keeps_the_question_on_the_card(tmp_path):
     assert "type your answer" in edits[0]
 
 
-def _idle_chat(tmp_path, updates_after):
-    """A chat whose agent runs on its own between turns, then gets a prompt."""
-    config = _config(tmp_path)
-    config.data.setdefault("stream", {})["min_gap"] = 0.0
-    sent: list[str] = []
+def _start():
+    return Update(kind="agent_start", session_id="s", raw={})
 
-    class Bot:
-        async def send_message(self, _chat, text, **_kw):
-            sent.append(text)
-            return types.SimpleNamespace()
 
-    async def go():
+def _end(terminal=True):
+    return Update(kind="agent_end", session_id="s",
+                  raw={"isTerminal": terminal, "yielded": True})
+
+
+def _tool(call_id, command):
+    return Update(kind="tool_call", session_id="s", raw={
+        "toolCallId": call_id, "toolName": "bash", "kind": "bash", "title": call_id,
+        "status": "completed", "rawInput": {"command": command}})
+
+
+def _frame(update):
+    """The omp RPC frame(s) an Update stands for."""
+    if update.kind == "agent_message_chunk":
+        return {"type": "message_update", "messageId": "m",
+                "assistantMessageEvent": {"type": "text_delta", "delta": update.text}}
+    if update.kind == "tool_call":
+        raw = update.raw
+        return [{"type": "tool_execution_start", "toolCallId": raw["toolCallId"],
+                 "toolName": raw["toolName"], "args": raw["rawInput"]},
+                {"type": "tool_execution_end", "toolCallId": raw["toolCallId"],
+                 "toolName": raw["toolName"],
+                 "result": {"content": [{"type": "text", "text": "ok"}]}, "isError": False}]
+    return {"type": update.kind, **update.raw}
+
+
+class _Chat:
+    """A chat on a real ChatAgent and Telegram surface; `sent` is every posted message."""
+
+    def __init__(self, tmp_path, prompt_updates):
+        config = _config(tmp_path)
+        config.data.setdefault("stream", {})["min_gap"] = 0.0
+        self.sent: list[str] = []
+        self.typing = 0
+        chat = self
+
+        class Bot:
+            async def send_message(self, _chat, text, **_kw):
+                chat.sent.append(text)
+                return types.SimpleNamespace()
+
+            async def send_chat_action(self, *_a, **_kw):
+                chat.typing += 1
+
         surface = telegram.TelegramSurface.__new__(telegram.TelegramSurface)
         surface.app = types.SimpleNamespace(bot=Bot())
         surface.chat_id, surface.label, surface.limit, surface.streams = 1, "t", 4000, False
-        agent = engine.ChatAgent(config, "t", surface)
-        agent.verbose = True
-        agent.client = EventClient([_message("jawaban baru")])
-        agent.client.on_update = agent._on_update
-        agent.session_id = "s"
-        agent._on_update(Update(kind="tool_call", session_id="s", raw={
-            "toolCallId": "bg1", "toolName": "bash", "kind": "bash", "title": "background",
-            "status": "completed", "rawInput": {"command": "echo from-the-job"}}))
-        agent._on_update(_message("hasil job"))
-        for update in updates_after:
-            agent._on_update(update)
+        self.agent = engine.ChatAgent(config, "t", surface)
+        self.agent.verbose = True
+        # omp wraps every run it is prompted for in agent_start … agent_end
+        self.agent.client = EventClient([_start(), *prompt_updates, _end()])
+        self.agent.client.on_update = self.agent._on_update
+        self.agent.session_id = "s"
+
+    def feed(self, *updates):
+        """Frames as omp writes them, through the real client: what rpc.py forwards is what the
+        engine sees, so a frame type the client drops is dropped here too."""
+        reader = AgentClient(on_update=self.agent._on_update)
+        for update in updates:
+            frames = _frame(update)
+            for frame in frames if isinstance(frames, list) else [frames]:
+                reader._dispatch(frame)
+
+
+def test_a_run_the_agent_starts_on_its_own_posts_while_it_runs(tmp_path):
+    """A background job's result woke the agent between turns. Its messages waited, first for
+    the person's next message (a burst of old tool cards), then for the run to end (minutes of
+    silence in the chat while the agent was working)."""
+    async def go():
+        chat = _Chat(tmp_path, [_message("jawaban baru")])
+        chat.feed(_start(), _message("hasil job"), _tool("bg1", "echo from-the-job"))
         await asyncio.sleep(0.1)
-        between = list(sent)
-        await agent.ask("pesan berikutnya")
-        return between, sent[len(between):]
+        while_running = list(chat.sent)
+        chat.feed(_end())
+        await asyncio.sleep(0.1)
+        await chat.agent.ask("pesan berikutnya")
+        return while_running, chat
 
-    return asyncio.run(go())
-
-
-def test_a_run_the_agent_starts_on_its_own_posts_when_it_ends(tmp_path):
-    """A background job's result woke the agent between turns; its tool cards and text waited
-    for the person's next message and arrived with it as a burst."""
-    end = Update(kind="agent_end", session_id="s", raw={"isTerminal": True, "yielded": True})
-    between, next_turn = _idle_chat(tmp_path, [end])
-    assert any("from-the-job" in m for m in between)
-    assert any("hasil job" in m for m in between)
-    assert next_turn == ["jawaban baru"]
+    while_running, chat = asyncio.run(go())
+    assert any("hasil job" in m for m in while_running), "text posted before the run ended"
+    assert any("from-the-job" in m for m in while_running), "tool card posted before it ended"
+    assert chat.typing > 0, "the chat shows the agent working"
+    assert chat.sent[-1] == "jawaban baru"
+    assert sum("jawaban baru" in m for m in chat.sent) == 1
 
 
-def test_a_prompt_during_a_self_started_run_does_not_take_its_messages(tmp_path):
-    """No agent_end yet: the prompt closes that run first, so its answer stands alone."""
-    between, next_turn = _idle_chat(tmp_path, [])
-    assert any("from-the-job" in m for m in between + next_turn)
-    assert next_turn[-1] == "jawaban baru"
-    assert not any("hasil job" in m and "jawaban baru" in m for m in next_turn)
+def test_a_frame_of_the_agents_own_run_during_a_prompts_hand_over_is_not_lost(tmp_path):
+    """The person writes while the agent's own run streams. omp queues the prompt behind that
+    run (streamingBehavior followUp), so the run's last frames arrive while ask() is already
+    under way. In 0.17.x such a frame opened a second renderer on the turn queue; two drains
+    then shared one queue and the prompt's answer was never posted."""
+    async def go():
+        chat = _Chat(tmp_path, [])
+        reader = AgentClient(on_update=chat.agent._on_update)
+        for frame in (_frame(_start()), _frame(_message("awal job"))):
+            reader._dispatch(frame)
+        await asyncio.sleep(0.05)
+
+        class Queued(EventClient):
+            def prompt(self, text, images=None, timeout=900.0):
+                # omp's order: the old run streams on and ends, then the prompt's run starts
+                for update in (_message(" ekor job"), _tool("bg2", "echo tail"), _end(),
+                               _start(), _message("jawaban baru"), _end()):
+                    frames = _frame(update)
+                    for frame in frames if isinstance(frames, list) else [frames]:
+                        reader._dispatch(frame)
+                return PromptResult(stop_reason="end_turn", usage={}, text="jawaban baru",
+                                    updates=[])
+
+        chat.agent.client = Queued([])
+        await asyncio.wait_for(chat.agent.ask("pesan berikutnya"), timeout=3)
+        await asyncio.sleep(0.1)
+        return chat
+
+    chat = asyncio.run(go())
+    assert chat.sent[-1] == "jawaban baru", chat.sent  # its own message, nothing glued on
+    assert any("ekor job" in m for m in chat.sent[:-1]), chat.sent
+    assert any("tail" in m for m in chat.sent[:-1]), chat.sent
+    assert chat.agent._idle_run is None
+
+
+def test_a_background_jobs_progress_posts_nothing_and_the_run_it_wakes_shows_typing(tmp_path):
+    """omp's order, recorded from a real run: a background job of an earlier turn reports its
+    output with no run going, then wakes a run of its own. Each report opened a run that
+    posted the same "running" card and closed at once, so the chat got the card three times
+    and the typing indicator never stayed up."""
+    async def go():
+        chat = _Chat(tmp_path, [])
+        opened = []
+        original = chat.agent._open_idle_run
+
+        def counting():
+            opened.append(1)
+            original()
+
+        chat.agent._open_idle_run = counting
+        reader = AgentClient(on_update=chat.agent._on_update)
+        progress = {"type": "tool_execution_update", "toolCallId": "job", "toolName": "bash",
+                    "partialResult": {"content": [{"type": "text", "text": "probe-done"}]}}
+        for _ in range(3):
+            reader._dispatch(progress)
+        await asyncio.sleep(0.1)
+        quiet = (list(chat.sent), len(opened))
+        for frame in ({"type": "agent_start"}, progress,
+                      {"type": "message_update", "messageId": "m",
+                       "assistantMessageEvent": {"type": "text_delta", "delta": "mengecek"}}):
+            reader._dispatch(frame)
+        await asyncio.sleep(0.1)
+        typing_while_running = chat.typing
+        reader._dispatch({"type": "agent_end", "isTerminal": True})
+        await asyncio.sleep(0.1)
+        return quiet, opened, typing_while_running, chat
+
+    quiet, opened, typing_while_running, chat = asyncio.run(go())
+    assert quiet == ([], 0), "progress of a job nobody is running a turn for posts nothing"
+    assert len(opened) == 1
+    assert typing_while_running > 0
+    assert chat.sent == ["mengecek"]
+    assert chat.agent._idle_run is None
+
+
+def test_work_left_running_keeps_the_chat_typing_until_it_reports_back(tmp_path):
+    """A bash job or a subagent the agent did not wait for: the turn ends ("mulai"), the work
+    goes on, and its result wakes the agent later. The chat showed no typing in between, so it
+    looked done while the request was still being worked on. omp flags both kinds the same way
+    (get_state hasPendingAsyncWork), and the wake's agent_start ends the wait."""
+    async def go():
+        chat = _Chat(tmp_path, [_message("mulai")])
+        pending = {"hasPendingAsyncWork": True}
+        chat.agent.client.state = lambda: dict(pending)
+        chat.agent._sleep = lambda _s: asyncio.sleep(0.01)  # recheck at once, not every 30s
+        await chat.agent.ask("jalankan di background")
+        await asyncio.sleep(0.05)
+        typing_after_turn = chat.typing
+        waiting = chat.agent._pending_wait is not None and not chat.agent._pending_wait.done()
+        chat.feed(_start(), _message("sls"), _end())
+        await asyncio.sleep(0.1)
+        woke = chat.agent._pending_wait
+        # the wake ran and nothing is left: the next end leaves the chat quiet
+        pending["hasPendingAsyncWork"] = False
+        return typing_after_turn, waiting, woke, chat
+
+    typing_after_turn, waiting, woke, chat = asyncio.run(go())
+    assert waiting, "typing holds after the turn while the job runs"
+    assert typing_after_turn > 0
+    assert woke is None or woke.done(), "the wake's agent_start ended the wait"
+    assert chat.sent == ["mulai", "sls"]
+
+
+def test_a_turn_that_leaves_nothing_running_does_not_hold_typing(tmp_path):
+    async def go():
+        chat = _Chat(tmp_path, [_message("ok")])
+        chat.agent.client.state = lambda: {"hasPendingAsyncWork": False}
+        await chat.agent.ask("halo")
+        return chat.agent._pending_wait
+
+    assert asyncio.run(go()) is None
+
+
+def test_a_non_terminal_end_closes_the_run_and_the_next_wake_opens_another(tmp_path):
+    """omp ends a run with isTerminal=false while a background job is pending, then starts a
+    new run when the job reports: two runs, two sets of messages, nothing carried over."""
+    async def go():
+        chat = _Chat(tmp_path, [])
+        chat.feed(_start(), _message("run satu"), _end(terminal=False))
+        await asyncio.sleep(0.1)
+        first = list(chat.sent)
+        chat.feed(_start(), _message("run dua"), _end())
+        await asyncio.sleep(0.1)
+        return first, chat
+
+    first, chat = asyncio.run(go())
+    assert first == ["run satu"]
+    assert chat.sent == ["run satu", "run dua"]
+    assert chat.agent._idle_run is None
 
 
 def _advice(severity, note):
