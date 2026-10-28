@@ -299,13 +299,21 @@ jobs:
         # The first write this workflow makes, after every gate passed on this exact commit.
         # Atomic: if the branch moved and the commit no longer fast-forwards it, neither the
         # branch nor the tag is updated and the run fails with nothing half-published.
+        # The main ruleset wants status checks on every commit, and a bump commit built in this
+        # run has none. The release deploy key is the one actor the ruleset lets through, so the
+        # push goes over SSH with it; GITHUB_TOKEN would be refused.
         if: needs.prepare.outputs.push == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
+          DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
         run: |
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}"
-          git push --atomic "$remote" "refs/tags/${TAG}^{commit}:refs/heads/${GITHUB_REF_NAME}" "refs/tags/${TAG}"
+          key="$RUNNER_TEMP/release_key"
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          git push --atomic "git@github.com:${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}^{commit}:refs/heads/${GITHUB_REF_NAME}" "refs/tags/${TAG}"
+          rm -f "$key"
       - name: Create or update the release
         # The machine writes every entry, link and credit; a hand-written SUMMARY.md may speak
         # above them, and nothing else is ever edited by hand. Re-running replaces the assets
