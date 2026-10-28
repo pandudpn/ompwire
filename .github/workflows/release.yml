@@ -86,6 +86,12 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Snapshot this release's summary before the bump clears it: the tag must not carry
+          # the file, but Publish still needs its words.
+          if [ -f SUMMARY.md ]; then
+            cp SUMMARY.md "$RUNNER_TEMP/release-summary.md"
+          fi
+          touch "$RUNNER_TEMP/release-summary.md"
           if [ -n "$WANTED" ]; then
             version=$(python -m scripts.release.version bump "$WANTED")
           else
@@ -153,6 +159,12 @@ jobs:
           path: ${{ runner.temp }}/release.bundle
           if-no-files-found: error
           retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: release-summary
+          path: ${{ runner.temp }}/release-summary.md
+          if-no-files-found: error
+          retention-days: 1
 
   verify:
     name: Tests and lint
@@ -275,6 +287,10 @@ jobs:
         with:
           name: dist
           path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: release-summary
+          path: ${{ runner.temp }}
       - name: Push the bump commit and the tag
         # The first write this workflow makes, after every gate passed on this exact commit.
         # Atomic: if the branch moved and the commit no longer fast-forwards it, neither the
@@ -300,10 +316,11 @@ jobs:
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           # Notes come from the main line: a merged pull request is one entry linked to it, a
-          # commit on main links the commit, and the authors are credited by GitHub login. A
-          # SUMMARY.md committed with the release prep adds the hand-written title and short
-          # version above them; the bump commit cleared the previous release's copy.
-          python -m scripts.release.notes --to "$TAG" --summary SUMMARY.md --write RELEASE_NOTES.md
+          # commit on main links the commit, and the authors are credited by GitHub login. The
+          # summary is the snapshot Prepare took before the tagged bump cleared the file — it
+          # never rides on the tag.
+          python -m scripts.release.notes --to "$TAG" \
+            --summary "$RUNNER_TEMP/release-summary.md" --write RELEASE_NOTES.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file RELEASE_NOTES.md
           elif [ "$PRERELEASE" = "true" ]; then

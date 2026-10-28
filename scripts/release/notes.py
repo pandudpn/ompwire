@@ -10,8 +10,9 @@ people who wrote the release are listed at the end, with first-time contributors
   python -m scripts.release.notes --from v1.3.0 --to v1.4.0 --write RELEASE_NOTES.md
 
 A release can also speak in a person's voice: commit a SUMMARY.md with the release title and
-a short version of what it brings, and --summary SUMMARY.md puts it above the generated body.
-The bump commit clears the file, so one release's words never speak for the next.
+a short version of what it brings, and --summary puts it above the generated body. The release
+workflow snapshots the file when it cuts the release and the bump commit clears it, so one
+release's words never speak for the next.
 """
 
 from __future__ import annotations
