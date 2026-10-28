@@ -703,6 +703,10 @@ class _JobsClient(EventClient):
             # mid-turn, omp would queue this behind the run and replay it as a prompt
             self.calls.append("/jobs kill all (inside the turn)" if self.in_turn else text)
             self.pending = False
+            if self.on_update is not None:
+                # omp's answer, recorded from a real run: a command_output with no run around
+                # it, then the job's last frame saying it was cancelled
+                self.on_update(_message("Cancelled 1 background job."))
             return PromptResult(stop_reason="end_turn", usage={}, text="", updates=[])
         self.calls.append(text)
         self.in_turn = True
@@ -720,20 +724,25 @@ def test_stop_between_turns_stops_the_background_jobs_and_subagents(tmp_path):
     async def go():
         chat = _Chat(tmp_path, [])
         client = _JobsClient([])
+        client.on_update = chat.agent._on_update
         chat.agent.client = client
         chat.agent._sleep = lambda _s: asyncio.sleep(3600)
         await chat.agent._wait_on_pending_work()
         typing_before = chat.agent._pending_wait is not None
         stopped = await chat.agent.cancel()
-        await asyncio.sleep(0)
-        return typing_before, stopped, client, chat.agent
+        await asyncio.sleep(0.05)
+        return typing_before, stopped, client, chat
 
-    typing_before, stopped, client, agent = asyncio.run(go())
+    typing_before, stopped, client, chat = asyncio.run(go())
+    agent = chat.agent
     assert typing_before
     assert stopped is True
     assert client.calls == ["/jobs kill all"]
     assert client.pending is False
     assert agent._pending_wait is None, "the typing held for the jobs stops with them"
+    # the command's answer opened a run nothing closed, and the chat kept typing after /stop
+    assert agent._idle_run is None
+    assert not any("Cancelled" in m for m in chat.sent)
 
 
 def test_stop_mid_turn_kills_the_jobs_only_after_the_turn_has_ended(tmp_path):

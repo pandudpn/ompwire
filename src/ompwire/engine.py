@@ -818,6 +818,8 @@ class ChatAgent:
         self._pending_wait: asyncio.Task | None = None
         # /stop arrived mid-turn: the background jobs are stopped once that turn has ended
         self._kill_jobs_after_turn = False
+        # "/jobs kill all" is in flight: its answer is not a run of the agent's
+        self._killing_jobs = False
         # bash calls omp moved to the background, by tool call id (a job id like bg_1 restarts
         # with the process); each has a card that moves once a minute and closes when it ends
         self._background: dict[str, BackgroundJob] = {}
@@ -1090,6 +1092,10 @@ class ChatAgent:
     def _route_update(self, update: AgentUpdate) -> None:
         """On the loop: an update goes to the run it belongs to. Order matters here, so every
         update of a run passes this one function, in the order the reader thread saw them."""
+        if self._killing_jobs and update.kind == "agent_message_chunk":
+            # "/jobs kill all" answers "Cancelled 1 background job." with no run around it; as a
+            # frame between runs it opened a run that nothing closed, typing until the next turn
+            return
         if self._idle_run is not None:
             self._idle_run.queue.put_nowait(update)
             return
@@ -2328,11 +2334,16 @@ class ChatAgent:
         client = self.client
         if client is None or not client.alive or not await self._has_pending_work():
             return False
+        self._killing_jobs = True
         try:
             await asyncio.to_thread(client.prompt, "/jobs kill all", timeout=30.0)
         except AgentError as exc:
             log.warning("killing background jobs failed chat=%s: %s", self.label, exc)
             return False
+        finally:
+            # the answer reaches the loop through call_soon_threadsafe; clearing the flag the
+            # same way puts it behind those frames, not ahead of them
+            self._loop.call_soon_threadsafe(setattr, self, "_killing_jobs", False)
         log.info("background jobs killed chat=%s", self.label)
         return True
 
