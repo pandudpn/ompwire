@@ -161,6 +161,18 @@ def test_the_menu_sets_thinking_from_a_list_and_quit_saves_nothing(sandbox, unit
     assert gateways.get("bot").settings == {"agent": {"thinking": "high"}}
 
 
+def test_a_broken_agent_is_named_instead_of_offering_no_models(sandbox, monkeypatch, capsys):
+    """An agent that failed to start read as an agent offering nothing."""
+    from ompwire.gateway_update import _agent_choices
+
+    def broken(cwd, command="omp"):
+        raise RuntimeError("omp exited 127")
+
+    monkeypatch.setattr("ompwire.setup.agent_catalog", broken)
+    assert _agent_choices("/tmp") == {}
+    assert "could not ask the agent for its models: omp exited 127" in capsys.readouterr().out
+
+
 def test_a_seen_chat_keeps_its_title_when_a_message_brings_none(sandbox):
     assert gateways.remember_chat("bot", "120363001@g.us", "Family", "group")
     assert not gateways.remember_chat("bot", "120363001@g.us", "", "group")

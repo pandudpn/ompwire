@@ -34,6 +34,10 @@ chat_format_hint = """You are answering inside a chat window. Format every reply
 policy = "ask"
 timeout = 120.0
 
+[files]
+max_mb = 20.0             # per file, both directions; a bigger one is refused with a note in chat
+incoming_dir = "~/.local/state/ompwire/files"   # documents sent into the chat land here for the agent
+
 [logging]
 level = "INFO"
 file = "~/.local/state/ompwire/ompwire.log"   # empty = stderr only

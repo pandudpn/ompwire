@@ -33,6 +33,7 @@ from telegram import (
     Chat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     MessageEntity,
     Update,
 )
@@ -44,6 +45,7 @@ from telegram.ext import (
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
+    Defaults,
     MessageHandler,
     filters,
 )
@@ -1378,7 +1380,10 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
 
     # ------------------------------------------------------------------ serve
     async def run(self) -> None:
-        builder = Application.builder().token(self.token)
+        # Telegram turns the first URL in a message into a preview card; in an answer that only
+        # mentions a URL it showed up as an attached file (api.github.com/meta became meta.json)
+        defaults = Defaults(link_preview_options=LinkPreviewOptions(is_disabled=True))
+        builder = Application.builder().token(self.token).defaults(defaults)
         self.app = builder.build()
         app = self.app
         self.register(app)

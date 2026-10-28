@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import queue
 import subprocess
 import threading
@@ -33,6 +34,8 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
+
+log = logging.getLogger("ompwire.rpc")
 
 PROTOCOL_VERSION = 2
 
@@ -257,7 +260,7 @@ class AgentClient:
         try:
             self.on_update(update)
         except Exception:  # a broken callback must not kill the reader thread
-            pass
+            log.exception("update callback failed for %s", kind)
 
     def _event(self, frame: dict[str, Any]) -> None:
         kind = frame.get("type")
@@ -364,6 +367,7 @@ class AgentClient:
             try:
                 answer = self.on_dialog(frame)
             except Exception:
+                log.exception("dialog callback failed; the dialog is answered as cancelled")
                 answer = None
         body = answer if answer is not None else {"cancelled": True}
         with contextlib.suppress(AgentError):

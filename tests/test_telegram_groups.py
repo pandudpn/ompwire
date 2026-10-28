@@ -155,3 +155,27 @@ def test_groups_are_quiet_until_they_ask(tmp_path):
         return (private.verbose, private.reasoning), (group.reasoning,), (again.verbose,)
 
     assert asyncio.run(go()) == ((True, True), (False,), (True,))
+
+
+def test_the_bot_sends_every_message_without_a_link_preview(monkeypatch):
+    """A URL in an answer became a preview card, which read as a file the bot attached
+    (api.github.com/meta showed up as meta.json under an options card)."""
+    built = {}
+
+    class Builder:
+        def token(self, value):
+            return self
+
+        def defaults(self, value):
+            built["defaults"] = value
+            return self
+
+        def build(self):
+            raise SystemExit  # stop before serving; the defaults are what this test reads
+
+    monkeypatch.setattr(telegram.Application, "builder", staticmethod(lambda: Builder()))
+    item = telegram.Transport.__new__(telegram.Transport)
+    item.token = "1:x"
+    with pytest.raises(SystemExit):
+        asyncio.run(item.run())
+    assert built["defaults"].link_preview_options.is_disabled is True
