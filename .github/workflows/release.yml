@@ -96,6 +96,9 @@ jobs:
             exit 1
           fi
           git add pyproject.toml src/ompwire/__init__.py
+          # The summary speaks for one release only; the bump clears the previous one so a
+          # release pushed later cannot inherit words that were never written for it.
+          git rm -q --ignore-unmatch SUMMARY.md
           if git diff --cached --quiet; then
             echo "files already say ${version}, no bump commit needed"
           else
@@ -296,8 +299,10 @@ jobs:
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           # Notes come from the main line: a merged pull request is one entry linked to it, a
-          # commit on main links the commit, and the authors are credited by GitHub login.
-          python -m scripts.release.notes --to "$TAG" --write RELEASE_NOTES.md
+          # commit on main links the commit, and the authors are credited by GitHub login. A
+          # SUMMARY.md committed with the release prep adds the hand-written title and short
+          # version above them; the bump commit cleared the previous release's copy.
+          python -m scripts.release.notes --to "$TAG" --summary SUMMARY.md --write RELEASE_NOTES.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file RELEASE_NOTES.md
           elif [ "$PRERELEASE" = "true" ]; then

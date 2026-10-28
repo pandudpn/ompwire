@@ -8,6 +8,10 @@ people who wrote the release are listed at the end, with first-time contributors
 
   python -m scripts.release.notes --to v1.4.0
   python -m scripts.release.notes --from v1.3.0 --to v1.4.0 --write RELEASE_NOTES.md
+
+A release can also speak in a person's voice: commit a SUMMARY.md with the release title and
+a short version of what it brings, and --summary SUMMARY.md puts it above the generated body.
+The bump commit clears the file, so one release's words never speak for the next.
 """
 
 from __future__ import annotations
@@ -249,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--from", dest="from_tag", default="", help="default: previous tag")
     parser.add_argument("--to", dest="to_tag", default="HEAD", help="default: HEAD")
     parser.add_argument("--write", dest="out", default="", help="write to a file instead of stdout")
+    parser.add_argument("--summary", dest="summary", default="",
+                        help="prepend this hand-written title and short version when the file exists")
     args = parser.parse_args(argv)
 
     from_tag = args.from_tag or previous_tag(args.to_tag)
@@ -265,6 +271,12 @@ def main(argv: list[str] | None = None) -> int:
     slug = repo_slug()
     base = f"https://github.com/{slug}" if slug else ""
     body = render(commits, from_tag, args.to_tag, base, github_logins(commits, slug), known)
+    if args.summary:
+        path = Path(args.summary)
+        if path.is_file():
+            intro = path.read_text(encoding="utf-8").strip()
+            if intro:
+                body = f"{intro}\n\n{body}"
     if args.out:
         Path(args.out).write_text(body, encoding="utf-8")
         print(f"wrote {args.out} ({len(commits)} entries, {len(body)} bytes)")
