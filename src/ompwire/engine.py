@@ -337,6 +337,33 @@ JOB_OPEN_DELAY = 1.5  # the summary waits this long for the rest of a call's sta
 
 
 @dataclass
+class BackgroundJob:
+    """A tool call omp moved to the background (`async`): its card, from start to end."""
+
+    job_id: str
+    command: str
+    began: float  # on the engine's clock
+    state: str = "running"
+    output: str = ""
+    wall_ms: int = 0
+
+
+def background_trace(job: BackgroundJob, now: float) -> ToolTrace:
+    """A background job as the tool card every surface already draws: the command, its newest
+    output, and in the status how long it has run or how it ended."""
+    if job.state == "running":
+        elapsed = int((now - job.began) * 1000)
+        status = f"{job.job_id} · running · {job_duration(elapsed)}"
+    else:
+        word = "done" if job.state == "completed" else job.state
+        status = f"{job.job_id} · {word} · {job_duration(job.wall_ms or int((now - job.began) * 1000))}"
+    # omp appends the wall time to the last output; the status line already says it
+    output = "\n".join(line for line in job.output.rstrip().splitlines()
+                       if not line.startswith("Wall time:")).rstrip()
+    return ToolTrace(kind="bash", tool="bash", command=job.command, output=output, status=status)
+
+
+@dataclass
 class JobCard:
     """One subagent the `task` tool spawned, as the chat's own card shows it."""
 
@@ -789,6 +816,10 @@ class ChatAgent:
         self._sleep: Callable[[float], Any] = asyncio.sleep
         # typing shown for a bash job or subagent a run left running, until it reports back
         self._pending_wait: asyncio.Task | None = None
+        # bash calls omp moved to the background, by tool call id (a job id like bg_1 restarts
+        # with the process); each has a card that moves once a minute and closes when it ends
+        self._background: dict[str, BackgroundJob] = {}
+        self._background_poll: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ setup
     def _build_client(self, yolo: bool = False, resume: str = "") -> AgentClient:
@@ -1002,6 +1033,12 @@ class ChatAgent:
             # own, never part of the turn's outbox
             self._loop.call_soon_threadsafe(self._on_subagent, update)
             return
+        job_frame = update.raw.get("asyncJob") if update.kind == "tool_call_update" else None
+        if isinstance(job_frame, dict):
+            self._loop.call_soon_threadsafe(self._on_background, update)
+            if update.raw.get("status") == "in_progress":
+                # a background job's progress: its own card shows it, the run's trace does not
+                return
         if update.kind == "tool_call":
             tasks = (update.raw.get("rawInput") or {}).get("tasks")
             if isinstance(tasks, list) and tasks:
@@ -1058,9 +1095,9 @@ class ChatAgent:
             self._updates.put_nowait(update)
             return
         if update.kind == "tool_call_update":
-            # a background job reporting progress while no run is going: nobody asked to see it,
-            # and each report opened a run that posted the same "running" card again. Its
-            # result reaches the chat through the run it wakes, which reads and reports it.
+            # an update of a call no run is showing: each one opened a run that posted the same
+            # "running" card again. A background job's progress has a card of its own
+            # (_on_background); anything else here has nothing to attach to.
             return
         # nobody prompted and no run said it started: still a run of the agent's own (an
         # agent_start can be missed across a reconnect), so it gets the same renderer
@@ -1206,6 +1243,61 @@ class ChatAgent:
         return str(done.get("answer") or "").strip() or "no answer came back"
 
     # ------------------------------------------------------------ job cards
+    def _on_background(self, update: AgentUpdate) -> None:
+        """Runs on the loop thread. A bash call omp moved to the background: the call's end
+        frame opens the job (state running), progress frames carry its output so far, and the
+        frame with state completed or failed closes it. One card per job, on the same pacing as
+        a subagent's: at most one a minute while it runs, the end at once. A job's progress
+        frames come with no run going, so they never reach a run's trace."""
+        raw = update.raw
+        frame = raw.get("asyncJob") or {}
+        call_id = str(raw.get("toolCallId") or "")
+        if not call_id:
+            return
+        job = self._background.get(call_id)
+        if job is None:
+            # usually the call's end frame; a progress frame first means the chat missed the
+            # start (a gateway restart in between), and the job is timed from now
+            job = self._background[call_id] = BackgroundJob(
+                job_id=str(frame.get("id") or "job"), command=str(frame.get("command") or ""),
+                began=self._clock())
+            log.info("background job %s job=%s started", self.label, job.job_id)
+        job.command = str(frame.get("command") or "") or job.command
+        output = ""
+        for item in ((raw.get("rawOutput") or {}).get("content") or []):
+            if isinstance(item, dict):
+                output += str(item.get("text") or "")
+        if raw.get("status") == "in_progress" and output:
+            job.output = output  # the end frame's text is the "Backgrounded as …" notice
+        state = str(frame.get("state") or "")
+        if state in {"completed", "failed", "aborted", "cancelled"}:
+            job.state = state
+            job.wall_ms = int(frame.get("wallMs") or 0)
+        if not self.verbose:
+            if job.state != "running":
+                self._background.pop(call_id, None)
+            return
+        self._write_background(call_id, force=job.state != "running")
+        if job.state != "running":
+            log.info("background job %s job=%s %s", self.label, job.job_id, job.state)
+            self._background.pop(call_id, None)
+        elif self._background_poll is None or self._background_poll.done():
+            self._background_poll = self._loop.create_task(self._tick_background())
+
+    def _write_background(self, call_id: str, *, force: bool) -> None:
+        job = self._background[call_id]
+        body = self.surface.trace(background_trace(job, self._clock()))
+        self._job_write(f"background:{call_id}", body, force=force)
+
+    async def _tick_background(self) -> None:
+        """While a job runs and says nothing (a `sleep`, a quiet build), its card still moves
+        once a minute so the elapsed time shows it is alive."""
+        while self._background:
+            await self._sleep(JOB_EDIT_GAP)
+            for call_id, job in list(self._background.items()):
+                if job.state == "running":
+                    self._write_background(call_id, force=False)
+
     def _on_subagent(self, update: AgentUpdate, *, polled: bool = False) -> None:
         """Runs on the loop thread. omp reports every subagent the `task` tool spawns: a
         lifecycle frame when it starts and one when it ends, and progress frames in between.

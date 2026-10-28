@@ -588,6 +588,97 @@ def test_a_turn_that_leaves_nothing_running_does_not_hold_typing(tmp_path):
     assert asyncio.run(go()) is None
 
 
+def _background_frames(command, wall_ms):
+    """omp's frames for one bash call it moved to the background, as recorded from a real run:
+    the call's start and end inside the turn, then progress with no run going, the last one
+    with state completed and the wall time."""
+    call = "call_1|fc_call_1"
+    running = {"async": {"state": "running", "jobId": "bg_1", "type": "bash"}}
+    start = [{"type": "tool_execution_start", "toolCallId": call, "toolName": "bash",
+              "args": {"async": True, "command": command}},
+             {"type": "tool_execution_end", "toolCallId": call, "toolName": "bash",
+              "result": {"content": [{"type": "text", "text": "Backgrounded as job bg_1"}],
+                         "details": {**running, "timeoutSeconds": 300}}}]
+
+    def progress(text, state="running"):
+        details = {"async": {"state": state, "jobId": "bg_1", "type": "bash"}}
+        if state != "running":
+            details["wallTimeMs"] = wall_ms
+        return {"type": "tool_execution_update", "toolCallId": call, "toolName": "bash",
+                "args": {"async": True, "command": command},
+                "partialResult": {"content": [{"type": "text", "text": text}],
+                                  "details": details}}
+
+    return start, progress
+
+
+def test_a_background_job_has_one_card_that_moves_while_it_runs_and_closes_when_it_ends(
+        tmp_path):
+    """A bash job the agent did not wait for: its progress came with no run going and was
+    dropped, so the chat could not see what it was doing. It now has one card: running with
+    the newest output while it works, at most once a minute, and done with its time at once."""
+    async def go():
+        chat = _Chat(tmp_path, [])
+        now = [0.0]
+        chat.agent._clock = lambda: now[0]
+        ticks = asyncio.Event()
+
+        async def sleep(_s):
+            await ticks.wait()
+            ticks.clear()
+
+        chat.agent._sleep = sleep
+        start, progress = _background_frames("./build.sh", 95_000)
+        reader = AgentClient(on_update=chat.agent._on_update)
+        chat.agent._prompt_pending = True  # the call's start and end belong to a turn
+        chat.agent.busy = True
+        for frame in start:
+            reader._dispatch(frame)
+        await asyncio.sleep(0.05)
+        chat.agent.busy = chat.agent._prompt_pending = False
+        opened = list(chat.sent)
+        now[0] = 30.0
+        reader._dispatch(progress("compiling 3/10"))
+        await asyncio.sleep(0.05)
+        within_a_minute = list(chat.sent)
+        now[0] = 65.0
+        reader._dispatch(progress("compiling 9/10"))
+        await asyncio.sleep(0.05)
+        after_a_minute = list(chat.sent)
+        now[0] = 95.0
+        reader._dispatch(progress("compiling 10/10\nok\n\n\nWall time: 95.00 seconds",
+                                  state="completed"))
+        await asyncio.sleep(0.05)
+        return opened, within_a_minute, after_a_minute, chat
+
+    opened, within_a_minute, after_a_minute, chat = asyncio.run(go())
+    cards = [m for m in chat.sent if "build.sh" in m]
+    assert len(opened) == 1 and "bg_1 · running · 0s" in opened[0]
+    assert within_a_minute == opened, "a running card moves at most once a minute"
+    assert "compiling 9/10" in after_a_minute[-1] and "running · 1m05s" in after_a_minute[-1]
+    assert "bg_1 · done · 1m35s" in cards[-1] and "ok" in cards[-1]
+    assert "Wall time" not in cards[-1], "the status line already says how long it ran"
+    assert len(cards) == 3
+    assert chat.agent._background == {}
+    assert chat.agent._idle_run is None, "job frames never open a run of their own"
+
+
+def test_a_background_job_shows_no_card_in_a_quiet_chat(tmp_path):
+    async def go():
+        chat = _Chat(tmp_path, [])
+        chat.agent.verbose = False
+        start, progress = _background_frames("sleep 5", 5_000)
+        reader = AgentClient(on_update=chat.agent._on_update)
+        for frame in [*start, progress("x", state="completed")]:
+            reader._dispatch(frame)
+        await asyncio.sleep(0.05)
+        return chat
+
+    chat = asyncio.run(go())
+    assert not any("sleep 5" in m for m in chat.sent)
+    assert chat.agent._background == {}
+
+
 def test_a_non_terminal_end_closes_the_run_and_the_next_wake_opens_another(tmp_path):
     """omp ends a run with isTerminal=false while a background job is pending, then starts a
     new run when the job reports: two runs, two sets of messages, nothing carried over."""

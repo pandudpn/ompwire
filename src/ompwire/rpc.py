@@ -86,6 +86,20 @@ def _blocks_text(content: Any) -> str:
                      if isinstance(item, dict) and item.get("type") == "text")
 
 
+def _async_job(result: dict[str, Any], args: Any) -> dict[str, Any]:
+    """A background job's identity and state, when the tool ran with `async`: details.async
+    carries jobId and state (running, completed, failed) on the call's end and on every progress
+    frame after it, and the last frame adds wallTimeMs. Empty for an ordinary call."""
+    details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    job = details.get("async") if isinstance(details.get("async"), dict) else {}
+    if not job.get("jobId"):
+        return {}
+    command = str(args.get("command") or "") if isinstance(args, dict) else ""
+    return {"asyncJob": {"id": str(job["jobId"]), "state": str(job.get("state") or ""),
+                         "command": command,
+                         "wallMs": int(details.get("wallTimeMs") or 0)}}
+
+
 def _usage(raw: dict[str, Any]) -> dict[str, Any]:
     """omp's per-message usage in the names the engine reports (ACP's)."""
     return {
@@ -128,6 +142,8 @@ class AgentClient:
         self._chunks: dict[str, list[str]] = {}
         # the prompt currently running and what it collected
         self._turn: dict[str, Any] | None = None
+        # the arguments of `async` tool calls by call id, from their start frame until their end
+        self._async_args: dict[str, dict[str, Any]] = {}
         self.session_id = ""
         self.session_file = ""
         # set by start(): omp accepted the subagent subscription, so job frames will come
@@ -291,6 +307,9 @@ class AgentClient:
         elif kind == "tool_execution_start":
             args = frame.get("args") if isinstance(frame.get("args"), dict) else {}
             name = str(frame.get("toolName") or "")
+            if args.get("async"):
+                # the end frame that backgrounds the call carries no arguments; its card needs them
+                self._async_args[str(frame.get("toolCallId") or "")] = args
             self._emit("tool_call", {
                 "toolCallId": frame.get("toolCallId"),
                 "toolName": name,
@@ -300,12 +319,14 @@ class AgentClient:
                 "status": "in_progress",
             })
         elif kind == "tool_execution_update":
-            partial = _blocks_text((frame.get("partialResult") or {}).get("content"))
+            partial_result = frame.get("partialResult") or {}
+            partial = _blocks_text(partial_result.get("content"))
             self._emit("tool_call_update", {
                 "toolCallId": frame.get("toolCallId"),
                 "toolName": frame.get("toolName"),
                 "status": "in_progress",
                 "rawOutput": {"content": [{"type": "text", "text": partial}]} if partial else {},
+                **_async_job(partial_result, frame.get("args")),
             })
         elif kind == "tool_execution_end":
             result = frame.get("result") or {}
@@ -316,6 +337,8 @@ class AgentClient:
                 "status": "failed" if frame.get("isError") else "completed",
                 "rawOutput": {"content": [{"type": "text",
                                             "text": _blocks_text(result.get("content"))}]},
+                **_async_job(result, self._async_args.pop(str(frame.get("toolCallId") or ""),
+                                                          None)),
             })
             phases = (result.get("details") or {}).get("phases") if name == "todo" else None
             if isinstance(phases, list):
