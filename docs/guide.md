@@ -170,7 +170,7 @@ The terminal has its own smaller set, described under [Terminal](#terminal).
 | `/compaction [10-95\|off\|on]` | show or set OMP's auto-compaction threshold |
 | `/busy [steer\|followup\|queue]` | what a message sent mid-turn does, in this chat |
 | `/btw <question>` | a side question answered without touching the conversation |
-| `/stop`, `/kill` | cancel the turn, or stop this chat's agent process |
+| `/stop`, `/kill` | cancel the turn and its background jobs and subagents, or stop this chat's agent process |
 | `/approve`, `/verbose`, `/yolo` | approval policy, activity in this chat (trace, todo list, notices), approvals off for this chat |
 | `/reasoning [on\|off]` | show the agent's thinking above the answer, in this chat |
 | `/advisor [on\|off]` | show omp's advisor notes on each turn, in this chat (on by default) |
@@ -192,8 +192,8 @@ What a message sent mid-turn does is set per chat with `/busy`:
 - `queue`: ompwire holds it and sends it as a new turn once this one ends (`📥 queued #2`).
 
 When OMP declines a steer or a follow-up, the message falls back to the queue. `/stop` cancels
-the turn. `/btw` works while a turn runs: the side question is answered on its own and never
-enters the conversation.
+the turn, plus any bash job or subagent it left running in the background. `/btw` works while a
+turn runs: the side question is answered on its own and never enters the conversation.
 
 ### Subagents
 

@@ -816,6 +816,8 @@ class ChatAgent:
         self._sleep: Callable[[float], Any] = asyncio.sleep
         # typing shown for a bash job or subagent a run left running, until it reports back
         self._pending_wait: asyncio.Task | None = None
+        # /stop arrived mid-turn: the background jobs are stopped once that turn has ended
+        self._kill_jobs_after_turn = False
         # bash calls omp moved to the background, by tool call id (a job id like bg_1 restarts
         # with the process); each has a card that moves once a minute and closes when it ends
         self._background: dict[str, BackgroundJob] = {}
@@ -1272,7 +1274,8 @@ class ChatAgent:
         state = str(frame.get("state") or "")
         if state in {"completed", "failed", "aborted", "cancelled"}:
             job.state = state
-            job.wall_ms = int(frame.get("wallMs") or 0)
+            # a cancelled job's frame carries no wall time; it ran until now
+            job.wall_ms = int(frame.get("wallMs") or 0) or int((self._clock() - job.began) * 1000)
         if not self.verbose:
             if job.state != "running":
                 self._background.pop(call_id, None)
@@ -2250,6 +2253,9 @@ class ChatAgent:
             await finish()  # what did arrive is still worth showing
             self.busy = False
             self._prompt_pending = False  # a refused or failed prompt never says agent_start
+            if self._kill_jobs_after_turn:
+                self._kill_jobs_after_turn = False
+                await self._kill_jobs()
             # A crash or shutdown cut keeps the row, so the next start resumes it. A deliberate
             # stop and a silence timeout do not: the person has already been told it failed.
             if self._user_cancel or isinstance(exc, AgentTimeout):
@@ -2265,6 +2271,10 @@ class ChatAgent:
         await finish()
         self.busy = False
         self._prompt_pending = False
+        if self._kill_jobs_after_turn:
+            # /stop during this turn: the turn is gone now, so the command cannot land in it
+            self._kill_jobs_after_turn = False
+            await self._kill_jobs()
         # a job or subagent the turn left running keeps the chat typing until it reports back
         await self._wait_on_pending_work()
         await self._report_compaction()
@@ -2295,10 +2305,35 @@ class ChatAgent:
         return result.text
 
     async def cancel(self) -> bool:
+        """/stop: the running turn, and every bash job and subagent the session left running.
+        omp's abort ends the turn only; its background work keeps going and wakes the agent
+        again later. `/jobs kill all` stops that work, bash jobs and subagents alike, without
+        invoking the model. Sent mid-turn it would queue behind the dying run (prompts use
+        streamingBehavior followUp) and replay as a prompt, so a running turn sends it once it
+        has ended."""
         if self.client is None or not self.session_id:
             return False
         self.forget_turn()
-        self.client.abort()
+        self._end_pending_wait()
+        if self.busy:
+            self._kill_jobs_after_turn = True
+            self.client.abort()
+            return True
+        if self._idle_run is not None:
+            self.client.abort()  # the run the agent started on its own; its agent_end closes it
+        return await self._kill_jobs() or self._idle_run is not None
+
+    async def _kill_jobs(self) -> bool:
+        """Stop every background job and subagent; True when any was running."""
+        client = self.client
+        if client is None or not client.alive or not await self._has_pending_work():
+            return False
+        try:
+            await asyncio.to_thread(client.prompt, "/jobs kill all", timeout=30.0)
+        except AgentError as exc:
+            log.warning("killing background jobs failed chat=%s: %s", self.label, exc)
+            return False
+        log.info("background jobs killed chat=%s", self.label)
         return True
 
     async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> tuple[str, str]:

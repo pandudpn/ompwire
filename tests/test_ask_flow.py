@@ -679,6 +679,107 @@ def test_a_background_job_shows_no_card_in_a_quiet_chat(tmp_path):
     assert chat.agent._background == {}
 
 
+class _JobsClient(EventClient):
+    """omp with background work running: get_state says so until /jobs kill all stops it.
+    `calls` records what reached omp, in order, so a test can see the kill land after the
+    turn's abort and never inside the turn."""
+
+    def __init__(self, updates, *, pending=True, during_turn=None):
+        super().__init__(updates)
+        self.pending = pending
+        self.calls: list[str] = []
+        self.during_turn = during_turn
+
+    def state(self):
+        return {"hasPendingAsyncWork": self.pending}
+
+    def abort(self):
+        self.calls.append("abort")
+
+    in_turn = False
+
+    def prompt(self, text, images=None, timeout=900.0):
+        if text == "/jobs kill all":
+            # mid-turn, omp would queue this behind the run and replay it as a prompt
+            self.calls.append("/jobs kill all (inside the turn)" if self.in_turn else text)
+            self.pending = False
+            return PromptResult(stop_reason="end_turn", usage={}, text="", updates=[])
+        self.calls.append(text)
+        self.in_turn = True
+        try:
+            if self.during_turn is not None:
+                self.during_turn()
+            return super().prompt(text, images, timeout)
+        finally:
+            self.in_turn = False
+
+
+def test_stop_between_turns_stops_the_background_jobs_and_subagents(tmp_path):
+    """omp's abort ends a turn only; a job the agent left running kept going, kept the chat
+    typing and woke the agent again after /stop."""
+    async def go():
+        chat = _Chat(tmp_path, [])
+        client = _JobsClient([])
+        chat.agent.client = client
+        chat.agent._sleep = lambda _s: asyncio.sleep(3600)
+        await chat.agent._wait_on_pending_work()
+        typing_before = chat.agent._pending_wait is not None
+        stopped = await chat.agent.cancel()
+        await asyncio.sleep(0)
+        return typing_before, stopped, client, chat.agent
+
+    typing_before, stopped, client, agent = asyncio.run(go())
+    assert typing_before
+    assert stopped is True
+    assert client.calls == ["/jobs kill all"]
+    assert client.pending is False
+    assert agent._pending_wait is None, "the typing held for the jobs stops with them"
+
+
+def test_stop_mid_turn_kills_the_jobs_only_after_the_turn_has_ended(tmp_path):
+    """Sent while the turn still runs, the command queues behind it (prompts are followUp) and
+    comes back as a prompt; it has to wait for the turn to be gone."""
+    async def go():
+        chat = _Chat(tmp_path, [])
+        client = None
+
+        def stop_now():
+            # /stop arrives while the turn is running: the prompt waits here, on the agent's
+            # thread, until the loop has handled the whole /stop
+            done = threading.Event()
+
+            async def stop():
+                await chat.agent.cancel()
+                done.set()
+
+            chat.agent._loop.call_soon_threadsafe(lambda: asyncio.ensure_future(stop()))
+            assert done.wait(5)
+
+        client = _JobsClient([_start(), _message("kerja"), _end()], during_turn=stop_now)
+        client.on_update = chat.agent._on_update
+        chat.agent.client = client
+        await chat.agent.ask("mulai kerja")
+        await asyncio.sleep(0.05)
+        return client, chat.agent
+
+    client, agent = asyncio.run(go())
+    assert client.calls == ["mulai kerja", "abort", "/jobs kill all"]
+    assert agent._kill_jobs_after_turn is False
+    assert agent._pending_wait is None, "nothing is left to show typing for"
+
+
+def test_stop_with_nothing_running_reports_nothing(tmp_path):
+    async def go():
+        chat = _Chat(tmp_path, [])
+        client = _JobsClient([], pending=False)
+        chat.agent.client = client
+        return await chat.agent.cancel(), client.calls
+
+    stopped, calls = asyncio.run(go())
+    assert stopped is False
+    assert calls == []
+
+
 def test_a_non_terminal_end_closes_the_run_and_the_next_wake_opens_another(tmp_path):
     """omp ends a run with isTerminal=false while a background job is pending, then starts a
     new run when the job reports: two runs, two sets of messages, nothing carried over."""
