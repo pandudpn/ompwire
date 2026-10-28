@@ -32,7 +32,7 @@ from .format import TOOL_LINE_WIDTH, _clip, humanize_token_report, tokens, wib_t
 from .mdrender import split_markdown, strip_agent_noise
 from .omp_sessions import plausible_context
 from .questions import extract as extract_options
-from .questions import hide_partial
+from .questions import hide_partial, question_of
 from .rpc import APPROVE, DENY, AgentClient, AgentError, AgentTimeout, approval_detail, is_approval
 from .rpc import Update as AgentUpdate
 from .store import SessionStore
@@ -1851,12 +1851,14 @@ class ChatAgent:
             await sender_task  # the buttons and files come after the last message, in order
             raw = "".join(answer)
             _, options = extract_options(raw)
+            question = question_of(raw)
             if self.mode == "plan" and raw.strip() and not self._user_cancel:
                 # the plan's own question buttons would bypass the review; the review replaces them
                 options = list(PLAN_OPTIONS)
+                question = ""
                 self.plan_review = "pending"
             if options:
-                await self.offer_options(options)
+                await self.offer_options(options, question=question)
             await self.deliver_files(raw)
             _clean, proposals = schedule_lib.extract(raw)
             if proposals:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ompwire.questions import MAX_OPTIONS, extract, hide_partial
+from ompwire.questions import MAX_OPTIONS, QUESTION_CHARS, extract, hide_partial, question_of
 
 
 class TestExtract:
@@ -103,3 +103,35 @@ class TestHidePartial:
 
     def test_plain_text_passes_through(self):
         assert hide_partial("no marker here", final=False) == "no marker here"
+
+
+class TestQuestionOf:
+    """The card heading: what the options answer, so nobody scrolls up to find it."""
+
+    def test_the_last_line_ending_in_a_question_mark_is_the_question(self):
+        assert question_of("""Two fixes are possible.
+
+Which one do you want?
+The second is cheaper.
+
+<<options: first | second>>""") == "Which one do you want?"
+
+    def test_without_a_question_mark_the_last_paragraph_stands_in(self):
+        assert question_of("""Done.
+
+Pick the fix to ship:
+pinned key or meta fetch
+<<options: pinned | fetch>>""") == "Pick the fix to ship: pinned key or meta fetch"
+
+    def test_a_trailing_marker_on_the_question_line_is_not_part_of_it(self):
+        assert question_of("Mau yang mana? <<options: a | b>>") == "Mau yang mana?"
+
+    def test_chat_markdown_does_not_reach_the_heading(self):
+        assert question_of("Use **`main`** or `dev`?\n<<options: main | dev>>") == "Use main or dev?"
+
+    def test_a_long_question_is_cut_to_a_heading(self):
+        asked = question_of("x" * 500 + "?\n<<options: a | b>>")
+        assert len(asked) == QUESTION_CHARS and asked.endswith("…")
+
+    def test_an_answer_that_is_only_the_marker_has_no_question(self):
+        assert question_of("<<options: a | b>>") == ""

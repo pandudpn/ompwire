@@ -25,6 +25,8 @@ OPTIONS_RE = re.compile(rf"^[ \t]*{_MARKER}|(?<!`)[ \t]*{_MARKER.replace('body',
 PARTIAL_RE = re.compile(r"(?:^|(?<=[^\s`]))[ \t]*<<\s*options?\s*:(?:(?!>>).)*\Z",
                         re.IGNORECASE | re.DOTALL | re.MULTILINE)
 MAX_OPTIONS = 6
+# a card heading, not a second copy of the answer
+QUESTION_CHARS = 200
 
 
 def extract(text: str) -> tuple[str, list[str]]:
@@ -43,6 +45,26 @@ def extract(text: str) -> tuple[str, list[str]]:
         if option not in deduped:
             deduped.append(option)
     return cleaned, deduped[:MAX_OPTIONS]
+
+
+def question_of(text: str) -> str:
+    """The question an answer's options reply to, for the heading of their card.
+
+    The marker carries only the choices, so the card used to say "pick an answer" and the
+    reader scrolled up to find what was asked. The last line ending in "?" is the question;
+    without one, the last paragraph stands in, since that is what the choices follow.
+    """
+    cleaned, _ = extract(text)
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    asked = next((line for line in reversed(lines) if line.endswith("?")), "")
+    if not asked:
+        asked = " ".join(line.strip() for line in cleaned.split("\n\n")[-1].splitlines()).strip()
+    asked = re.sub(r"[*_`]+", "", asked)  # chat markdown has no meaning inside a card heading
+    if len(asked) > QUESTION_CHARS:
+        asked = asked[:QUESTION_CHARS - 1].rstrip() + "…"
+    return asked
 
 
 def hide_partial(text: str, final: bool) -> str:

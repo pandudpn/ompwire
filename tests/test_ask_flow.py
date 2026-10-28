@@ -351,6 +351,40 @@ def test_a_retry_event_is_silent_in_a_quiet_chat(tmp_path):
     assert not any("retry" in m for m in messages)
 
 
+def test_marker_options_carry_their_question_onto_the_card(tmp_path):
+    """The card said "pick an answer", and the question was somewhere up the chat."""
+    messages = _render(tmp_path, [_message("Two ways.\n\nWhich one?\n<<options: a | b>>")], False)
+    card = next(m for m in messages if "1.</b> a" in m)
+    assert "❓ Which one?" in card
+
+
+def test_answering_with_other_keeps_the_question_on_the_card(tmp_path):
+    edits: list[str] = []
+
+    class Sent:
+        async def edit_text(self, text, **_kw):
+            edits.append(text)
+
+    class Bot:
+        async def send_message(self, _chat, text, **_kw):
+            return Sent()
+
+    surface = telegram.TelegramSurface.__new__(telegram.TelegramSurface)
+    surface.app = types.SimpleNamespace(bot=Bot())
+    surface.chat_id = 1
+    surface.options_message = None
+    surface.options_listed = ""
+    surface.options_question = ""
+
+    async def go():
+        await surface.offer_options(["a", "b"], question="Which one?")
+        await surface.retire_options("type your answer; your next message is it")
+
+    asyncio.run(go())
+    assert edits and "❓ Which one?" in edits[0]
+    assert "type your answer" in edits[0]
+
+
 def _advice(severity, note):
     return Update(kind="advisor", session_id="s",
                   raw={"notes": [{"severity": severity, "note": note}]})

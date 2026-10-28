@@ -103,6 +103,7 @@ class TelegramSurface(engine.Surface):
         # the card of the question still open, so its buttons can be taken away
         self.options_message: Any = None
         self.options_listed = ""
+        self.options_question = ""
 
     async def post(self, body: str, *, kind: str):
         try:
@@ -180,6 +181,7 @@ class TelegramSurface(engine.Surface):
                            for index, option in enumerate(options))
         self.options_listed = listed
         asked = question.strip()
+        self.options_question = asked
         head = card(f"❓ {asked}" if asked else "❓ pick an answer",
                     "tap one, Other to type it, or Skip", [],
                     "messages sent before you answer wait for it")
@@ -194,7 +196,8 @@ class TelegramSurface(engine.Surface):
         if message is None:
             return
         try:
-            await message.edit_text(card("❓ question", note, []) + f"\n\n{self.options_listed}",
+            await message.edit_text(card(f"❓ {self.options_question or 'question'}", note, [])
+                                    + f"\n\n{self.options_listed}",
                                     parse_mode=ParseMode.HTML)
         except (TelegramError, AttributeError) as exc:
             log.debug("could not retire the options card: %s", exc)
