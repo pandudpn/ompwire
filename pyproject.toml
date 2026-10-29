@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ompwire"
-version = "0.17.1"
+version = "0.17.2"
 description = "Transport-only chat bridge for OMP agents over the Agent Client Protocol"
 readme = "README.md"
 license = "MIT"
