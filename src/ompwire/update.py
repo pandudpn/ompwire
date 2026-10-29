@@ -45,6 +45,19 @@ def current_commit() -> str:
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
+_RUNNING: list[str] = []
+
+
+def running_version() -> str:
+    """What the cards name as this ompwire: "0.17.1 - 0e92632", or the bare version when the
+    code does not run from a git checkout. Read once: a checkout that moves later does not
+    change the code this process loaded."""
+    if not _RUNNING:
+        commit = current_commit()
+        _RUNNING.append(f"{current_version()} - {commit}" if commit else current_version())
+    return _RUNNING[0]
+
+
 def _checkout_root() -> str:
     from pathlib import Path
 

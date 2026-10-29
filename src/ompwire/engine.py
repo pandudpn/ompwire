@@ -37,6 +37,7 @@ from .questions import hide_partial, question_of
 from .rpc import APPROVE, DENY, AgentClient, AgentError, AgentTimeout, approval_detail, is_approval
 from .rpc import Update as AgentUpdate
 from .store import SessionStore
+from .update import running_version
 
 log = logging.getLogger("ompwire.engine")
 
@@ -256,6 +257,7 @@ def agent_rows(agent: ChatAgent) -> list[tuple[str, str]]:
         servers = []
     return [
         ("agent", f"omp {agent.agent_version or '?'}"),
+        ("ompwire", running_version()),
         ("session", agent.session_id[:8] or "-"),
         ("model", str((options.get("model") or {}).get("currentValue") or "?")),
         ("mode", agent.mode),
