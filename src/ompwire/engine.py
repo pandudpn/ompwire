@@ -43,6 +43,9 @@ log = logging.getLogger("ompwire.engine")
 
 REASONING_CHARS = 1200  # the tail matters; the beginning usually restates the question
 ADVISOR_CHARS = 1500  # per note; the advisor writes a paragraph, not a report
+# How often the chat re-asks omp whether background work is still running while it shows typing
+# for it. session_settled and the wake's agent_start end the wait sooner; this catches a lost one.
+PENDING_RECHECK = 30.0
 # Tools whose call changes what the agent knows next time; the trace names the skill touched.
 SKILL_TOOLS = frozenset({"manage_skill", "learn"})
 PERMISSION_TIMEOUT = 120.0
@@ -333,6 +336,33 @@ class PlanItem:
 JOB_FINAL = frozenset({"completed", "failed", "aborted"})
 JOB_EDIT_GAP = 60.0  # a running job's card moves at most this often; its last state always does
 JOB_OPEN_DELAY = 1.5  # the summary waits this long for the rest of a call's start frames
+
+
+@dataclass
+class BackgroundJob:
+    """A tool call omp moved to the background (`async`): its card, from start to end."""
+
+    job_id: str
+    command: str
+    began: float  # on the engine's clock
+    state: str = "running"
+    output: str = ""
+    wall_ms: int = 0
+
+
+def background_trace(job: BackgroundJob, now: float) -> ToolTrace:
+    """A background job as the tool card every surface already draws: the command, its newest
+    output, and in the status how long it has run or how it ended."""
+    if job.state == "running":
+        elapsed = int((now - job.began) * 1000)
+        status = f"{job.job_id} · running · {job_duration(elapsed)}"
+    else:
+        word = "done" if job.state == "completed" else job.state
+        status = f"{job.job_id} · {word} · {job_duration(job.wall_ms or int((now - job.began) * 1000))}"
+    # omp appends the wall time to the last output; the status line already says it
+    output = "\n".join(line for line in job.output.rstrip().splitlines()
+                       if not line.startswith("Wall time:")).rstrip()
+    return ToolTrace(kind="bash", tool="bash", command=job.command, output=output, status=status)
 
 
 @dataclass
@@ -761,8 +791,12 @@ class ChatAgent:
         self._btw_waiters: dict[str, asyncio.Future] = {}
         self._ask_slots: dict[str, dict[str, Any]] = {}
         # a run omp started on its own (a background job's result woke the agent): its renderer,
-        # open from its first update until omp says the run ended
+        # on a queue of its own, open from its agent_start until its agent_end
         self._idle_run: SimpleNamespace | None = None
+        # the closing of the last such run: it posts its last messages before a turn's go out
+        self._idle_closing: asyncio.Task | None = None
+        # a prompt was written and its run has not said agent_start yet
+        self._prompt_pending = False
         self._btw_records: dict[str, dict[str, Any]] = {}
         # the subagents the `task` tool spawned, by (call that spawned it, job name): one card
         # each, plus one summary card per call. A detached job outlives the turn that made it,
@@ -782,6 +816,16 @@ class ChatAgent:
         self._job_open_delay = JOB_OPEN_DELAY
         self._clock: Callable[[], float] = time.monotonic
         self._sleep: Callable[[float], Any] = asyncio.sleep
+        # typing shown for a bash job or subagent a run left running, until it reports back
+        self._pending_wait: asyncio.Task | None = None
+        # /stop arrived mid-turn: the background jobs are stopped once that turn has ended
+        self._kill_jobs_after_turn = False
+        # "/jobs kill all" is in flight: its answer is not a run of the agent's
+        self._killing_jobs = False
+        # bash calls omp moved to the background, by tool call id (a job id like bg_1 restarts
+        # with the process); each has a card that moves once a minute and closes when it ends
+        self._background: dict[str, BackgroundJob] = {}
+        self._background_poll: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ setup
     def _build_client(self, yolo: bool = False, resume: str = "") -> AgentClient:
@@ -995,6 +1039,12 @@ class ChatAgent:
             # own, never part of the turn's outbox
             self._loop.call_soon_threadsafe(self._on_subagent, update)
             return
+        job_frame = update.raw.get("asyncJob") if update.kind == "tool_call_update" else None
+        if isinstance(job_frame, dict):
+            self._loop.call_soon_threadsafe(self._on_background, update)
+            if update.raw.get("status") == "in_progress":
+                # a background job's progress: its own card shows it, the run's trace does not
+                return
         if update.kind == "tool_call":
             tasks = (update.raw.get("rawInput") or {}).get("tasks")
             if isinstance(tasks, list) and tasks:
@@ -1012,11 +1062,18 @@ class ChatAgent:
                     self._loop.call_soon_threadsafe(
                         lambda: asyncio.create_task(self._context_notice(text)))
             return
-        if update.kind == "agent_end" and not self.busy and update.raw.get("isTerminal") is not False:
-            # the run omp started on its own is over; its messages go out now
-            self._loop.call_soon_threadsafe(self._close_idle_run)
+        if update.kind in {"agent_start", "agent_end"}:
+            # The boundaries of every run, whoever started it. A run omp starts on its own (a
+            # background job's result woke the agent) is told apart by these and nothing else:
+            # its frames belong to it from its agent_start until the agent_end after it, even
+            # when a prompt arrives meanwhile.
+            self._loop.call_soon_threadsafe(self._run_boundary, update)
             return
-        if update.kind in {"queue_update", "session_settled", "agent_end"}:
+        if update.kind == "session_settled":
+            # omp says nothing is left: no run, no background job, no subagent
+            self._loop.call_soon_threadsafe(self._end_pending_wait)
+            return
+        if update.kind == "queue_update":
             return
         if update.kind == "advisor" and not self.busy:
             # a card can land after the turn yielded; nothing reads the turn queue then
@@ -1030,36 +1087,122 @@ class ChatAgent:
             # lands after the messages that came before it
             self._loop.call_soon_threadsafe(self._on_option_update, update)
             return
-        if not self.busy:
-            # Nothing reads the turn queue between turns. Queued, these waited for the next
-            # message the person sent and arrived with it as a burst of old tool cards; a run
-            # omp starts on its own gets a renderer of its own instead.
-            self._loop.call_soon_threadsafe(self._idle_update, update)
-            return
-        self._loop.call_soon_threadsafe(self._updates.put_nowait, update)
+        # a run nobody prompted has a renderer of its own; frames of a prompt's run, and those
+        # seen before any run started, go to the turn queue as before
+        self._loop.call_soon_threadsafe(self._route_update, update)
 
-    def _idle_update(self, update: AgentUpdate) -> None:
-        """An update from a run nobody prompted; ask() may have started since it was scheduled."""
-        if self.busy:
+    def _route_update(self, update: AgentUpdate) -> None:
+        """On the loop: an update goes to the run it belongs to. Order matters here, so every
+        update of a run passes this one function, in the order the reader thread saw them."""
+        if self._killing_jobs and update.kind == "agent_message_chunk":
+            # "/jobs kill all" answers "Cancelled 1 background job." with no run around it; as a
+            # frame between runs it opened a run that nothing closed, typing until the next turn
+            return
+        if self._idle_run is not None:
+            self._idle_run.queue.put_nowait(update)
+            return
+        if self.busy or self._prompt_pending:
             self._updates.put_nowait(update)
             return
-        if self._idle_run is None:
-            log.info("run started by the agent chat=%s", self.label)
-            self._idle_run = self._open_renderer()
-        self._updates.put_nowait(update)
+        if update.kind == "tool_call_update":
+            # an update of a call no run is showing: each one opened a run that posted the same
+            # "running" card again. A background job's progress has a card of its own
+            # (_on_background); anything else here has nothing to attach to.
+            return
+        # nobody prompted and no run said it started: still a run of the agent's own (an
+        # agent_start can be missed across a reconnect), so it gets the same renderer
+        self._open_idle_run()
+        self._idle_run.queue.put_nowait(update)
+
+    def _run_boundary(self, update: AgentUpdate) -> None:
+        if update.kind == "agent_start":
+            # the work the chat was waiting on woke the agent; the run shows typing itself
+            self._end_pending_wait()
+            if self._idle_run is not None:
+                # a new run starts, so the agent's own run before it is over even if its
+                # agent_end was missed; what it still has to post goes out first
+                self._close_idle_run()
+            if self._prompt_pending:
+                # the run the prompt asked for; its frames are the turn's
+                self._prompt_pending = False
+                return
+            if self.busy:
+                return  # a continuation of the prompt's run (a steer, a follow-up)
+            self._open_idle_run()
+            return
+        if self._idle_run is not None:
+            # agent_end of the agent's own run: it ends here, terminal or not, and a later wake
+            # is a new run with an agent_start of its own
+            self._close_idle_run()
+            return
+        # the prompt's run ended; its turn closes when the prompt returns
+
+    def _open_idle_run(self) -> None:
+        log.info("run started by the agent chat=%s", self.label)
+        run = self._open_renderer(asyncio.Queue())
+        run.closed = asyncio.Event()  # set when the run ends; a waiting turn then waits on it
+        self._idle_run = run
+        # the person sees the agent working, the same as in a turn they started
+        run.typing = self.surface.typing()
+        run.typing_task = asyncio.create_task(self._hold_typing(run))
+
+    async def _hold_typing(self, run: SimpleNamespace) -> None:
+        async with run.typing:
+            await run.drain
 
     def _close_idle_run(self) -> None:
         run, self._idle_run = self._idle_run, None
         if run is None:
             return
-        self._updates.put_nowait(None)
+        run.queue.put_nowait(None)
         # held so the loop cannot drop the task before the run's last messages are posted
         run.closing = asyncio.create_task(self._finish_idle_run(run))
+        self._idle_closing = run.closing
+        run.closed.set()
 
     async def _finish_idle_run(self, run: SimpleNamespace) -> None:
         await run.drain
         await run.finish()
         log.info("run started by the agent ended chat=%s tools=%s", self.label, run.state["tools"])
+        if self._idle_run is None and not self.busy:
+            await self._wait_on_pending_work()
+
+    async def _wait_on_pending_work(self) -> None:
+        """A run ended, but it left work behind that will wake the agent again: a bash job or
+        a subagent it did not wait for. The agent is still working on the person's request, so
+        the chat keeps showing typing until that work reports back or omp says nothing is left.
+        omp has one flag for both, `hasPendingAsyncWork`; it is read again every
+        PENDING_RECHECK seconds in case a frame that ends the wait was lost."""
+        if self._pending_wait is not None and not self._pending_wait.done():
+            return
+        if not await self._has_pending_work():
+            return
+        log.info("waiting on background work chat=%s", self.label)
+        self._pending_wait = asyncio.create_task(self._hold_pending_typing())
+
+    async def _has_pending_work(self) -> bool:
+        client = self.client
+        if client is None or not client.alive:
+            return False
+        try:
+            state = await asyncio.to_thread(client.state)
+        except AgentError as exc:
+            log.info("pending-work check failed chat=%s: %s", self.label, exc)
+            return False
+        return bool(state.get("hasPendingAsyncWork"))
+
+    async def _hold_pending_typing(self) -> None:
+        async with self.surface.typing():
+            while True:
+                await self._sleep(PENDING_RECHECK)
+                if self.busy or self._idle_run is not None or not await self._has_pending_work():
+                    break
+        log.info("background work done chat=%s", self.label)
+
+    def _end_pending_wait(self) -> None:
+        task, self._pending_wait = self._pending_wait, None
+        if task is not None and not task.done():
+            task.cancel()
 
     BTW_FINAL = frozenset({"complete", "error", "cancelled"})
 
@@ -1110,6 +1253,62 @@ class ChatAgent:
         return str(done.get("answer") or "").strip() or "no answer came back"
 
     # ------------------------------------------------------------ job cards
+    def _on_background(self, update: AgentUpdate) -> None:
+        """Runs on the loop thread. A bash call omp moved to the background: the call's end
+        frame opens the job (state running), progress frames carry its output so far, and the
+        frame with state completed or failed closes it. One card per job, on the same pacing as
+        a subagent's: at most one a minute while it runs, the end at once. A job's progress
+        frames come with no run going, so they never reach a run's trace."""
+        raw = update.raw
+        frame = raw.get("asyncJob") or {}
+        call_id = str(raw.get("toolCallId") or "")
+        if not call_id:
+            return
+        job = self._background.get(call_id)
+        if job is None:
+            # usually the call's end frame; a progress frame first means the chat missed the
+            # start (a gateway restart in between), and the job is timed from now
+            job = self._background[call_id] = BackgroundJob(
+                job_id=str(frame.get("id") or "job"), command=str(frame.get("command") or ""),
+                began=self._clock())
+            log.info("background job %s job=%s started", self.label, job.job_id)
+        job.command = str(frame.get("command") or "") or job.command
+        output = ""
+        for item in ((raw.get("rawOutput") or {}).get("content") or []):
+            if isinstance(item, dict):
+                output += str(item.get("text") or "")
+        if raw.get("status") == "in_progress" and output:
+            job.output = output  # the end frame's text is the "Backgrounded as …" notice
+        state = str(frame.get("state") or "")
+        if state in {"completed", "failed", "aborted", "cancelled"}:
+            job.state = state
+            # a cancelled job's frame carries no wall time; it ran until now
+            job.wall_ms = int(frame.get("wallMs") or 0) or int((self._clock() - job.began) * 1000)
+        if not self.verbose:
+            if job.state != "running":
+                self._background.pop(call_id, None)
+            return
+        self._write_background(call_id, force=job.state != "running")
+        if job.state != "running":
+            log.info("background job %s job=%s %s", self.label, job.job_id, job.state)
+            self._background.pop(call_id, None)
+        elif self._background_poll is None or self._background_poll.done():
+            self._background_poll = self._loop.create_task(self._tick_background())
+
+    def _write_background(self, call_id: str, *, force: bool) -> None:
+        job = self._background[call_id]
+        body = self.surface.trace(background_trace(job, self._clock()))
+        self._job_write(f"background:{call_id}", body, force=force)
+
+    async def _tick_background(self) -> None:
+        """While a job runs and says nothing (a `sleep`, a quiet build), its card still moves
+        once a minute so the elapsed time shows it is alive."""
+        while self._background:
+            await self._sleep(JOB_EDIT_GAP)
+            for call_id, job in list(self._background.items()):
+                if job.state == "running":
+                    self._write_background(call_id, force=False)
+
     def _on_subagent(self, update: AgentUpdate, *, polled: bool = False) -> None:
         """Runs on the loop thread. omp reports every subagent the `task` tool spawns: a
         lifecycle frame when it starts and one when it ends, and progress frames in between.
@@ -1670,12 +1869,14 @@ class ChatAgent:
                 log.debug("could not rewrite the expired approval prompt: %s", exc)
 
     # ------------------------------------------------------------------ turn
-    def _open_renderer(self) -> SimpleNamespace:
-        """Turn one run's updates into chat messages: a drain that reads the turn queue and a
-        sender that posts in order, both started here. ask() opens one per prompt; a run omp
-        starts on its own (a background job woke the agent) opens one between turns, so its
-        messages go out as they happen instead of riding on the next message the person sends.
+    def _open_renderer(self, queue: asyncio.Queue | None = None) -> SimpleNamespace:
+        """Turn one run's updates into chat messages: a drain that reads `queue` (the turn queue
+        by default) and a sender that posts in order, both started here. ask() opens one per
+        prompt; a run omp starts on its own (a background job woke the agent) opens one between
+        turns on a queue of its own, so its messages go out as they happen and two drains never
+        read the same queue.
         """
+        source = self._updates if queue is None else queue
         # Every message is posted once and never edited, so its timestamp is when that step
         # happened. Answer text is cut into segments at each tool call; each tool call is its own
         # message, posted when it finishes so it carries its output.
@@ -1751,6 +1952,16 @@ class ChatAgent:
             return self.surface.dropped(state["dropped"])
 
         async def sender() -> None:
+            # a run the agent started on its own that this turn follows posts all of its
+            # messages first; the two runs' messages never interleave. It may still be open
+            # here: omp ends it before it starts the prompt's run.
+            if queue is None:
+                while self._idle_run is not None or (
+                        self._idle_closing is not None and not self._idle_closing.done()):
+                    if self._idle_run is not None:
+                        await self._idle_run.closed.wait()
+                    else:
+                        await asyncio.shield(self._idle_closing)
             while True:
                 if not outbox:
                     if state["closed"]:
@@ -1893,7 +2104,7 @@ class ChatAgent:
 
         async def drain() -> None:
             while True:
-                update = await self._updates.get()
+                update = await source.get()
                 if update is None:
                     return
                 if update.kind != "plan":
@@ -1941,6 +2152,10 @@ class ChatAgent:
                 elif update.kind in {"tool_call", "tool_call_update"}:
                     raw = update.raw
                     call_id = str(raw.get("toolCallId") or f"anon{len(trace)}")
+                    if update.kind == "tool_call_update" and call_id not in trace:
+                        # an update of a call this run never started (a background job of an
+                        # earlier turn): a card for it would say "running" about nothing here
+                        continue
                     entry = trace.setdefault(call_id, ToolTrace(kind="tool"))
                     if update.kind == "tool_call":
                         # the text before a tool call is a finished thought: post it now
@@ -2004,7 +2219,7 @@ class ChatAgent:
         # markdown, like surface.notice between turns
         self._turn_notice = lambda body: enqueue("text", body, essential=True)
         return SimpleNamespace(state=state, drain=drain_task, sender=sender_task,
-                               finish=finish)
+                               finish=finish, queue=source)
 
     async def ask(self, text: str, images: list[dict[str, Any]] | None = None,
                   resumes: int = 0, record: str | None = None) -> str:
@@ -2012,13 +2227,8 @@ class ChatAgent:
         if not text:
             return ""
         await self.ensure()
-        if self._idle_run is not None:
-            # a run omp started on its own is still open: what it posted stays its own, and the
-            # prompt's renderer starts on an empty queue (the prompt queues behind that run)
-            run, self._idle_run = self._idle_run, None
-            self._updates.put_nowait(None)
-            await self._finish_idle_run(run)
         self.busy = True
+        self._prompt_pending = True
         self._compact_turn = text.strip() == "/compact"
         self._user_cancel = False
         self.last_used = time.time()
@@ -2050,6 +2260,10 @@ class ChatAgent:
             await drain_task
             await finish()  # what did arrive is still worth showing
             self.busy = False
+            self._prompt_pending = False  # a refused or failed prompt never says agent_start
+            if self._kill_jobs_after_turn:
+                self._kill_jobs_after_turn = False
+                await self._kill_jobs()
             # A crash or shutdown cut keeps the row, so the next start resumes it. A deliberate
             # stop and a silence timeout do not: the person has already been told it failed.
             if self._user_cancel or isinstance(exc, AgentTimeout):
@@ -2064,6 +2278,13 @@ class ChatAgent:
         await drain_task
         await finish()
         self.busy = False
+        self._prompt_pending = False
+        if self._kill_jobs_after_turn:
+            # /stop during this turn: the turn is gone now, so the command cannot land in it
+            self._kill_jobs_after_turn = False
+            await self._kill_jobs()
+        # a job or subagent the turn left running keeps the chat typing until it reports back
+        await self._wait_on_pending_work()
         await self._report_compaction()
         await self._read_context()
         self._compact_turn = False
@@ -2092,10 +2313,40 @@ class ChatAgent:
         return result.text
 
     async def cancel(self) -> bool:
+        """/stop: the running turn, and every bash job and subagent the session left running.
+        omp's abort ends the turn only; its background work keeps going and wakes the agent
+        again later. `/jobs kill all` stops that work, bash jobs and subagents alike, without
+        invoking the model. Sent mid-turn it would queue behind the dying run (prompts use
+        streamingBehavior followUp) and replay as a prompt, so a running turn sends it once it
+        has ended."""
         if self.client is None or not self.session_id:
             return False
         self.forget_turn()
-        self.client.abort()
+        self._end_pending_wait()
+        if self.busy:
+            self._kill_jobs_after_turn = True
+            self.client.abort()
+            return True
+        if self._idle_run is not None:
+            self.client.abort()  # the run the agent started on its own; its agent_end closes it
+        return await self._kill_jobs() or self._idle_run is not None
+
+    async def _kill_jobs(self) -> bool:
+        """Stop every background job and subagent; True when any was running."""
+        client = self.client
+        if client is None or not client.alive or not await self._has_pending_work():
+            return False
+        self._killing_jobs = True
+        try:
+            await asyncio.to_thread(client.prompt, "/jobs kill all", timeout=30.0)
+        except AgentError as exc:
+            log.warning("killing background jobs failed chat=%s: %s", self.label, exc)
+            return False
+        finally:
+            # the answer reaches the loop through call_soon_threadsafe; clearing the flag the
+            # same way puts it behind those frames, not ahead of them
+            self._loop.call_soon_threadsafe(setattr, self, "_killing_jobs", False)
+        log.info("background jobs killed chat=%s", self.label)
         return True
 
     async def steer(self, text: str, images: list[dict[str, Any]] | None = None) -> tuple[str, str]:
@@ -2213,6 +2464,7 @@ class ChatAgent:
 
     async def stop_process(self) -> None:
         """Close the agent process; the chat keeps its store and comes back on the next message."""
+        self._end_pending_wait()  # the work it waited on dies with the process
         if self.client is not None:
             await asyncio.to_thread(self.client.close)
             self.client = None
@@ -2232,6 +2484,7 @@ class ChatAgent:
 
     async def new_session(self) -> str:
         self.forget_turn()
+        self._end_pending_wait()  # the old session's jobs no longer report to this chat
         # the old context numbers belong to the old session; the next get_state re-reads them
         self._compactions_seen = None
         self._last_plan = []

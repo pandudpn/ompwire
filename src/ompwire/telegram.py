@@ -85,7 +85,7 @@ KEY_PREFIX = "tg:"
 
 COMMANDS: list[tuple[str, str]] = [
     ("new", "start a fresh session"),
-    ("stop", "cancel the running turn"),
+    ("stop", "cancel the turn and its background jobs"),
     ("status", "session, model, mode and process state"),
     ("usage", "token usage for this session"),
     ("stats", "messages, tool calls, tokens and cost from omp"),
