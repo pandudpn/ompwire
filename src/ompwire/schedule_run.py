@@ -1,8 +1,10 @@
-"""One scheduled turn, start to finish, in a process that exits when the turn does.
+"""One scheduled run, start to finish, in a process that exits when the run does.
 
-This is what the timer's `oneshot` unit calls. It builds the agent, runs exactly one prompt, sends
-the result to the gateway the schedule names, records what happened, and returns. There is no loop
-and no daemon: when this function returns, nothing of ompwire is still running.
+This is what the timer's `oneshot` unit calls. A prompt schedule builds the agent, runs exactly one
+prompt, sends the result to the gateway the schedule names, records what happened, and returns. A
+command schedule runs one shell command instead, with no agent and no model, and sends what it
+printed. There is no loop and no daemon: when this function returns, nothing of ompwire is still
+running.
 
 Sending goes through the target gateway kind's `Delivery`, which talks to the platform directly
 with that gateway's credential, so a result still arrives when its poller is stopped. Only the
@@ -17,14 +19,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
+import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from . import attachments, delivery, gateways, schedules
-from .config import load_config, system_prompt
+from .config import default_state_dir, load_config, system_prompt
 from .engine import agent_args, child_env
 from .format import now_wib, tokens
 from .rpc import AgentClient, AgentError
@@ -74,7 +79,10 @@ def _meta(item: schedules.Schedule, run: dict[str, Any]) -> list[tuple[str, str]
     if usage.get("inputTokens") or usage.get("outputTokens"):
         rows.append(("token", f"{tokens(usage.get('inputTokens') or 0)} in · "
                               f"{tokens(usage.get('outputTokens') or 0)} out"))
-    rows.append(("sent to", f"{item.gateway} · {'ephemeral' if item.ephemeral else 'session'}"))
+    if item.command:
+        rows.append(("sent to", f"{item.gateway} · command, no agent"))
+    else:
+        rows.append(("sent to", f"{item.gateway} · {'ephemeral' if item.ephemeral else 'session'}"))
     return rows
 
 
@@ -123,6 +131,8 @@ def _collector(run: dict[str, Any]):
 
 def run(name: str) -> int:
     item = schedules.get(name)
+    if item.command:
+        return run_command(item)
     config = load_config()
     try:
         target = _target(item)
@@ -200,6 +210,100 @@ def _report_failure(item: schedules.Schedule, run_meta: dict[str, Any]) -> None:
         log.error("schedule %s: could not report the failure: %s", item.name, exc)
 
 
+COMMAND_KEEP_DAYS = 30  # a command run's output stays on disk this long, for when a report is not enough
+COMMAND_TAIL = 3000  # characters of output a failure report quotes
+
+
+def command_log_dir(name: str) -> Path:
+    return default_state_dir() / "schedules" / name
+
+
+def run_command(item: schedules.Schedule) -> int:
+    """A command schedule: one shell command, no agent and no model.
+
+    Silence is the healthy case. A watcher prints nothing when nothing changed, so a run with no
+    output sends nothing; a run that printed sends what it printed; a run that failed sends its
+    exit code and the tail of its output. Every run's output is kept for COMMAND_KEEP_DAYS days.
+    The command gets the environment without any bot token, as the agent does."""
+    try:
+        _target(item)
+    except (schedules.ScheduleError, gateways.GatewayError) as exc:
+        log.error("schedule %s: %s", item.name, exc)
+        schedules.mark(item.name, f"failed: {exc}")
+        return 2
+    folder = command_log_dir(item.name)
+    folder.mkdir(parents=True, exist_ok=True)
+    out_path = folder / f"{datetime.now(UTC):%Y-%m-%d_%H-%M-%S}.txt"
+    log.info("schedule %s: start command (gateway=%s)", item.name, item.gateway)
+    started = time.monotonic()
+    code: int | None = None
+    with out_path.open("wb") as out:
+        # its own process group, so a timeout or a stopped unit ends the whole command (a
+        # script's children too), not only the shell that started them
+        proc = subprocess.Popen(["/bin/bash", "-c", item.command], stdout=out,
+                                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                env=child_env(), cwd=str(Path.home()), start_new_session=True)
+        try:
+            code = proc.wait(timeout=item.timeout)
+        except (subprocess.TimeoutExpired, Interrupted):
+            _kill_group(proc)
+    duration = time.monotonic() - started
+    _prune(folder)
+    output = out_path.read_text(encoding="utf-8", errors="replace")
+    run_meta: dict[str, Any] = {"duration": duration}
+    try:
+        if code == 0 and not output.strip():
+            schedules.mark(item.name, "ok · nothing to report")
+            log.info("schedule %s: ok, no output", item.name)
+            return 0
+        if code == 0:
+            sent = asyncio.run(_deliver_command(item, output, run_meta))
+            schedules.mark(item.name, f"ok · {sent} message(s)")
+            log.info("schedule %s: ok, %s message(s)", item.name, sent)
+            return 0
+        reason = "timed out" if code is None else f"exit {code}"
+        run_meta.update(ok=False, word="failed", error=f"{reason}\n{output[-COMMAND_TAIL:]}".strip())
+        schedules.mark(item.name, f"failed: {reason}")
+        log.error("schedule %s: command %s", item.name, reason)
+        _report_failure(item, run_meta)
+        return 1 if code is None else code
+    except Exception as exc:
+        # the output file still holds what the command printed; the journal says why it was not sent
+        log.error("schedule %s: could not send the report: %s", item.name, exc)
+        schedules.mark(item.name, f"failed: report not sent: {str(exc)[:100]}")
+        return 75
+
+
+async def _deliver_command(item: schedules.Schedule, output: str, run: dict[str, Any]) -> int:
+    """What a command printed, as a run card: the text in a code block, read as it was written."""
+    return await _deliver(item, f"```\n{output.rstrip()}\n```", [], [], run)
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """End a command and everything it started: TERM first, KILL if it is still there."""
+    for sig, grace in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+
+def _prune(folder: Path) -> None:
+    cutoff = time.time() - COMMAND_KEEP_DAYS * 86400
+    for old in folder.glob("*.txt"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+
+
 def _terminate(_signum, _frame):
     raise Interrupted()
 
@@ -209,4 +313,8 @@ def main(name: str) -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         stream=sys.stderr)
+    # httpx logs each Bot API URL, token included, at INFO; the unit's journal must not keep it
+    from .logs import install as install_redaction
+
+    install_redaction(logging.INFO)
     return run(name)

@@ -175,7 +175,7 @@ The terminal has its own smaller set, described under [Terminal](#terminal).
 | `/reasoning [on\|off]` | show the agent's thinking above the answer, in this chat |
 | `/advisor [on\|off]` | show omp's advisor notes on each turn, in this chat (on by default) |
 | `/skills [query]`, `/commands` | what the agent can do |
-| `/schedule [run\|rm <name>]` | list scheduled turns, run one now, remove one |
+| `/schedule [run\|rm <name>]` | list schedules (turns and commands), run one now, remove one |
 | `/login` | sign in to a model provider |
 | `/help`, `/whoami` | help, ids |
 
@@ -269,10 +269,12 @@ would run.
 
 ## Schedules
 
-A schedule runs one turn on a timer and exits. Nothing of ompwire stays alive between runs.
+A schedule runs one agent turn, or one shell command, on a timer and exits. Nothing of ompwire
+stays alive between runs.
 
 ```bash
 ompwire schedule add morning --cron "0 7 * * *" --prompt "summarise last night's repo activity"
+ompwire schedule add disk --cron "30 3 * * *" --command "~/bin/cleanup.sh" --gateway ops
 ompwire schedule run morning      # run it now instead of waiting for 07:00
 ompwire schedule list
 ompwire schedule remove morning
@@ -286,6 +288,13 @@ timeout.
 `--approval` decides what a run may do while nobody watches: `ask` reads only, `write` also
 writes files, `yolo` (the default) asks nothing. You can also ask in the chat ("every morning
 at 7, summarise the repo"); the agent proposes it and nothing is installed until you confirm.
+
+A `--command` schedule runs the command with `bash -c` from your home directory, with no agent
+and no model, so it costs nothing and still runs when the model provider is down. What it prints
+is sent as written; a run that prints nothing sends nothing, which is how a watcher says "no
+change". A non-zero exit or a timeout is reported with the reason and the tail of the output,
+and the whole process group is stopped. The command does not see any bot token, and each run's
+output is kept for 30 days under `~/.local/state/ompwire/schedules/<name>/`.
 
 ## Thinking, advisor and subagents
 

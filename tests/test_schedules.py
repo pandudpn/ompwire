@@ -312,3 +312,120 @@ def test_a_gateway_kind_without_a_delivery_is_refused():
     gateway = gateways.Gateway(name="x", kind="signal", allowed=[1])
     with pytest.raises(gateways.GatewayError, match="no delivery exists"):
         delivery.for_gateway(gateway)
+
+
+def test_a_command_schedule_round_trips_without_a_prompt(tmp_path):
+    schedules.save({"disk": schedules.Schedule(
+        name="disk", cron="30 3 * * *", prompt="", command='~/bin/clean.sh --dry "run"')})
+    item = schedules.load()["disk"]
+    assert item.command == '~/bin/clean.sh --dry "run"'
+    assert item.prompt == ""
+
+
+@pytest.mark.parametrize(("prompt", "command"), [("", ""), ("ringkas", "echo x")])
+def test_a_schedule_needs_exactly_one_of_prompt_and_command(monkeypatch, prompt, command):
+    monkeypatch.setattr(schedules, "validate_calendar", lambda _expression: None)
+    monkeypatch.setattr(schedules.gateways, "load", lambda config=None: [])
+    with pytest.raises(schedules.ScheduleError, match="either a prompt"):
+        schedules.add("job", "0 7 * * *", prompt=prompt, command=command)
+
+
+@pytest.fixture
+def command_run(monkeypatch, tmp_path):
+    """A command schedule run for real (bash, the output file, the status) with the Bot API faked:
+    `sent` is every message the gateway would have received."""
+    from ompwire import gateways, schedule_run, tg_surface
+
+    sent: list[str] = []
+
+    class FakeBot:
+        def __init__(self, _token):
+            pass
+
+        async def send_message(self, chat_id, text, **_kw):
+            sent.append(text)
+
+    monkeypatch.setattr(tg_surface, "Bot", FakeBot)
+    gateway = gateways.Gateway(name="ops", kind="telegram", allowed=[42])
+    monkeypatch.setattr(schedule_run.gateways, "get", lambda _name: gateway)
+    monkeypatch.setattr(schedule_run.gateways, "token", lambda _gw: "t")
+    monkeypatch.setattr(schedule_run, "default_state_dir", lambda: tmp_path / "state")
+
+    def run(command, timeout=60.0):
+        schedules.save({"job": schedules.Schedule(name="job", cron="0 7 * * *", prompt="",
+                                                  command=command, gateway="ops", timeout=timeout)})
+        code = schedule_run.run("job")
+        return code, schedules.get("job").last_status
+
+    run.sent = sent
+    run.outputs = lambda: sorted((tmp_path / "state" / "schedules" / "job").glob("*.txt"))
+    return run
+
+
+def test_a_command_that_prints_nothing_sends_nothing(command_run):
+    """A watcher that found no change is silent; a message every quarter hour saying so is noise."""
+    code, status = command_run("true")
+    assert code == 0
+    assert command_run.sent == []
+    assert status == "ok · nothing to report"
+    assert len(command_run.outputs()) == 1, "the run is still kept on disk"
+
+
+def test_what_a_command_prints_is_sent_as_written(command_run):
+    code, status = command_run("printf 'stok tersedia\\n<b>2 vCPU</b>\\n'")
+    assert code == 0
+    assert status == "ok · 1 message(s)"
+    assert "stok tersedia" in command_run.sent[0]
+    assert "&lt;b&gt;2 vCPU&lt;/b&gt;" in command_run.sent[0], "output is text, not markup"
+
+
+def test_a_failing_command_reports_its_exit_code_and_output(command_run):
+    code, status = command_run("echo 'disk penuh' >&2; exit 3")
+    assert code == 3
+    assert status == "failed: exit 3"
+    assert "exit 3" in command_run.sent[0] and "disk penuh" in command_run.sent[0]
+
+
+def test_a_command_that_runs_past_its_timeout_is_reported(command_run):
+    code, status = command_run("sleep 5", timeout=0.5)
+    assert code == 1
+    assert status == "failed: timed out"
+    assert "timed out" in command_run.sent[0]
+
+
+def test_a_command_does_not_see_the_bot_tokens(command_run, monkeypatch):
+    """A scheduled script runs with the gateway's environment; printing it must not leak a token."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret-a")
+    monkeypatch.setenv("OMPWIRE_GATEWAY_OPS_TOKEN", "secret-b")
+    command_run("env")
+    assert command_run.sent
+    assert "secret-a" not in command_run.sent[0] and "secret-b" not in command_run.sent[0]
+
+
+def test_a_timed_out_command_leaves_nothing_running(command_run, tmp_path):
+    """A script's own children outlived the shell that started them, still running after the
+    timeout reported the run as over."""
+    import time
+
+    marker = tmp_path / "child-alive"
+    command_run(f"(sleep 1.5; touch {marker}) & wait", timeout=0.3)
+    time.sleep(2)
+    assert not marker.exists(), "the command's child kept running after the timeout"
+
+
+def test_the_cli_adds_lists_and_shows_a_command_schedule(monkeypatch, capsys):
+    """`--command` once shadowed the subcommand the CLI dispatches on: every `ompwire schedule …`
+    printed the main help and did nothing."""
+    from ompwire import __main__ as cli
+
+    monkeypatch.setattr(schedules, "validate_calendar", lambda _expression: None)
+    monkeypatch.setattr(schedules.gateways, "load", lambda config=None: [])
+    monkeypatch.setattr(schedules, "next_elapse", lambda _name: "")
+    assert cli.main(["schedule", "add", "disk", "--cron", "30 3 * * *", "--no-start",
+                     "--command", "~/bin/clean.sh"]) == 0
+    assert schedules.get("disk").command == "~/bin/clean.sh"
+    capsys.readouterr()
+    assert cli.main(["schedule", "list"]) == 0
+    assert "disk" in capsys.readouterr().out
+    assert cli.main(["schedule", "show", "disk"]) == 0
+    assert "~/bin/clean.sh" in capsys.readouterr().out
