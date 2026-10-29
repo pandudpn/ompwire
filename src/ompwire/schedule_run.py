@@ -224,13 +224,11 @@ def run_command(item: schedules.Schedule) -> int:
     Silence is the healthy case. A watcher prints nothing when nothing changed, so a run with no
     output sends nothing; a run that printed sends what it printed; a run that failed sends its
     exit code and the tail of its output. Every run's output is kept for COMMAND_KEEP_DAYS days.
-    The command gets the environment without any bot token, as the agent does."""
-    try:
-        _target(item)
-    except (schedules.ScheduleError, gateways.GatewayError) as exc:
-        log.error("schedule %s: %s", item.name, exc)
-        schedules.mark(item.name, f"failed: {exc}")
-        return 2
+    The command gets the environment without any bot token, as the agent does.
+
+    The command runs first and the gateway is only needed to send the report: a cleanup or a
+    watchdog does its work even when its gateway is renamed, removed or unreachable, and only
+    the report fails, with the output still on disk."""
     folder = command_log_dir(item.name)
     folder.mkdir(parents=True, exist_ok=True)
     out_path = folder / f"{datetime.now(UTC):%Y-%m-%d_%H-%M-%S}.txt"
@@ -263,15 +261,17 @@ def run_command(item: schedules.Schedule) -> int:
             return 0
         reason = "timed out" if code is None else f"exit {code}"
         run_meta.update(ok=False, word="failed", error=f"{reason}\n{output[-COMMAND_TAIL:]}".strip())
-        schedules.mark(item.name, f"failed: {reason}")
         log.error("schedule %s: command %s", item.name, reason)
-        _report_failure(item, run_meta)
+        schedules.mark(item.name, f"failed: {reason}")
+        asyncio.run(_deliver(item, "", [], [], run_meta))
         return 1 if code is None else code
     except Exception as exc:
-        # the output file still holds what the command printed; the journal says why it was not sent
-        log.error("schedule %s: could not send the report: %s", item.name, exc)
-        schedules.mark(item.name, f"failed: report not sent: {str(exc)[:100]}")
-        return 75
+        # the command ran; only its report did not go out. The output file keeps what it printed
+        # and the journal says why it was not sent.
+        log.error("schedule %s: ran, but could not send the report: %s", item.name, exc)
+        verdict = "ok" if code == 0 else ("timed out" if code is None else f"exit {code}")
+        schedules.mark(item.name, f"{verdict} · report not sent: {str(exc)[:100]}")
+        return 75 if code == 0 else (1 if code is None else code)
 
 
 async def _deliver_command(item: schedules.Schedule, output: str, run: dict[str, Any]) -> int:

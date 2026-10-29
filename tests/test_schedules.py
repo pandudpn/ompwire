@@ -429,3 +429,20 @@ def test_the_cli_adds_lists_and_shows_a_command_schedule(monkeypatch, capsys):
     assert "disk" in capsys.readouterr().out
     assert cli.main(["schedule", "show", "disk"]) == 0
     assert "~/bin/clean.sh" in capsys.readouterr().out
+
+
+def test_a_command_runs_even_when_its_gateway_is_gone(command_run, monkeypatch, tmp_path):
+    """The work matters more than the report: a cleanup whose gateway was renamed still cleans,
+    and only the report fails, with the output kept on disk."""
+    from ompwire import schedule_run
+
+    def missing(_name):
+        raise schedule_run.gateways.GatewayError("no gateway named 'ops'")
+
+    monkeypatch.setattr(schedule_run.gateways, "get", missing)
+    marker = tmp_path / "cleaned"
+    code, status = command_run(f"touch {marker}; echo cleaned")
+    assert marker.exists(), "the command did not run"
+    assert code == 75
+    assert status.startswith("ok · report not sent")
+    assert command_run.outputs()[-1].read_text() == "cleaned\n"
