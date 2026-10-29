@@ -85,7 +85,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         items = schedules.load()
         if not items:
             print("no schedule configured. Run `ompwire schedule add <name> --cron \"0 7 * * *\" "
-                  "--prompt ...`.")
+                  "--prompt ...` (an agent turn) or `--command ...` (a shell command, no agent).")
             return 0
         width = max(len(name) for name in items)
         for name in sorted(items):
@@ -102,6 +102,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 cron=args.cron or "",
                 calendar=args.on_calendar or "",
                 prompt=args.prompt,
+                command=args.shell_command,
                 gateway=args.gateway,
                 ephemeral=not args.keep_session,
                 approval=args.approval,
@@ -133,7 +134,8 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     if action == "run":
         from . import schedule_run
 
-        print(f"running schedule {args.name} now (this runs one turn in the foreground)")
+        what = "one command" if schedules.get(args.name).command else "one turn"
+        print(f"running schedule {args.name} now (this runs {what} in the foreground)")
         return schedule_run.main(args.name)
 
     if action == "show":
@@ -146,9 +148,13 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         print(f"cron      {item.cron or '-'}")
         print(f"calendar  {item.on_calendar}")
         print(f"gateway   {item.gateway}")
-        print(f"prompt    {item.prompt}")
-        print(f"session   {'ephemeral' if item.ephemeral else 'persisted'}")
-        print(f"approval  {item.approval} (unattended)")
+        if item.command:
+            print(f"command   {item.command}")
+            print("agent     none (output is sent as printed; no output, no message)")
+        else:
+            print(f"prompt    {item.prompt}")
+            print(f"session   {'ephemeral' if item.ephemeral else 'persisted'}")
+            print(f"approval  {item.approval} (unattended)")
         print(f"timeout   {item.timeout:g}s")
         print(f"last      {item.last_status or 'never run'}")
         print(f"next      {schedules.next_elapse(item.name) or '-'}")
@@ -464,12 +470,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="stop a running gateway before removing")
     un.set_defaults(func=cmd_uninstall)
 
-    sc = _sub(sub, "schedule", "run one turn on a timer, unattended",
+    sc = _sub(sub, "schedule", "run one turn or one command on a timer, unattended",
               "A schedule is a cron entry plus a systemd timer: no daemon, no cost between runs. "
-              "The result goes to the gateway named in the schedule, so an unattended turn never "
-              "picks its own destination. Runs are ephemeral and refuse approval-needing tools "
-              "unless --yolo is given.",
+              "The result goes to the gateway named in the schedule, so an unattended run never "
+              "picks its own destination. A --prompt schedule runs one agent turn; runs are "
+              "ephemeral and refuse approval-needing tools unless --yolo is given. A --command "
+              "schedule runs a shell command with no agent and no model and sends what it printed: "
+              "nothing printed sends nothing, a failure sends its exit code and output.",
               "  ompwire schedule add morning --cron \"0 7 * * *\" --prompt \"ringkas repo semalam\"\n"
+              "  ompwire schedule add disk --cron \"30 3 * * *\" --command \"~/bin/cleanup.sh\"\n"
               "  ompwire schedule list\n"
               "  ompwire schedule run morning")
     sc.add_argument("schedule_action", nargs="?", default="list", metavar="action",
@@ -479,6 +488,11 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--on-calendar", dest="on_calendar", default="",
                     help="add: a systemd expression for what cron cannot say, e.g. \"Mon..Fri 07:00\"")
     sc.add_argument("--prompt", default="", help="add: what the agent is asked each time")
+    # dest is not "command": that name is the subcommand the top-level parser dispatches on, and
+    # a default of "" there made every `ompwire schedule …` print the main help instead
+    sc.add_argument("--command", dest="shell_command", default="",
+                    help="add: a shell command to run instead of an agent turn; what it prints is "
+                         "sent, nothing printed sends nothing")
     sc.add_argument("--gateway", default="telegram", help="add: which bot receives the result")
     sc.add_argument("--timezone", default="Asia/Jakarta",
                     help="add: the clock the cron fields are read in")

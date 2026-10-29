@@ -37,7 +37,10 @@ class ScheduleError(ValueError):
 class Schedule:
     name: str
     cron: str
+    # what runs: a prompt for the agent, or a shell command run with no agent and no model.
+    # Exactly one is set.
     prompt: str
+    command: str = ""
     calendar: str = ""
     gateway: str = "telegram"
     ephemeral: bool = True   # a run leaves no session behind unless asked
@@ -209,6 +212,7 @@ def load() -> dict[str, Schedule]:
             cron=str(row.get("cron", "")),
             calendar=str(row.get("calendar", "")),
             prompt=str(row.get("prompt", "")),
+            command=str(row.get("command", "")),
             gateway=str(row.get("gateway", "telegram")),
             ephemeral=bool(row.get("ephemeral", True)),
             approval=str(row.get("approval", "yolo")),
@@ -228,7 +232,10 @@ def render(items: dict[str, Schedule]) -> str:
             lines.append(f"calendar = {_toml(item.calendar)}")
         else:
             lines.append(f"cron = {_toml(item.cron)}")
-        lines.append(f"prompt = {_toml(item.prompt)}")
+        if item.command:
+            lines.append(f"command = {_toml(item.command)}")
+        else:
+            lines.append(f"prompt = {_toml(item.prompt)}")
         lines.append(f"gateway = {_toml(item.gateway)}")
         if item.timezone:
             lines.append(f"timezone = {_toml(item.timezone)}")
@@ -266,12 +273,13 @@ def agent_approval(value: str) -> str:
     raise ScheduleError(f"approval '{value}' is not one of: {', '.join(APPROVAL_MODES)}")
 
 
-def add(name: str, cron: str, prompt: str, gateway: str = "telegram", ephemeral: bool = True,
+def add(name: str, cron: str, prompt: str = "", gateway: str = "telegram", ephemeral: bool = True,
         approval: str = "yolo", timeout: float = 1800.0, calendar: str = "",
-        timezone: str = DEFAULT_TIMEZONE) -> Schedule:
+        timezone: str = DEFAULT_TIMEZONE, command: str = "") -> Schedule:
     cleaned = validate_name(name)
-    if not prompt.strip():
-        raise ScheduleError("a schedule needs a prompt")
+    if bool(prompt.strip()) == bool(command.strip()):
+        raise ScheduleError("a schedule needs either a prompt (an agent turn) or a command "
+                            "(a shell command, no agent), not both")
     known = {item.name for item in gateways.load()}
     if known and gateway not in known:
         raise ScheduleError(
@@ -289,8 +297,8 @@ def add(name: str, cron: str, prompt: str, gateway: str = "telegram", ephemeral:
     items = load()
     if cleaned in items:
         raise ScheduleError(f"schedule '{cleaned}' already exists; remove it first")
-    item = Schedule(name=cleaned, cron=cron, prompt=prompt.strip(), gateway=gateway,
-                    ephemeral=ephemeral, approval=approval, timeout=timeout,
+    item = Schedule(name=cleaned, cron=cron, prompt=prompt.strip(), command=command.strip(),
+                    gateway=gateway, ephemeral=ephemeral, approval=approval, timeout=timeout,
                     calendar=calendar.strip(), timezone=timezone)
     items[cleaned] = item
     save(items)
