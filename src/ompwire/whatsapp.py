@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import __version__, engine, omp_config, omp_sessions
+from . import engine, omp_config, omp_sessions
 from . import schedules as schedule_lib
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
@@ -41,6 +41,7 @@ from .format import uptime as fmt_uptime
 from .gateways import remember_chat, user_id
 from .rpc import AgentError
 from .telegram import BUSY_MODES, BUSY_NOTES, COMMANDS, FORWARD_HINT, configure_logging
+from .update import running_version
 from .wa_client import (
     GROUP_SERVER,
     LID_SERVER,
@@ -1073,7 +1074,7 @@ class Transport:
             rows.append(("error", f"agent failed to start: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
         rows += self.info_rows(agent)
-        await self.send_text(chat, card("🟢 ompwire", f"{__version__} · whatsapp {self.name}", rows,
+        await self.send_text(chat, card("🟢 ompwire", f"{running_version()} · whatsapp {self.name}", rows,
                                         "send /help for commands"))
 
     async def shutdown_notice(self) -> None:

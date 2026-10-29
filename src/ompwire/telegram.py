@@ -50,7 +50,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, engine, omp_config, omp_sessions
+from . import engine, omp_config, omp_sessions
 from . import schedules as schedule_lib
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
@@ -75,6 +75,7 @@ from .tg_surface import (
     send_html,
     send_md,
 )
+from .update import running_version
 
 log = logging.getLogger("ompwire.telegram")
 
@@ -1531,7 +1532,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             rows.append(("error", f"agent failed to start: {exc}"))
             log.warning("startup banner agent probe failed: %s", exc)
         rows += self.info_rows(agent)
-        body = card("🟢 ompwire", f"{__version__} · @{username}", rows,
+        body = card("🟢 ompwire", f"{running_version()} · @{username}", rows,
                     "send /help for commands · /status for live state")
         log.info("startup banner: %s", " | ".join(f"{k}={v}" for k, v in rows))
         try:
