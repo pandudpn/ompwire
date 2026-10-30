@@ -18,7 +18,9 @@ from collections.abc import Callable
 from .catalog import strip_ansi
 
 URL_RE = re.compile(r"https?://[^\s\"'<>]+")
-CODE_PROMPT_RE = re.compile(r"(paste the authorization code|authorization code)", re.IGNORECASE)
+CODE_PROMPT_RE = re.compile(
+    r"(authorization code|paste your .*api key|paste the key or token)", re.IGNORECASE
+)
 SUCCESS_RE = re.compile(r"(logged in|login successful|authenticated|credentials stored)", re.IGNORECASE)
 FAILURE_RE = re.compile(r"(login failed|unknown oauth provider|denied|expired)", re.IGNORECASE)
 
