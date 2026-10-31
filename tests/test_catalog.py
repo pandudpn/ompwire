@@ -94,7 +94,7 @@ def test_login_grid_marks_signed_in_providers():
     labels = [b.text for row in Message.keyboard.inline_keyboard for b in row]
     assert labels[0].startswith("✅")
     assert labels[1].startswith("⚪")
-    assert labels[2].startswith("❔")
+    assert labels[2].startswith("⚪")  # an unmapped id still logs in via omp's menu
     assert Message.keyboard.inline_keyboard[0][0].callback_data == "lgv:1"
 
 
