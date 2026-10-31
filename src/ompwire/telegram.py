@@ -119,6 +119,9 @@ COMMANDS: list[tuple[str, str]] = [
 
 ASK_POLL_INTERVAL = 0.05  # how often a held message waits for the open ask to close
 SESSIONS_SHOWN = 10  # /sessions keeps to one screen of buttons; the rest are older sessions
+# PTB gives every request 5 s to read. A photo or file arrives while the bot is also long-polling
+# and the agent is mid-turn, and the 5 s read ran out on a 100 KB photo; downloads get their own.
+DOWNLOAD_TIMEOUT = 60.0
 
 BUSY_MODES = ("steer", "followup", "queue")
 BUSY_NOTES = {
@@ -127,6 +130,12 @@ BUSY_NOTES = {
     "queue": "a message sent mid-turn waits in ompwire's queue",
 }
 FOLLOWED_UP = "📥 follow-up queued · runs right after the current turn"
+
+
+async def _download(source: Any) -> bytes:
+    """A Telegram photo or document's bytes, with time to arrive."""
+    telegram_file = await source.get_file(read_timeout=DOWNLOAD_TIMEOUT)
+    return bytes(await telegram_file.download_as_bytearray(read_timeout=DOWNLOAD_TIMEOUT))
 
 
 FORWARD_HINT = (
@@ -709,8 +718,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         if source is None:
             return
         try:
-            telegram_file = await source.get_file()
-            raw = bytes(await telegram_file.download_as_bytearray())
+            raw = await _download(source)
         except TelegramError as exc:
             log.warning("photo download failed chat=%s: %s", chat_id, exc)
             return await message.reply_text(f"could not fetch the image: {exc}")
@@ -738,8 +746,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             return await message.reply_text(
                 f"too large: {document.file_size / (1024 * 1024):.1f} MB, the limit is {max_mb:g} MB")
         try:
-            telegram_file = await document.get_file()
-            raw = bytes(await telegram_file.download_as_bytearray())
+            raw = await _download(document)
         except TelegramError as exc:
             log.warning("document download failed chat=%s: %s", chat_id, exc)
             return await message.reply_text(f"could not fetch the file: {exc}")
