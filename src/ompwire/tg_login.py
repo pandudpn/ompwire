@@ -116,11 +116,18 @@ class LoginMixin:
         def done(ok: bool, output: str) -> None:
             asyncio.run_coroutine_threadsafe(self._login_done(chat_id, provider.label, ok, output), loop)
 
+        def code_prompt() -> None:
+            asyncio.run_coroutine_threadsafe(
+                self.app.bot.send_message(
+                    chat_id, "🔑 omp is waiting for the key/code — paste it here."),
+                loop)
+
         session = LoginSession(
             target, emit, done,
             command=str(self.config.get("acp", "command", "omp")),
             menu_index=None if target else provider.index,
         )
+        session.on_code_prompt = code_prompt
         self.logins[chat_id] = session
         self._login_seen[chat_id] = []
         self._login_before[chat_id] = await asyncio.to_thread(credential_snapshot, self.credential_db)

@@ -40,6 +40,7 @@ class LoginSession:
         self.on_line = on_line
         self.on_exit = on_exit
         self.command = command
+        self.on_code_prompt: Callable[[], None] = lambda: None
         self.awaiting_code = False
         self.url = ""
         self.url_announced = False
@@ -82,9 +83,19 @@ class LoginSession:
                 break
             text = strip_ansi(chunk.decode("utf-8", "replace"))
             self._buffer += text
+            # A key prompt is a redrawn TUI line with no trailing newline, so it
+            # never leaves this buffer as a "line". Peek at it too: without this,
+            # awaiting_code only turns true after the process exits and the chat
+            # relay never fires. Once the prompt is armed, stop echoing the
+            # partial buffer as chat lines.
             while "\n" in self._buffer:
                 line, self._buffer = self._buffer.split("\n", 1)
                 self._handle(line.rstrip())
+            if not self.awaiting_code and CODE_PROMPT_RE.search(strip_ansi(self._buffer)):
+                self.awaiting_code = True
+                if not self.code_announced:
+                    self.code_announced = True
+                    self.on_code_prompt()
         self._finish()
 
     def _handle(self, line: str) -> None:
