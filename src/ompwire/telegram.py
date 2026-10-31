@@ -55,7 +55,7 @@ from . import schedules as schedule_lib
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
 from .audience import CHANNEL, GROUP, PRIVATE, Audience
-from .config import Config, approval_policy, save_override
+from .config import Config, approval_policy, default_state_dir, save_override
 from .engine import RESUME_PROMPT, agent_rows
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
@@ -743,7 +743,7 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         except TelegramError as exc:
             log.warning("document download failed chat=%s: %s", chat_id, exc)
             return await message.reply_text(f"could not fetch the file: {exc}")
-        base = Path(str(self.config.get("files", "incoming_dir", "~/.local/state/ompwire/files")))
+        base = Path(str(self.config.get("files", "incoming_dir", str(default_state_dir() / "files"))))
         directory = base.expanduser() / str(chat_id)
         try:
             target = save_incoming(raw, safe_name(document.file_name or "file"), directory, max_mb)

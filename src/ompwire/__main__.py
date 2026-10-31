@@ -15,7 +15,7 @@ import time
 
 from . import __version__
 from .cli import run_chat
-from .config import config_search_paths, load_config
+from .config import config_search_paths, load_config, migrate_state_dir
 from .gateway_cli import cmd_gateway
 from .rpc import AgentClient, AgentError
 from .store import SessionStore
@@ -31,6 +31,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     for warning in config.warnings:
         print(f"warn: {warning}", file=sys.stderr)
+    # state moved out of ~/.local/state; an install that upgrades keeps its sessions
+    for line in migrate_state_dir():
+        print(f"migrated {line}", file=sys.stderr)
     # `ompwire chat` used the shared store; its rows are copied to its own the first time
     gateways.migrate()
     return run_chat(config, key=args.key or _chat_key(), query=args.query, cwd=args.cwd)
@@ -386,7 +389,7 @@ common flows:
   ompwire uninstall --dry-run       see what uninstalling would remove
 
 config: ~/.config/ompwire/config.toml, one folder per bot in ~/.config/ompwire/gateways/
-state:  ~/.local/state/ompwire/gateways/<bot>/ (sessions, log), cli/ for ompwire chat
+state:  ~/.config/ompwire/state/gateways/<bot>/ (sessions, log), cli/ for ompwire chat
 """
 
 

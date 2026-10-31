@@ -19,6 +19,7 @@ def _layout(monkeypatch, tmp_path):
     (data / "mcp" / "blob.bin").write_bytes(b"0" * 2048)
     monkeypatch.setattr(uninstall, "CONFIG_DIR", config)
     monkeypatch.setattr(uninstall, "STATE_DIR", state)
+    monkeypatch.setattr(uninstall, "LEGACY_STATE_DIR", tmp_path / "old" / "state" / "ompwire")
     monkeypatch.setattr(uninstall, "DATA_DIR", data)
     monkeypatch.delenv("OMPWIRE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(uninstall, "running_serves", lambda: [])
