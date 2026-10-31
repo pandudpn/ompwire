@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ompwire"
-version = "0.17.2"
+version = "0.17.3"
 description = "Chat bridge that runs an OMP coding agent from Telegram and WhatsApp"
 readme = "README.md"
 license = "MIT"
