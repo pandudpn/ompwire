@@ -277,9 +277,10 @@ def _gateway_remove(args: argparse.Namespace, gateways, service) -> int:
               f"the gateway anyway and their next run fails.", file=sys.stderr)
         return 1
 
+    # the gateway's folder holds its definition and credential too; state is everything else
     home = gateways.state_dir(name)
-    # the first gateway keeps the shared state directory; it is never deleted with it
-    own_state = home != gateways.state_dir("telegram") and home.is_dir()
+    own_state = home.is_dir() and any(path.name not in ("gateway.toml", ".env")
+                                      for path in home.iterdir())
     keep_state = True
     if args.yes:
         keep_state = not getattr(args, "purge", False)

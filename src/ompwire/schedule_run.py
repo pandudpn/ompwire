@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from . import attachments, delivery, gateways, schedules
-from .config import default_state_dir, load_config, system_prompt
+from .config import SCHEDULE_LOGS, default_state_dir, load_config, system_prompt
 from .engine import agent_args, child_env
 from .format import now_wib, tokens
 from .rpc import AgentClient, AgentError
@@ -215,7 +215,7 @@ COMMAND_TAIL = 3000  # characters of output a failure report quotes
 
 
 def command_log_dir(name: str) -> Path:
-    return default_state_dir() / "schedules" / name
+    return default_state_dir() / SCHEDULE_LOGS / name
 
 
 def run_command(item: schedules.Schedule) -> int:

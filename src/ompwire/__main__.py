@@ -389,7 +389,7 @@ common flows:
   ompwire uninstall --dry-run       see what uninstalling would remove
 
 config: ~/.config/ompwire/config.toml, one folder per bot in ~/.config/ompwire/gateways/
-state:  ~/.config/ompwire/state/gateways/<bot>/ (sessions, log), cli/ for ompwire chat
+state:  beside it: gateways/<bot>/ (sessions, log), cli/ for ompwire chat
 """
 
 
@@ -468,7 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
     un.add_argument("--yes", action="store_true", help="remove without asking")
     un.add_argument("--dry-run", action="store_true", help="show what would be removed")
     un.add_argument("--keep-config", action="store_true",
-                    help="leave config.toml and .env (bot token) in place")
+                    help="leave config.toml, schedules and each gateway's definition and token in place")
     un.add_argument("--force", action="store_true",
                     help="stop a running gateway before removing")
     un.set_defaults(func=cmd_uninstall)

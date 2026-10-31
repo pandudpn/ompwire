@@ -8,14 +8,26 @@ those happened before this file existed.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from ompwire import config as config_module
 from ompwire import gateways, lock, omp_config, omp_sessions, service, setup, uninstall
 
+REAL_HOME = os.environ.get("HOME", "")
+
 
 @pytest.fixture(autouse=True)
-def isolate_real_paths(monkeypatch, tmp_path):
+def isolate_real_paths(monkeypatch, tmp_path, request):
+    # the backstop for every path below: `~` is this test's own home. Twice a test reached the
+    # live install through a module constant nobody had patched (uninstall's state directory), and
+    # deleted the session stores of four running gateways. The live-agent contract tests are the
+    # exception: omp reads its login from the real ~/.omp, and they never call ompwire's paths.
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", REAL_HOME if request.module.__name__.endswith("test_rpc_contract")
+                       else str(home))
     units = tmp_path / "units"
     units.mkdir(exist_ok=True)
     state = tmp_path / "state"
@@ -32,7 +44,6 @@ def isolate_real_paths(monkeypatch, tmp_path):
     # introduced it ran the uninstall tests once before patching it, and deleted a live install.
     monkeypatch.setattr(config_module, "LEGACY_STATE_DIR", tmp_path / "legacy-state")
     monkeypatch.setattr(uninstall, "LEGACY_STATE_DIR", tmp_path / "legacy-state")
-    monkeypatch.setattr(uninstall, "STATE_DIR", state)
     monkeypatch.setattr(uninstall, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(uninstall, "CONFIG_DIR", tmp_path / "config")
     # the real config.toml names a real log file; test_restart once opened it for appending

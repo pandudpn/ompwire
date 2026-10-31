@@ -51,24 +51,31 @@ def test_config_dir_override_reads_only_that_directory(tmp_path, monkeypatch):
 
 
 def test_state_migration_moves_idle_gateways_and_leaves_a_running_one(tmp_path):
-    """Gateways restart one at a time; the first must not take a sibling's live database."""
+    """Gateways restart one at a time; the first must not take a sibling's live database.
+    Every gateway folder already exists in the new place, holding its gateway.toml."""
     import os
 
     old = config_module.LEGACY_STATE_DIR
+    new = tmp_path / "config"
     for name in ("idle", "busy"):
         (old / "gateways" / name).mkdir(parents=True)
         (old / "gateways" / name / "sessions.db").write_text(name, encoding="utf-8")
+        (new / "gateways" / name).mkdir(parents=True)
+        (new / "gateways" / name / "gateway.toml").write_text("", encoding="utf-8")
     (old / "gateways" / "busy" / "serve.lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
     (old / "cli").mkdir()
-    new = tmp_path / "new-state"
+    (old / "schedules" / "job").mkdir(parents=True)
+    (old / "schedules" / "job" / "run.txt").write_text("out", encoding="utf-8")
 
     moved = config_module.migrate_state_dir(new)
 
     assert (new / "gateways" / "idle" / "sessions.db").read_text(encoding="utf-8") == "idle"
+    assert (new / "gateways" / "idle" / "gateway.toml").is_file()
     assert (new / "cli").is_dir()
+    assert (new / "schedule-logs" / "job" / "run.txt").read_text(encoding="utf-8") == "out"
     assert (old / "gateways" / "busy" / "sessions.db").is_file()
-    assert not (new / "gateways" / "busy").exists()
-    assert len(moved) == 2
+    assert not (new / "gateways" / "busy" / "sessions.db").exists()
+    assert len(moved) == 3
 
     # once the busy one stops, its own restart finishes the move and the old root goes away
     (old / "gateways" / "busy" / "serve.lock").write_text("999999999\n", encoding="utf-8")
@@ -81,10 +88,13 @@ def test_state_migration_never_overwrites_a_newer_store(tmp_path):
     old = config_module.LEGACY_STATE_DIR
     (old / "gateways" / "bot").mkdir(parents=True)
     (old / "gateways" / "bot" / "sessions.db").write_text("old", encoding="utf-8")
-    new = tmp_path / "new-state"
+    (old / "gateways" / "bot" / "ompwire.log").write_text("old log", encoding="utf-8")
+    new = tmp_path / "config"
     (new / "gateways" / "bot").mkdir(parents=True)
     (new / "gateways" / "bot" / "sessions.db").write_text("new", encoding="utf-8")
 
-    assert config_module.migrate_state_dir(new) == []
+    moved = config_module.migrate_state_dir(new)
+
+    assert [line.rsplit("/", 1)[-1] for line in moved] == ["ompwire.log"]
     assert (new / "gateways" / "bot" / "sessions.db").read_text(encoding="utf-8") == "new"
     assert (old / "gateways" / "bot" / "sessions.db").read_text(encoding="utf-8") == "old"

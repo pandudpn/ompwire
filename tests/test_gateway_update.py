@@ -116,7 +116,7 @@ def test_a_new_default_clears_the_direct_chat_choice_that_would_hide_it(sandbox,
     setting; changing the setting here must reach that chat. A group keeps its own choice."""
     gateways.save([gateways.Gateway(name="bot", allowed=[1])])
     home = gateways.state_dir("bot")
-    home.mkdir(parents=True)
+    home.mkdir(parents=True, exist_ok=True)
     store = SessionStore(str(home / "sessions.db"))
     store.set_pref("tg:42", "thinking", "low")
     store.set_pref("tg:42", "model", "keep/me")

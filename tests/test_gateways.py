@@ -174,8 +174,7 @@ class TestLayout:
         from ompwire import config as config_module
         from ompwire.store import SessionStore
 
-        state = tmp_path / "install-state"
-        state.mkdir()
+        state = sandbox  # one folder: state sits beside the definitions
         monkeypatch.setattr(config_module, "default_state_dir", lambda: state)
         (sandbox / "gateways.toml").write_text(
             '[gateway.telegram]\ntype = "telegram"\nallowed_users = [1]\n\n'
