@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from ompwire import config as config_module
-from ompwire import gateways, lock, omp_config, omp_sessions, service, setup
+from ompwire import gateways, lock, omp_config, omp_sessions, service, setup, uninstall
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +28,13 @@ def isolate_real_paths(monkeypatch, tmp_path):
     # every gateway's sessions, overrides, log and lock live under this; a status test once
     # created an empty store in the real ~/.local/state/ompwire/gateways/telegram
     monkeypatch.setattr(config_module, "default_state_dir", lambda: state)
+    # the pre-0.18 state root: migrate_state_dir moves it and uninstall deletes it. The PR that
+    # introduced it ran the uninstall tests once before patching it, and deleted a live install.
+    monkeypatch.setattr(config_module, "LEGACY_STATE_DIR", tmp_path / "legacy-state")
+    monkeypatch.setattr(uninstall, "LEGACY_STATE_DIR", tmp_path / "legacy-state")
+    monkeypatch.setattr(uninstall, "STATE_DIR", state)
+    monkeypatch.setattr(uninstall, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(uninstall, "CONFIG_DIR", tmp_path / "config")
     # the real config.toml names a real log file; test_restart once opened it for appending
     config_dir = tmp_path / "config"
     config_dir.mkdir(exist_ok=True)
