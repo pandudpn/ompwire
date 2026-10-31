@@ -8,7 +8,7 @@ Each gateway owns two directories and nothing outside them:
 
     ~/.config/ompwire/gateways/<name>/gateway.toml   platform, allow list, its own settings
     ~/.config/ompwire/gateways/<name>/.env           its credential (0600)
-    ~/.local/state/ompwire/gateways/<name>/          sessions.db, overrides.json, log, lock
+    ~/.config/ompwire/state/gateways/<name>/         sessions.db, overrides.json, log, lock
 
 so removing one is removing two directories. `config.toml` stays the shared default, and the
 agent itself (omp, ~/.omp) is shared by all. `migrate()` moves an install from the old layout:

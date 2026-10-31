@@ -60,14 +60,14 @@ show_reasoning = {show_reasoning}
 
 [files]
 max_mb = 20
-incoming_dir = "~/.local/state/ompwire/files"
+incoming_dir = "{incoming_dir}"
 
 [approval]
 policy = "{approval_policy}"
 
 [logging]
 level = "INFO"
-file = "~/.local/state/ompwire/cli/ompwire.log"
+file = "{log_file}"
 """
 
 
@@ -522,11 +522,16 @@ def run(*, yes: bool = False, force: bool = False, install_omp: bool = False) ->
     print(f"\nmcp: server definitions live in omp itself ({OMP_MCP_FILE})")
     _mcp_wizard(yes)
 
+    from .config import default_state_dir
+
+    state = default_state_dir()
     body = TEMPLATE.format(
         cwd=cwd, approval=approval, hint=default_hint(), persona="",
         model=model, mode=mode, thinking=thinking, yolo="true" if yolo else "false",
         approval_policy=approval_policy,
         show_reasoning="true" if reasoning else "false",
+        incoming_dir=state / "files",
+        log_file=state / "cli" / "ompwire.log",
     )
     config_dir.mkdir(parents=True, exist_ok=True)
     if config_file.is_file():

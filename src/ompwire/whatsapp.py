@@ -34,7 +34,7 @@ from . import schedules as schedule_lib
 from .attachments import incoming_summary, safe_name
 from .attachments import save as save_incoming
 from .audience import GROUP, PRIVATE, Audience
-from .config import Config, approval_policy, save_override
+from .config import Config, approval_policy, default_state_dir, save_override
 from .engine import RESUME_PROMPT, agent_rows
 from .format import now_wib, tokens, wib_time
 from .format import uptime as fmt_uptime
@@ -382,7 +382,7 @@ class Transport:
             log.warning("document download failed chat=%s: %s", chat, exc)
             await self.send_text(chat, f"could not fetch the file: {exc}")
             return None
-        base = Path(str(self.config.get("files", "incoming_dir", "~/.local/state/ompwire/files")))
+        base = Path(str(self.config.get("files", "incoming_dir", str(default_state_dir() / "files"))))
         directory = base.expanduser() / chat.replace("@", "_")
         try:
             target = save_incoming(raw, safe_name(document.fileName or "file"), directory, max_mb)

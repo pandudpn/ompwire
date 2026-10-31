@@ -55,7 +55,7 @@ def soul_path(state_dir: str | Path) -> Path:
 
 def soul_path_for(config: Any) -> Path:
     """SOUL.md location for whichever owner this config runs as: beside its session store
-    (a gateway's state dir, or ~/.local/state/ompwire/cli for `ompwire chat`)."""
+    (a gateway's state dir, or <state>/cli for `ompwire chat`)."""
     store = str(config.get("session", "store", "") or "")
     if store:
         return Path(store).expanduser().parent / SOUL_FILENAME
@@ -98,6 +98,50 @@ def persona_label(config: Any) -> str:
     if str(config.get("agent", "persona", "") or "").strip():
         return "config [agent].persona"
     return f"none · write {path}"
+
+STATE_DIR_ENV = "OMPWIRE_STATE_DIR"
+LEGACY_STATE_DIR = Path("~/.local/state/ompwire")
+
+
+def default_state_dir() -> Path:
+    """Where runtime files live: sessions, overrides, the serve lock, gateway state.
+
+    One install is one directory: state sits inside the config folder unless OMPWIRE_STATE_DIR
+    points somewhere else. LEGACY_STATE_DIR is only read by :func:`migrate_state_dir`.
+    """
+    value = (os.environ.get(STATE_DIR_ENV) or "").strip()
+    return Path(value).expanduser() if value else Path("~/.config/ompwire/state").expanduser()
+
+
+def migrate_state_dir(target: Path | None = None) -> list[str]:
+    """Move the old XDG state directory in, once; returns one line per thing moved.
+
+    Runs only while the new root is absent, so a half-finished move never loses the original,
+    and only when no live process holds a lock under the old root: a sibling gateway that is
+    still running would otherwise watch its session database vanish mid-turn.
+    """
+    new = (target or default_state_dir()).expanduser()
+    old = LEGACY_STATE_DIR.expanduser()
+    if new.exists() or not old.is_dir() or _state_in_use(old):
+        return []
+    new.parent.mkdir(parents=True, exist_ok=True)
+    old.rename(new)
+    return [f"state: {old} -> {new}"]
+
+
+def _state_in_use(root: Path) -> bool:
+    """True while any serve lock under `root` names a live pid."""
+    for lock in root.glob("**/serve*.lock"):
+        try:
+            pid = int(lock.read_text(encoding="utf-8").split()[0])
+        except (OSError, IndexError, ValueError):
+            continue
+        try:
+            os.kill(pid, 0)
+        except (OSError, ValueError):
+            continue
+        return True
+    return False
 
 
 DEFAULTS: dict[str, dict[str, Any]] = {
@@ -149,7 +193,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "session": {
         # `ompwire chat`'s own store; every gateway gets state/gateways/<name>/sessions.db
-        "store": "~/.local/state/ompwire/cli/sessions.db",
+        "store": str(default_state_dir() / "cli" / "sessions.db"),
         "idle_timeout": 1800,
     },
     "stream": {
@@ -173,7 +217,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "files": {
         "max_mb": 20.0,  # per file, both directions
         # where documents sent into the chat are written for the agent to read
-        "incoming_dir": "~/.local/state/ompwire/files",
+        "incoming_dir": str(default_state_dir() / "files"),
     },
     "logging": {
         "level": "INFO",
@@ -260,12 +304,7 @@ def find_config_path(explicit: str | Path | None = None,
     return None
 
 
-OVERRIDES_PATH = Path("~/.local/state/ompwire/overrides.json")
-
-
-def default_state_dir() -> Path:
-    """Where runtime files live: sessions, overrides, the serve lock."""
-    return Path("~/.local/state/ompwire").expanduser()
+OVERRIDES_PATH = default_state_dir() / "overrides.json"
 
 
 def load_overrides(path: Path | None = None) -> dict[str, dict[str, Any]]:

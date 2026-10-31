@@ -14,7 +14,8 @@ import subprocess
 from pathlib import Path
 
 CONFIG_DIR = Path("~/.config/ompwire")
-STATE_DIR = Path("~/.local/state/ompwire")
+STATE_DIR = CONFIG_DIR / "state"
+LEGACY_STATE_DIR = Path("~/.local/state/ompwire")
 DATA_DIR = Path("~/.local/share/ompwire")
 NEVER_TOUCH = (Path("~/.omp"),)
 
@@ -34,7 +35,7 @@ def targets(keep_config: bool = False) -> list[tuple[Path, str]]:
 
     Under OMPWIRE_CONFIG_DIR the sandbox is the whole install: state and data are looked for
     inside it. Only redirecting the config once let a sandboxed uninstall wipe the real
-    ~/.local/state and ~/.local/share of a live gateway.
+    the legacy ~/.local state and ~/.local/share of a live gateway.
     """
     sandbox = _sandbox()
     state = sandbox / "state" if sandbox else STATE_DIR.expanduser()
@@ -43,6 +44,8 @@ def targets(keep_config: bool = False) -> list[tuple[Path, str]]:
         (state, "session ids, per-chat prefs, approval override, logs"),
         (data, "MCP server installs created by ompwire"),
     ]
+    if not sandbox:
+        plan.append((LEGACY_STATE_DIR.expanduser(), "state left by an install older than 0.18"))
     if not keep_config:
         plan.insert(0, (_config_dir(), "config.toml, schedules and every gateway's folder (bot tokens)"))
     return [(path, note) for path, note in plan if path.exists()]

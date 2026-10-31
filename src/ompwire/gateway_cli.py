@@ -33,6 +33,10 @@ def _run_gateway(config_path: str | None, name: str, force: bool) -> int:
               f"`ompwire gateway list` shows what can run today", file=sys.stderr)
         return 1
     # before the lock: the old state is only moved while no process holds it
+    from .config import migrate_state_dir
+
+    for line in migrate_state_dir():
+        print(f"migrated {line}", file=sys.stderr)
     for line in gateways.migrate(state_for=gateway.name):
         print(f"migrated {line}", file=sys.stderr)
 

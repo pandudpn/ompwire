@@ -28,7 +28,7 @@ from . import allowlist, gateways, omp_sessions
 from . import schedules as schedule_lib
 from .attachments import extract as extract_files
 from .attachments import hide_partial as hide_file_partial
-from .config import Config, approval_policy, persona_label, system_prompt
+from .config import Config, approval_policy, default_state_dir, persona_label, system_prompt
 from .format import TOOL_LINE_WIDTH, _clip, humanize_token_report, tokens, wib_time
 from .mdrender import split_markdown, strip_agent_noise
 from .omp_sessions import plausible_context
@@ -2407,7 +2407,7 @@ class ChatAgent:
     async def export_html(self) -> Path:
         await self.ensure()
         base = Path(str(self.config.get("files", "incoming_dir",
-                                        "~/.local/state/ompwire/files"))).expanduser()
+                                        str(default_state_dir() / "files")))).expanduser()
         target = base.parent / "exports" / f"{self.session_id or 'session'}.html"
         target.parent.mkdir(parents=True, exist_ok=True)
         return Path(await asyncio.to_thread(self.client.export_html, str(target)))
