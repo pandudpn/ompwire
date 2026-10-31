@@ -445,7 +445,7 @@ def test_two_gateways_get_their_own_settings_and_state(sandbox, monkeypatch, tmp
     assert own.get("agent", "thinking") == shared.get("agent", "thinking")  # rest is shared
     # never the same session store or chat overrides, so /new or /reasoning stays in one bot
     assert shared.get("session", "store") != own.get("session", "store")
-    assert own.get("session", "store") == str(state / "gateways" / "work" / "sessions.db")
+    assert own.get("session", "store") == str(sandbox / "gateways" / "work" / "sessions.db")
     assert shared.overrides_path != own.overrides_path
 
 
@@ -510,8 +510,8 @@ def _two_bots(sandbox, monkeypatch, tmp_path):
                    gateways.Gateway(name="work", allowed=[2])])
     gateways.set_token(gateways.Gateway(name="telegram"), "1:main")
     gateways.set_token(gateways.Gateway(name="work"), "2:work")
-    work_state = state / "gateways" / "work"
-    work_state.mkdir(parents=True)
+    work_state = gateways.state_dir("work")
+    work_state.mkdir(parents=True, exist_ok=True)
     (work_state / "sessions.db").write_text("x")
     removed: list[str] = []
     monkeypatch.setattr("ompwire.service.remove", lambda name, **_k: removed.append(name) or 0)
@@ -586,3 +586,16 @@ def test_an_old_install_s_bot_is_found_by_gateway_list(sandbox, monkeypatch, cap
     out = capsys.readouterr().out
     assert "migrated definitions" in out
     assert "@old_bot" in out and "42" in out
+
+
+def test_purge_removes_the_first_gateways_state_too(sandbox, monkeypatch, tmp_path):
+    """`telegram` once shared the state root with everything else, so remove never deleted it.
+    It has its own folder like any other gateway: purge must empty it."""
+    _two_bots(sandbox, monkeypatch, tmp_path)
+    home = gateways.state_dir("telegram")
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "sessions.db").write_text("x")
+    _answers(monkeypatch)
+
+    assert cli.main(["gateway", "remove", "telegram", "--yes", "--purge"]) == 0
+    assert not home.exists()

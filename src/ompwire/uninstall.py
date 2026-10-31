@@ -14,8 +14,10 @@ import subprocess
 from pathlib import Path
 
 CONFIG_DIR = Path("~/.config/ompwire")
-STATE_DIR = CONFIG_DIR / "state"
 LEGACY_STATE_DIR = Path("~/.local/state/ompwire")
+# runtime files that sit in the config folder beside config.toml; --keep-config removes only these
+STATE_NAMES = ("cli", "files", "exports", "schedule-logs", "overrides.json", "serve.lock")
+GATEWAY_DEFINITION = ("gateway.toml", ".env")
 DATA_DIR = Path("~/.local/share/ompwire")
 NEVER_TOUCH = (Path("~/.omp"),)
 
@@ -34,20 +36,25 @@ def targets(keep_config: bool = False) -> list[tuple[Path, str]]:
     """Everything ompwire owns, with a note on what it holds.
 
     Under OMPWIRE_CONFIG_DIR the sandbox is the whole install: state and data are looked for
-    inside it. Only redirecting the config once let a sandboxed uninstall wipe the real
-    the legacy ~/.local state and ~/.local/share of a live gateway.
+    inside it. Only redirecting the config once let a sandboxed uninstall wipe the real legacy
+    ~/.local/state and ~/.local/share of a live gateway.
     """
     sandbox = _sandbox()
-    state = sandbox / "state" if sandbox else STATE_DIR.expanduser()
+    config = _config_dir()
     data = sandbox / "data" if sandbox else DATA_DIR.expanduser()
-    plan = [
-        (state, "session ids, per-chat prefs, approval override, logs"),
-        (data, "MCP server installs created by ompwire"),
-    ]
+    if keep_config:
+        # state lives inside the config folder, so it goes file by file and the definitions stay
+        plan = [(config / name, "session ids, files, logs, approval override")
+                for name in STATE_NAMES]
+        plan += [(path, f"gateway {path.parent.name}: sessions, chat toggles, log")
+                 for path in sorted(config.glob("gateways/*/*"))
+                 if path.name not in GATEWAY_DEFINITION]
+    else:
+        plan = [(config, "config.toml, schedules, every gateway's folder (bot tokens, sessions, "
+                         "logs)")]
+    plan.append((data, "MCP server installs created by ompwire"))
     if not sandbox:
         plan.append((LEGACY_STATE_DIR.expanduser(), "state left by an install older than 0.18"))
-    if not keep_config:
-        plan.insert(0, (_config_dir(), "config.toml, schedules and every gateway's folder (bot tokens)"))
     return [(path, note) for path, note in plan if path.exists()]
 
 

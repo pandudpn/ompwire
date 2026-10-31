@@ -358,7 +358,7 @@ def command_run(monkeypatch, tmp_path):
         return code, schedules.get("job").last_status
 
     run.sent = sent
-    run.outputs = lambda: sorted((tmp_path / "state" / "schedules" / "job").glob("*.txt"))
+    run.outputs = lambda: sorted((tmp_path / "state" / "schedule-logs" / "job").glob("*.txt"))
     return run
 
 

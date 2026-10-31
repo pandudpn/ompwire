@@ -4,13 +4,13 @@ A gateway is a chat platform connection with its own credential and its own allo
 Keeping them separate is the whole point: a WhatsApp gateway that breaks should not take
 the Telegram one down with it, and each gets its own systemd unit.
 
-Each gateway owns two directories and nothing outside them:
+Each gateway owns one directory and nothing outside it:
 
     ~/.config/ompwire/gateways/<name>/gateway.toml   platform, allow list, its own settings
     ~/.config/ompwire/gateways/<name>/.env           its credential (0600)
-    ~/.config/ompwire/state/gateways/<name>/         sessions.db, overrides.json, log, lock
+    ~/.config/ompwire/gateways/<name>/               sessions.db, overrides.json, log, lock
 
-so removing one is removing two directories. `config.toml` stays the shared default, and the
+so removing one is removing one directory. `config.toml` stays the shared default, and the
 agent itself (omp, ~/.omp) is shared by all. `migrate()` moves an install from the old layout:
 one gateways.toml, one .env, and the first gateway's state at the root of the state directory.
 """
@@ -312,11 +312,9 @@ def _toml_value(value: Any) -> str:
 
 
 def state_dir(name: str) -> Path:
-    """Where one gateway keeps its runtime state: sessions, chat overrides, log, lock. Two bots
-    never share a session, a /reasoning toggle or a log line."""
-    from .config import default_state_dir
-
-    return default_state_dir() / "gateways" / name
+    """Where one gateway keeps its runtime state: sessions, chat overrides, log, lock, beside its
+    gateway.toml. Two bots never share a session, a /reasoning toggle or a log line."""
+    return gateways_dir() / name
 
 
 LOG_NAME = "ompwire.log"

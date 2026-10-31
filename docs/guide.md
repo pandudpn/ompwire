@@ -109,7 +109,7 @@ ompwire gateway start --platform whatsapp --allowed 6281234567890 \
 - **Photos and files** work as on Telegram: a photo goes to the agent as an image, a document
   is saved and its path handed over. Voice notes and stickers are not supported yet.
 - **The session file is the credential.** It lives in
-  `~/.config/ompwire/state/gateways/<name>/whatsapp.db` (mode `0600`); whoever holds it acts as
+  `~/.config/ompwire/gateways/<name>/whatsapp.db` (mode `0600`); whoever holds it acts as
   the linked device. `gateway remove --purge` deletes it; also remove the device on the phone.
 - **Relink** with `gateway start <name> --relink`, for example after the phone logged the
   device out. The gateway stops itself when WhatsApp ends the link.
@@ -294,7 +294,7 @@ and no model, so it costs nothing and still runs when the model provider is down
 is sent as written; a run that prints nothing sends nothing, which is how a watcher says "no
 change". A non-zero exit or a timeout is reported with the reason and the tail of the output,
 and the whole process group is stopped. The command does not see any bot token, and each run's
-output is kept for 30 days under `~/.config/ompwire/state/schedules/<name>/`.
+output is kept for 30 days under `~/.config/ompwire/schedule-logs/<name>/`.
 
 ## Thinking, advisor and subagents
 
@@ -333,13 +333,14 @@ request is allowed instead of hanging. Run one-shot prompts only where that is a
 | `~/.config/ompwire/schedules.toml` | the scheduled turns |
 | `~/.config/ompwire/gateways/<name>/gateway.toml` | one gateway: platform, allow list, home channel, its own settings |
 | `~/.config/ompwire/gateways/<name>/.env` | that gateway's credential only (the bot token for Telegram), mode `0600` |
-| `~/.config/ompwire/state/gateways/<name>/` | that gateway's sessions, chat toggles, log and lock |
-| `~/.config/ompwire/state/cli/` | `ompwire chat`'s sessions |
+| `~/.config/ompwire/gateways/<name>/` | also that gateway's sessions, chat toggles, log and lock |
+| `~/.config/ompwire/cli/` | `ompwire chat`'s sessions |
+| `~/.config/ompwire/files/`, `schedule-logs/` | documents sent into a chat, command schedules' output |
 
-`OMPWIRE_STATE_DIR` moves everything in the last two rows somewhere else.
-
-One gateway is two directories, so `gateway remove` with the full delete leaves nothing of it
-behind.
+Everything ompwire keeps is in this one folder, and `OMPWIRE_CONFIG_DIR` moves all of it.
+One gateway is one directory, so `gateway remove` with the full delete leaves nothing of it
+behind. Back the folder up as you would a password store: besides the tokens it holds the
+WhatsApp session file.
 
 Precedence: defaults, then `config.toml`, then the gateway's own settings, then toggles set from
 its chat, then environment variables. Sections: `[acp]` (the agent command, run as
@@ -376,11 +377,11 @@ cwd = "~/work"
 
 ### Persona (SOUL.md)
 
-Each gateway can speak with its own persona, kept in `SOUL.md` in its state folder:
+Each gateway can speak with its own persona, kept in `SOUL.md` in its folder:
 
 ```text
-~/.config/ompwire/state/gateways/<name>/SOUL.md   one bot
-~/.config/ompwire/state/cli/SOUL.md               ompwire chat
+~/.config/ompwire/gateways/<name>/SOUL.md   one bot
+~/.config/ompwire/cli/SOUL.md               ompwire chat
 ```
 
 When `gateway start` creates a profile (and when `ompwire setup` runs), it asks for the persona
@@ -470,6 +471,8 @@ ompwire uninstall --dry-run # list what would be removed
 
 `uninstall` removes only what ompwire created: `~/.config/ompwire`, `~/.local/share/ompwire` and
 the package, plus `~/.local/state/ompwire` when an older install left it behind. `~/.omp` is never touched.
+`--keep-config` keeps `config.toml`, `schedules.toml` and each gateway's `gateway.toml` and `.env`,
+and removes the sessions, logs and files beside them.
 
 ## When it goes quiet
 

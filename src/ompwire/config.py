@@ -99,52 +99,63 @@ def persona_label(config: Any) -> str:
         return "config [agent].persona"
     return f"none · write {path}"
 
-STATE_DIR_ENV = "OMPWIRE_STATE_DIR"
 LEGACY_STATE_DIR = Path("~/.local/state/ompwire")
 
 
 def default_state_dir() -> Path:
-    """Where runtime files live: sessions, overrides, the serve lock, gateway state.
-
-    One install is one directory: state sits inside the config folder unless OMPWIRE_STATE_DIR
-    points somewhere else. LEGACY_STATE_DIR is only read by :func:`migrate_state_dir`.
-    """
-    value = (os.environ.get(STATE_DIR_ENV) or "").strip()
-    return Path(value).expanduser() if value else Path("~/.config/ompwire/state").expanduser()
+    """The install's root, where runtime files live beside the config: `ompwire chat` (cli/),
+    incoming files, schedule logs, overrides.json. A gateway's state sits in its own folder under
+    gateways/, next to its gateway.toml. OMPWIRE_CONFIG_DIR moves all of it at once."""
+    value = (os.environ.get("OMPWIRE_CONFIG_DIR") or "").strip()
+    return Path(value or "~/.config/ompwire").expanduser()
 
 
 def migrate_state_dir(target: Path | None = None) -> list[str]:
-    """Move the old XDG state directory in, piece by piece; returns one line per thing moved.
+    """Move the state ~/.local/state/ompwire held up to 0.17 into the config folder, piece by
+    piece; returns one line per thing moved.
 
-    Each gateway's folder moves on its own, and only while no live process holds a lock inside
-    it: gateways restart one at a time, so an all-or-nothing move would either never happen or
-    pull a database out from under a sibling mid-turn. Nothing is moved over an existing target,
-    so a gateway that already started fresh keeps what it has and the original stays put.
+    A gateway's files go into its folder under gateways/, beside its gateway.toml, and only while
+    no live process holds a lock in its old folder: gateways restart one at a time, so moving a
+    sibling's database would pull it out from under a running turn. Each file is checked on its
+    own and never moved over an existing one, so whatever the new place already holds wins and the
+    original stays put.
     """
     new = (target or default_state_dir()).expanduser()
     old = LEGACY_STATE_DIR.expanduser()
     if not old.is_dir() or old == new:
         return []
     pieces: list[tuple[Path, Path]] = []
+    top_busy = any(_state_in_use(lock) for lock in old.glob("serve*.lock"))
     for item in sorted(old.iterdir()):
         if item.name == "gateways" and item.is_dir():
-            pieces.extend((gateway, new / "gateways" / gateway.name)
-                          for gateway in sorted(item.iterdir()))
-        else:
+            for gateway in sorted(item.iterdir()):
+                if gateway.is_dir() and not _state_in_use(gateway):
+                    pieces.extend((path, new / "gateways" / gateway.name / path.name)
+                                  for path in sorted(gateway.iterdir()))
+        elif item.name == "schedules" and item.is_dir():
+            # per file: a run that fired after the switch already started the new folder
+            pieces.extend((path, new / SCHEDULE_LOGS / job.name / path.name)
+                          for job in sorted(item.iterdir()) if job.is_dir()
+                          for path in sorted(job.iterdir()))
+        elif not top_busy:
             pieces.append((item, new / item.name))
     moved: list[str] = []
     for source, destination in pieces:
-        if destination.exists() or _state_in_use(source):
+        if destination.exists():
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
         source.rename(destination)
         moved.append(f"state: {source} -> {destination}")
-    for leftover in (old / "gateways", old):
+    leftovers = [*sorted(old.glob("*/*")), *sorted(old.glob("*")), old]
+    for leftover in leftovers:
         try:
             leftover.rmdir()
         except OSError:
             pass
     return moved
+
+
+SCHEDULE_LOGS = "schedule-logs"  # not "schedules": that name sits beside schedules.toml
 
 
 def _state_in_use(path: Path) -> bool:

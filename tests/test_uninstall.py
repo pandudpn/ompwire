@@ -6,44 +6,48 @@ from ompwire import uninstall
 
 
 def _layout(monkeypatch, tmp_path):
+    """One install: config, each gateway's definition and state, all in one folder."""
     config = tmp_path / "config" / "ompwire"
-    state = tmp_path / "state" / "ompwire"
     data = tmp_path / "share" / "ompwire"
-    config.mkdir(parents=True)
+    bot = config / "gateways" / "bot"
+    bot.mkdir(parents=True)
     (config / "config.toml").write_text("[acp]\n", encoding="utf-8")
-    (config / ".env").write_text("TELEGRAM_BOT_TOKEN=123:abc\n", encoding="utf-8")
-    state.mkdir(parents=True)
-    (state / "sessions.db").write_text("x", encoding="utf-8")
+    (bot / "gateway.toml").write_text('type = "telegram"\n', encoding="utf-8")
+    (bot / ".env").write_text("OMPWIRE_GATEWAY_BOT_TOKEN=123:abc\n", encoding="utf-8")
+    (bot / "sessions.db").write_text("x", encoding="utf-8")
+    (config / "cli").mkdir()
+    (config / "cli" / "sessions.db").write_text("x", encoding="utf-8")
     data.mkdir(parents=True)
     (data / "mcp").mkdir()
     (data / "mcp" / "blob.bin").write_bytes(b"0" * 2048)
     monkeypatch.setattr(uninstall, "CONFIG_DIR", config)
-    monkeypatch.setattr(uninstall, "STATE_DIR", state)
     monkeypatch.setattr(uninstall, "LEGACY_STATE_DIR", tmp_path / "old" / "state" / "ompwire")
     monkeypatch.setattr(uninstall, "DATA_DIR", data)
     monkeypatch.delenv("OMPWIRE_CONFIG_DIR", raising=False)
     monkeypatch.setattr(uninstall, "running_serves", lambda: [])
     monkeypatch.setattr(uninstall, "package_command", lambda: [])
-    return config, state, data
+    return config, bot / "sessions.db", data
 
 
 def test_targets_cover_config_state_and_data(monkeypatch, tmp_path):
-    config, state, data = _layout(monkeypatch, tmp_path)
+    config, _state, data = _layout(monkeypatch, tmp_path)
     plan = [path for path, _note in uninstall.targets()]
-    assert plan == [config, state, data]
+    assert plan == [config, data]
 
 
-def test_keep_config_leaves_the_token_behind(monkeypatch, tmp_path):
+def test_keep_config_leaves_definitions_and_tokens_and_takes_the_state(monkeypatch, tmp_path):
     config, state, data = _layout(monkeypatch, tmp_path)
-    plan = [path for path, _note in uninstall.targets(keep_config=True)]
-    assert config not in plan
-    assert plan == [state, data]
+    assert uninstall.run(yes=True, keep_config=True) == 0
+    bot = config / "gateways" / "bot"
+    assert (config / "config.toml").is_file()
+    assert (bot / "gateway.toml").is_file() and (bot / ".env").is_file()
+    assert not state.exists() and not (config / "cli").exists() and not data.exists()
 
 
 def test_dry_run_removes_nothing(monkeypatch, tmp_path, capsys):
     config, state, data = _layout(monkeypatch, tmp_path)
     assert uninstall.run(dry_run=True) == 0
-    assert config.is_dir() and state.is_dir() and data.is_dir()
+    assert config.is_dir() and state.is_file() and data.is_dir()
     out = capsys.readouterr().out
     assert "dry run" in out and "Nothing was removed" in out
 
@@ -62,7 +66,7 @@ def test_declining_the_prompt_removes_nothing(monkeypatch, tmp_path, capsys):
     config, state, _data = _layout(monkeypatch, tmp_path)
     monkeypatch.setattr("builtins.input", lambda prompt="": "n")
     assert uninstall.run(yes=False) == 0
-    assert config.is_dir() and state.is_dir()
+    assert config.is_dir() and state.is_file()
     assert "nothing removed" in capsys.readouterr().out
 
 
@@ -140,18 +144,20 @@ def test_every_generated_unit_is_removed_not_just_the_telegram_one(monkeypatch, 
                                "ompwire-schedule-morning.timer", "ompwire-telegram.service"]
 
 
-def test_a_sandboxed_run_never_reaches_the_real_state(monkeypatch, tmp_path):
-    real_state = tmp_path / "real-state"
+def test_a_sandboxed_run_never_reaches_the_real_install(monkeypatch, tmp_path):
+    real_config = tmp_path / "real-config"
+    real_legacy = tmp_path / "real-legacy"
     real_data = tmp_path / "real-data"
-    real_state.mkdir()
-    real_data.mkdir()
-    monkeypatch.setattr(uninstall, "STATE_DIR", real_state)
+    for path in (real_config, real_legacy, real_data):
+        path.mkdir()
+    monkeypatch.setattr(uninstall, "CONFIG_DIR", real_config)
+    monkeypatch.setattr(uninstall, "LEGACY_STATE_DIR", real_legacy)
     monkeypatch.setattr(uninstall, "DATA_DIR", real_data)
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
     monkeypatch.setenv("OMPWIRE_CONFIG_DIR", str(sandbox))
 
-    paths = [path for path, _note in uninstall.targets()]
-    assert real_state not in paths
-    assert real_data not in paths
-    assert sandbox in paths
+    for keep in (False, True):
+        paths = [path for path, _note in uninstall.targets(keep_config=keep)]
+        assert not {real_config, real_legacy, real_data} & set(paths)
+        assert all(sandbox in path.parents or path == sandbox for path in paths)
