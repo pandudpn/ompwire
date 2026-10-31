@@ -34,6 +34,7 @@ PROVIDER_IDS = {
     "Devin": "devin",
     "xAI API": "xai",
     "xAI Grok OAuth (SuperGrok or X Premium+)": "xai-oauth",
+    "Ollama Cloud": "ollama-cloud",
 }
 
 SKILL_DIRS = ("~/.omp/agent/skills", "~/.omp/skills", ".omp/skills")
