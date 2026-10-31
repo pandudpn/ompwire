@@ -114,32 +114,55 @@ def default_state_dir() -> Path:
 
 
 def migrate_state_dir(target: Path | None = None) -> list[str]:
-    """Move the old XDG state directory in, once; returns one line per thing moved.
+    """Move the old XDG state directory in, piece by piece; returns one line per thing moved.
 
-    Runs only while the new root is absent, so a half-finished move never loses the original,
-    and only when no live process holds a lock under the old root: a sibling gateway that is
-    still running would otherwise watch its session database vanish mid-turn.
+    Each gateway's folder moves on its own, and only while no live process holds a lock inside
+    it: gateways restart one at a time, so an all-or-nothing move would either never happen or
+    pull a database out from under a sibling mid-turn. Nothing is moved over an existing target,
+    so a gateway that already started fresh keeps what it has and the original stays put.
     """
     new = (target or default_state_dir()).expanduser()
     old = LEGACY_STATE_DIR.expanduser()
-    if new.exists() or not old.is_dir() or _state_in_use(old):
+    if not old.is_dir() or old == new:
         return []
-    new.parent.mkdir(parents=True, exist_ok=True)
-    old.rename(new)
-    return [f"state: {old} -> {new}"]
+    pieces: list[tuple[Path, Path]] = []
+    for item in sorted(old.iterdir()):
+        if item.name == "gateways" and item.is_dir():
+            pieces.extend((gateway, new / "gateways" / gateway.name)
+                          for gateway in sorted(item.iterdir()))
+        else:
+            pieces.append((item, new / item.name))
+    moved: list[str] = []
+    for source, destination in pieces:
+        if destination.exists() or _state_in_use(source):
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(destination)
+        moved.append(f"state: {source} -> {destination}")
+    for leftover in (old / "gateways", old):
+        try:
+            leftover.rmdir()
+        except OSError:
+            pass
+    return moved
 
 
-def _state_in_use(root: Path) -> bool:
-    """True while any serve lock under `root` names a live pid."""
-    for lock in root.glob("**/serve*.lock"):
+def _state_in_use(path: Path) -> bool:
+    """True while a serve lock at or under `path` names a live pid."""
+    locks = [path] if path.is_file() else path.glob("**/serve*.lock")
+    for lock in locks:
+        if not lock.name.startswith("serve") or not lock.name.endswith(".lock"):
+            continue
         try:
             pid = int(lock.read_text(encoding="utf-8").split()[0])
         except (OSError, IndexError, ValueError):
             continue
         try:
             os.kill(pid, 0)
-        except (OSError, ValueError):
+        except ProcessLookupError:
             continue
+        except PermissionError:
+            return True
         return True
     return False
 
