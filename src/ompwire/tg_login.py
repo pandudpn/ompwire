@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -26,6 +27,9 @@ log = logging.getLogger("ompwire.telegram")
 
 class LoginMixin:
     LOGIN_PAGE = 10
+    # omp's numbered provider menu. The chat already knows which entry it picked, so
+    # streaming the whole list buries the actionable lines under ~85 rows.
+    MENU_LINE_RE = re.compile(r"^\s*\d+\.\s+\S")
 
     async def _render_login(self, chat_id: int, page: int, message: Any) -> None:
         providers = self._login_cache
@@ -137,17 +141,18 @@ class LoginMixin:
             chat_id,
             card("🔐 login started", provider.label,
                  [("target", target or f"menu #{provider.index}")],
-                 "follow the steps below, then paste the authorization code into this chat"),
+                 "follow the steps below, then paste the code or API key into this chat"),
             parse_mode=ParseMode.HTML,
         )
 
     # omp's own console chatter; the chat only needs the actionable lines
     LOGIN_NOISE = ("Local shortcut", "Preferred port", "Waiting for browser authentication",
-                   "Complete login in your browser")
+                   "Complete login in your browser", "Select a provider", "Enter number (")
 
     async def _login_line(self, chat_id: int, label: str, line: str) -> None:
         text = line.strip()
-        if not text or any(noise in text for noise in self.LOGIN_NOISE):
+        if (not text or self.MENU_LINE_RE.match(text)
+                or any(noise in text for noise in self.LOGIN_NOISE)):
             return
         seen = self._login_seen.setdefault(chat_id, [])
         if text in seen:
@@ -165,7 +170,7 @@ class LoginMixin:
             return
         if session is not None and session.awaiting_code:
             await self.app.bot.send_message(
-                chat_id, "🔑 omp is waiting for the authorization code — paste it here.")
+                chat_id, "🔑 omp is waiting for the code or API key — paste it here.")
             return
         if len(text) <= 200:
             safe = esc(text)
