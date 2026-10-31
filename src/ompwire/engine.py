@@ -2460,6 +2460,8 @@ class ChatAgent:
         if self.client is not None:
             await asyncio.to_thread(self.client.close)
         self.client = None
+        # a respawn usually follows a login: the new process knows models the old list lacks
+        self._models = []
         await self.ensure(yolo=yolo)
 
     async def stop_process(self) -> None:

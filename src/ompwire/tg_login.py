@@ -38,7 +38,7 @@ class LoginMixin:
         window, index, pages = paginate(providers, max(0, page - 1), self.LOGIN_PAGE)
         buttons = []
         for provider in window:
-            mark = "✅ " if provider.logged_in else ("⚪ " if provider.provider_id else "❔ ")
+            mark = "✅ " if provider.logged_in else "⚪ "
             buttons.append(InlineKeyboardButton(f"{mark}{provider.label[:24]}",
                                                 callback_data=f"lgv:{provider.index}"))
         rows = two_columns(buttons)
@@ -55,7 +55,7 @@ class LoginMixin:
         try:
             await message.edit_text(
                 card("🔐 login", f"{signed} signed in · {len(providers)} providers · page {index + 1}/{pages}",
-                     [], "✅ signed in · ⚪ not signed in · ❔ id unknown, opened via menu"),
+                     [], "✅ signed in · ⚪ not signed in"),
                 reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
             )
         except BadRequest:
@@ -85,7 +85,7 @@ class LoginMixin:
         window, index, pages = paginate(providers, page - 1, self.LOGIN_PAGE)
         buttons = []
         for provider in window:
-            mark = "✅ " if provider.logged_in else ("⚪ " if provider.provider_id else "❔ ")
+            mark = "✅ " if provider.logged_in else "⚪ "
             buttons.append(InlineKeyboardButton(
                 f"{mark}{provider.label[:24]}", callback_data=f"lgv:{provider.index}"))
         rows = two_columns(buttons)
@@ -101,7 +101,7 @@ class LoginMixin:
         signed = sum(1 for provider in providers if provider.logged_in)
         await message.edit_text(
             card("🔐 login", f"{signed} signed in · {len(providers)} providers · page {index + 1}/{pages}",
-                 [], "✅ signed in · ⚪ not signed in · ❔ id unknown, opened via menu"),
+                 [], "✅ signed in · ⚪ not signed in"),
             reply_markup=InlineKeyboardMarkup(rows), parse_mode=ParseMode.HTML,
         )
 
@@ -140,14 +140,15 @@ class LoginMixin:
         await self.app.bot.send_message(
             chat_id,
             card("🔐 login started", provider.label,
-                 [("target", target or f"menu #{provider.index}")],
+                 [] if target else [("via", f"omp menu #{provider.index}")],
                  "follow the steps below, then paste the code or API key into this chat"),
             parse_mode=ParseMode.HTML,
         )
 
     # omp's own console chatter; the chat only needs the actionable lines
     LOGIN_NOISE = ("Local shortcut", "Preferred port", "Waiting for browser authentication",
-                   "Complete login in your browser", "Select a provider", "Enter number (")
+                   "Complete login in your browser", "Select a provider", "Enter number (",
+                   "Open this URL in your browser")
 
     async def _login_line(self, chat_id: int, label: str, line: str) -> None:
         text = line.strip()
@@ -169,9 +170,7 @@ class LoginMixin:
             )
             return
         if session is not None and session.awaiting_code:
-            await self.app.bot.send_message(
-                chat_id, "🔑 omp is waiting for the code or API key — paste it here.")
-            return
+            return  # on_code_prompt already told the chat; a redraw must not say it again
         if len(text) <= 200:
             safe = esc(text)
             await self.app.bot.send_message(chat_id, f"<code>{safe}</code>", parse_mode=ParseMode.HTML)
