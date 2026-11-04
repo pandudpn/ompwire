@@ -832,8 +832,10 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             return await update.effective_message.reply_text(f"cwd {agent.cwd}")
         import os
         target = os.path.expanduser(ctx.args[0])
+        if os.path.exists(target) and not os.path.isdir(target):
+            return await update.effective_message.reply_text(f"exists and is not a directory: {target}")
         if not os.path.isdir(target):
-            return await update.effective_message.reply_text(f"not a directory: {target}")
+            os.makedirs(target, exist_ok=True)
         agent = self.agent_for(update.effective_chat.id)
         if await self._busy(update, agent, "/cwd"):
             return

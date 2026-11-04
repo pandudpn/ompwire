@@ -29,6 +29,12 @@ class PickerMixin:
         option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
         return [str(o.get("value")) for o in (option.get("options") or [])]
 
+    def _names(self, agent: engine.ChatAgent, config_id: str) -> dict[str, str]:
+        """Display name per option value; models report a friendlier name than their id."""
+        option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
+        return {str(o.get("value")): str(o.get("name") or o.get("value"))
+                for o in (option.get("options") or [])}
+
     def _current(self, agent: engine.ChatAgent, config_id: str) -> str:
         option = (getattr(agent, "options", {}) or {}).get(config_id) or {}
         return str(option.get("currentValue") or "?")
@@ -89,12 +95,17 @@ class PickerMixin:
             columns = 2 if config_id == "model" else 1
             per_page = self.PAGE_SIZE_TWO_COL if columns == 2 else self.PAGE_SIZE
             window, page, pages = self._page_slice(subset, page, per_page)
+            names = self._names(agent, config_id)
             start = page * per_page
             rows = []
             pending: list[InlineKeyboardButton] = []
             for offset, value in enumerate(window):
                 global_index = indices[start + offset]
-                label = value.split("/", 1)[1] if (columns == 2 and "/" in value) else value
+                if columns == 2:
+                    name = names.get(value, value)
+                    label = name.split("/", 1)[1] if "/" in name else name
+                else:
+                    label = value
                 mark = "• " if value == current else ""
                 button = InlineKeyboardButton(f"{mark}{label}"[:64],
                                               callback_data=f"o:{config_id}:s:{global_index}:0")
@@ -119,7 +130,7 @@ class PickerMixin:
             if nav:
                 rows.append(nav)
             text = (
-                f"{config_id}: {current}\n{provider_name} · {len(subset)} option(s)"
+                f"{config_id}: {names.get(current, current)}\n{provider_name} · {len(subset)} option(s)"
                 + (f" · page {page + 1}/{pages}" if pages > 1 else "")
             )
 
