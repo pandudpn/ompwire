@@ -177,7 +177,7 @@ def test_model_picker_shows_display_names():
         session_id="01a16c67aa", cwd="/tmp",
     )
     asyncio.run(transport._show_config(agent, 1, "model", screen="l", provider=0, page=0))
-    text, keyboard = captured[-1]
+    _text, keyboard = captured[-1]
     rows = [[button.text for button in row] for row in keyboard.inline_keyboard]
     assert rows[0] == ["• Claude Coding Max", "Qwen3 4B"]
 
