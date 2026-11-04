@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import html
 import inspect
 import json
 import logging
@@ -191,6 +192,20 @@ def mcp_server_names() -> list[str]:
 
 
 
+def _short_action(said: str, width: int = 40) -> str:
+    """One line of what the agent last ran, short enough for a notice. A cut that leaves a
+    quote open ("sleep 90; echo \"selesai) reads like a bug, so the quoted tail goes first."""
+    line = said.splitlines()[0].strip() if said.strip() else ""
+    if len(line) <= width:
+        return line
+    cut = line[:width].rstrip()
+    if cut.count('"') % 2:  # an opened quote with no closing one: drop it and its tail
+        cut = cut[:cut.rfind('"')].rstrip()
+    while cut and cut[-1] in "'([{/$;|&":
+        cut = cut[:-1].rstrip()
+    return f"{cut}…"
+
+
 def _event_text(update: AgentUpdate) -> str:
     """The one notice line for a retry/notice/compaction event, or "" to say nothing."""
     raw = update.raw
@@ -360,9 +375,13 @@ def background_trace(job: BackgroundJob, now: float) -> ToolTrace:
         word = "done" if job.state == "completed" else job.state
         status = f"{job.job_id} · {word} · {job_duration(job.wall_ms or int((now - job.began) * 1000))}"
     # omp appends the wall time to the last output; the status line already says it
-    output = "\n".join(line for line in job.output.rstrip().splitlines()
-                       if not line.startswith("Wall time:")).rstrip()
-    return ToolTrace(kind="bash", tool="bash", command=job.command, output=output, status=status)
+    lines = [line for line in job.output.rstrip().splitlines()
+             if not line.startswith("Wall time:")]
+    # What a silent job cannot say for itself, the card says: the command it runs (one line,
+    # the call's own card may have scrolled away) and the newest lines it printed.
+    command = job.command.splitlines()[0][:60] if job.command.strip() else ""
+    return ToolTrace(kind="bash", tool="bash", command=command,
+                     output="\n".join(lines[-3:]).rstrip(), status=status)
 
 
 @dataclass
@@ -815,6 +834,10 @@ class ChatAgent:
         self._job_opening: set[str] = set()  # calls whose summary is about to open
         self._job_open_delay = JOB_OPEN_DELAY
         self._clock: Callable[[], float] = time.monotonic
+        # quiet-turn notice: the last time a frame arrived mid-turn, and what the agent was
+        # seen doing then, so a silent stretch can say more than the typing dot
+        self._frame_at: float = 0.0
+        self._last_action: str = ""
         self._sleep: Callable[[float], Any] = asyncio.sleep
         # typing shown for a bash job or subagent a run left running, until it reports back
         self._pending_wait: asyncio.Task | None = None
@@ -1470,6 +1493,7 @@ class ChatAgent:
             key, body = self._job_queue.pop(0)
             try:
                 await self.surface.job_card(key, body)
+                self._frame_at = self._clock()  # a job card IS something the person sees
             except Exception:
                 # a card is a progress report; a platform refusing one must not stop the work
                 log.warning("job card failed chat=%s key=%s", self.label, key, exc_info=True)
@@ -1936,6 +1960,9 @@ class ChatAgent:
                 try:
                     sent_msg = await self.surface.post(body, kind=kind)
                     self._last_post = time.monotonic()
+                    # "last activity" is a message the person can see, not a frame the agent
+                    # streamed into a card that never changed
+                    self._frame_at = self._clock()
                     if sent_msg is None:
                         log.warning("message not delivered %s", self.label)
                     return sent_msg
@@ -2195,6 +2222,9 @@ class ChatAgent:
                                                + ", ".join(str(x) for x in tools))[:160]
                         log.info("tool call %s tool=%s kind=%s command=%r", self.label, entry.tool,
                                  entry.kind, entry.command[:120] or entry.title[:120])
+                        said = _short_action(entry.command or entry.title)
+                        self._last_action = (f"{entry.tool or entry.kind} · {said}"
+                                             if said else (entry.tool or entry.kind))
                     if call_id in posted:
                         continue
                     entry.status = str(raw.get("status") or entry.status or "")
@@ -2242,6 +2272,43 @@ class ChatAgent:
                  self.session_id[:8], len(text))
         run = self._open_renderer()
         state, drain_task, sender_task, finish = run.state, run.drain, run.sender, run.finish
+        quiet_after = float(self.config.get("stream", "quiet_minutes", 5.0)) * 60.0
+        self._frame_at = self._clock()
+        self._last_action = ""
+        turn_began = self._frame_at
+        quiet_task = None
+        if quiet_after > 0:
+            async def quiet_notice() -> None:
+                # A heartbeat, not an alarm: every window of silence says the turn is alive and
+                # what it is doing, because a chat that shows only a typing dot cannot tell a
+                # long build from a wedged agent.
+                last = self._clock()
+                while self.busy:
+                    await self._sleep(quiet_after)
+                    now = self._clock()
+                    if now - last < 0.001:
+                        # a sleep that does not actually wait (a patched harness) would spin
+                        return
+                    last = now
+                    if not self.busy:
+                        return
+                    quiet_for = now - self._frame_at
+                    if quiet_for < quiet_after:
+                        continue
+                    parts = [f"⏳ still working · {job_duration(int((now - turn_began) * 1000))}"]
+                    if self.tools_used:
+                        parts.append(f"{self.tools_used} tool{'s' if self.tools_used > 1 else ''}")
+                    if self._last_action:
+                        parts.append(self._last_action)
+                    log.info("quiet notice chat=%s quiet_for=%.0fs", self.label, quiet_for)
+                    try:
+                        # a notice is sent as HTML: a command carrying & or < would otherwise be
+                        # refused by Telegram's parser and die as an unretrieved task exception
+                        body = html.escape(" · ".join(parts), quote=False)
+                        await self.surface.post(body, kind="notice")
+                    except Exception as exc:  # a lost notice is not worth failing the turn
+                        log.info("quiet notice failed chat=%s: %s", self.label, exc)
+            quiet_task = asyncio.create_task(quiet_notice())
         try:
             async with self.surface.typing():
                 result = await asyncio.to_thread(
@@ -2250,8 +2317,11 @@ class ChatAgent:
                     timeout=float(self.config.get("acp", "turn_timeout", 900.0)),
                 )
         except AgentError as exc:
+            if quiet_task is not None:
+                quiet_task.cancel()
             # A silent turn is abandoned here, so stop it in omp too: left running, its late
             # chunks land in the next turn's stream and the chat sees the answer twice.
+            # (a refused or failed prompt never reaches the notice; cancel right away)
             if self.client is not None and self.client.alive:
                 self.client.abort()
             # scheduled, not immediate: the sentinel must queue behind updates the reader thread
@@ -2270,10 +2340,14 @@ class ChatAgent:
                 self.store.end_turn(self.key)
             raise
         except BaseException:
+            if quiet_task is not None:
+                quiet_task.cancel()
             # a cancelled turn (gateway shutdown) never reaches finish(); do not leave the sender
             sender_task.cancel()
             self._turn_notice = None
             raise
+        if quiet_task is not None:
+            quiet_task.cancel()
         self._loop.call_soon_threadsafe(self._updates.put_nowait, None)
         await drain_task
         await finish()

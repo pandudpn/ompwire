@@ -119,8 +119,10 @@ class TestToolBlock:
     def test_completed_is_not_noise(self):
         assert "completed" not in tool_block("bash", "x", status="completed")
 
-    def test_no_command_no_output_returns_the_head_only(self):
-        assert tool_block("bash", "") == "💻 <code>bash</code>"
+    def test_a_card_with_no_body_still_keeps_a_fenced_block(self):
+        body = tool_block("bash", "", status="bg_1 · running · 3s")
+        assert "<pre>bg_1 · running · 3s</pre>" in body
+        assert tool_block("bash", "").endswith("<pre>working…</pre>")
 
 
 class TestHelpSections:
@@ -132,3 +134,15 @@ class TestHelpSections:
 
     def test_no_trailing_blank_lines(self):
         assert not help_sections([("A", [("x", "y")])]).endswith("\n")
+
+
+class TestShortAction:
+    def test_a_cut_never_leaves_a_quote_open(self):
+        from ompwire.engine import _short_action
+
+        assert _short_action('sleep 90; echo "selesai $(date +%H:%M:%S)"') == "sleep 90; echo…"
+
+    def test_a_short_command_is_left_alone(self):
+        from ompwire.engine import _short_action
+
+        assert _short_action("pytest -q") == "pytest -q"

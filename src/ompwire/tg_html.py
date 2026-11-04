@@ -128,7 +128,12 @@ def tool_block(tool: str, title: str, command: str = "", output: str = "", statu
     if output.strip():
         lines.append(_clip(output))
     if not lines:
-        return head
+        # a status-only update (a background job's pulse) has no command or output of its own.
+        # The status becomes the body, alone: repeating it in the head as well put the same
+        # words twice in one card.
+        body = _clip(status or "working…", lines=1, width=TOOL_LINE_WIDTH + 40)
+        bare = f"{tool_icon(tool)} <code>{esc(tool_label(tool))}</code>"
+        return f"{bare}\n<pre>{esc(body)}</pre>"
     return f"{head}\n<pre>{esc(chr(10).join(lines))}</pre>"
 
 
