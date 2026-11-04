@@ -71,13 +71,28 @@ def test_inherit_drops_the_gateway_s_own_value(sandbox, units):
     assert gateways.get("bot").settings == {"agent": {"thinking": "low"}}
 
 
-def test_a_bad_value_writes_nothing(sandbox, units, capsys):
+def test_a_bad_value_writes_nothing(sandbox, units, capsys, tmp_path):
     gateways.save([gateways.Gateway(name="bot", allowed=[1])])
 
-    assert cli.main(["gateway", "update", "bot", "--model", "x/y", "--cwd", "/no/such/dir"]) == 1
+    work = tmp_path / "work"
+    work.mkdir()
+    blocker = work / "blocker"
+    blocker.write_text("not a directory")
+
+    assert cli.main(["gateway", "update", "bot", "--model", "x/y", "--cwd", str(blocker)]) == 1
 
     assert gateways.get("bot").settings == {}
-    assert "not a directory" in capsys.readouterr().err
+    assert "is not a directory" in capsys.readouterr().err
+
+def test_a_missing_cwd_is_created(sandbox, units, tmp_path):
+    gateways.save([gateways.Gateway(name="bot", allowed=[1])])
+
+    fresh = tmp_path / "made" / "now"
+
+    assert cli.main(["gateway", "update", "bot", "--cwd", str(fresh)]) == 0
+
+    assert gateways.get("bot").settings == {"agent": {"cwd": str(fresh)}}
+    assert fresh.is_dir()
 
 
 def test_groups_and_mode_by_flag_keep_the_rest(sandbox, units):

@@ -79,8 +79,12 @@ def parse_value(field: str, raw: str, thinking_levels: tuple[str, ...] = THINKIN
         return _bool(value, field)
     if field == "cwd":
         path = Path(value).expanduser()
-        if not path.is_dir():
-            raise UpdateError(f"cwd: {path} is not a directory")
+        if path.exists() and not path.is_dir():
+            raise UpdateError(f"cwd: {path} exists and is not a directory")
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise UpdateError(f"cwd: cannot create {path}: {exc}") from exc
         return str(path)
     return value
 

@@ -800,9 +800,11 @@ class Transport:
         import os
 
         target = os.path.expanduser(args[0])
-        if not os.path.isdir(target):
-            await self.reply(incoming, f"not a directory: {target}")
+        if os.path.exists(target) and not os.path.isdir(target):
+            await self.reply(incoming, f"exists and is not a directory: {target}")
             return
+        if not os.path.isdir(target):
+            os.makedirs(target, exist_ok=True)
         if await self._busy(incoming, agent, "/cwd"):
             return
         agent.cwd = target
