@@ -261,7 +261,7 @@ def test_chat_formatting_hint_is_forwarded_to_the_agent():
     args = _client_args()
     assert args[:2] == ["--mode", "rpc-ui"]
     hint = args[args.index("--append-system-prompt") + 1]
-    assert "fenced code" in hint
+    assert "fenced blocks" in hint
 
 
 def test_the_marker_protocol_is_always_described():

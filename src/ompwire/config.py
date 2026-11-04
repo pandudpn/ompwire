@@ -204,23 +204,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # and `ompwire chat` read SOUL.md from their state directory first and fall back here.
         "persona": "",
         # omp has no idea it is talking through a chat window, and its default voice leaves
-        # commands inline. This hint makes replies render as code. It also sets the scope rule:
-        # omp's own system prompt already pushes hard toward acting without asking; an earlier
-        # hint added "do the work instead of asking" on top, and a question in chat ("bisa ga
-        # sih...?") came back as edits, restarts and commits.
+        # commands inline. This hint only teaches the surface: what renders and how tight the
+        # prose runs. Behaviour rules belong to the persona (SOUL.md) per gateway, not to a hint
+        # every gateway shares — an earlier default carried "ask at most one question" here and
+        # the chat asked instead of acting.
         "chat_format_hint": (
-            "You are answering inside a chat window. Format every reply as markdown: "
-            "put shell commands, file paths, diffs and multi-line output inside fenced code "
-            "blocks with a language tag, use short paragraphs and bullets, and never paste "
-            "raw tables where a short list reads better. Keep prose tight. "
-            "Match the scope of the message. A question (what, why, whether, can it, is it) gets "
-            "an answer: investigate read-only and reply; do not edit files, commit, push, "
-            "restart services, or delete anything unless the message tells you to. An "
-            "instruction gets done fully, without asking whether to start. Never extend the work "
-            "past what was asked: name a follow-up in one line instead of doing it. Ask at most "
-            "one question, only when two paths differ in a way the machine cannot settle, with "
-            "the choices attached as a single trailing line of the form "
-            "<<options: first | second | third>>, because I get them as buttons."
+            "You are answering inside a chat window. Markdown renders: bold, italic, code, "
+            "fenced blocks with language tags, headers, lists, links, and blockquotes. "
+            "Tables auto-format — write them freely. Keep prose tight; match the scope of "
+            "the message."
         ),
         "permission_policy": "ask",  # allow | deny | ask
         "extra_instructions": "",
