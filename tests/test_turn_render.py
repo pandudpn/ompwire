@@ -86,12 +86,20 @@ def tool_progress(call_id, text, status="in_progress"):
                        "status": status, "content": [{"type": "text", "text": text}]})
 
 
-def tool_call(call_id, title, tasks=None):
+def tool_call(call_id, title, tasks=None, command=""):
     raw = {"sessionUpdate": "tool_call", "toolCallId": call_id, "kind": "other",
            "title": title, "status": "in_progress", "rawInput": {}}
+    if command:
+        raw["rawInput"]["command"] = command
     if tasks is not None:
         raw["rawInput"]["tasks"] = tasks
     return Update(kind="tool_call", session_id="s", raw=raw)
+
+
+def tool_update(call_id, title=""):
+    raw = {"sessionUpdate": "tool_call_update", "toolCallId": call_id,
+           "kind": "other", "title": title, "status": "in_progress"}
+    return Update(kind="tool_call_update", session_id="s", raw=raw)
 
 
 @pytest.fixture
@@ -632,3 +640,88 @@ def test_a_quiet_chat_gets_the_answer_and_nothing_else(rendered):
         message("server aman"),
     ], verbose=False)
     assert messages == ["server aman"], messages
+
+
+class SlowFirstFrameClient(FakeClient):
+    """A first frame a moment in, then a silence longer than one quiet window."""
+
+    def __init__(self, updates, quiet_seconds, first_frame_at=0.3):
+        super().__init__(updates)
+        self.quiet_seconds = quiet_seconds
+        self.first_frame_at = first_frame_at
+
+    def prompt(self, _text, images=None, timeout=900.0):
+        import time as _time
+
+        _time.sleep(self.first_frame_at)  # the turn opens with no frame at all
+        for update in self.updates[:1]:
+            self.on_update(update)
+        _time.sleep(self.quiet_seconds)  # model-side silence: no frames
+        for update in self.updates[1:]:
+            self.on_update(update)
+        return PromptResult(stop_reason="end_turn", usage={}, text="done", updates=[])
+
+
+def test_quiet_notice_fires_during_silence_with_last_action():
+    config = load_config(env={})
+    config.data["stream"]["quiet_minutes"] = 0.01  # 0.6 s
+    config.data["stream"]["min_gap"] = 0.0
+    bot = FakeBot()
+
+    async def go():
+        agent = telegram.chat_agent(config, 1, key="quiet", app=types.SimpleNamespace(bot=bot))
+        agent.client = SlowFirstFrameClient(
+            [tool_call("c1", "running tests", command="pytest -q && echo <done>"),
+             message("done")], quiet_seconds=1.6)
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        await agent.ask("halo")
+        return bot.messages
+
+    messages = asyncio.run(go())
+    notices = [body for body in messages if "still working" in body]
+    assert notices, messages
+    assert "pytest -q &amp;&amp; echo &lt;done&gt;" in notices[0]  # escaped: the body is HTML
+    assert "&" not in notices[0].replace("&amp;", "").replace("&lt;", "").replace("&gt;", "")
+
+
+def test_quiet_notice_stays_silent_while_frames_flow():
+    config = load_config(env={})
+    config.data["stream"]["quiet_minutes"] = 0.01  # 0.6 s
+    config.data["stream"]["min_gap"] = 0.0
+    bot = FakeBot()
+    frames = [tool_call("c1", "step"), tool_update("c1", "step"),
+              tool_update("c1", "step"), message("done")]
+
+    async def go():
+        agent = telegram.chat_agent(config, 1, key="busy", app=types.SimpleNamespace(bot=bot))
+        agent.client = SpacedClient(frames, pause=0.05)
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        await agent.ask("halo")
+        return bot.messages
+
+    messages = asyncio.run(go())
+    assert not any("still working" in body for body in messages), messages
+
+
+def test_the_quiet_notice_is_a_heartbeat_that_keeps_reporting():
+    """Every quiet window says the turn is alive, with what it has done so far."""
+    config = load_config(env={})
+    config.data["stream"]["quiet_minutes"] = 0.01  # 0.6 s
+    config.data["stream"]["min_gap"] = 0.0
+    bot = FakeBot()
+
+    async def go():
+        agent = telegram.chat_agent(config, 1, key="stretch", app=types.SimpleNamespace(bot=bot))
+        agent.client = SlowFirstFrameClient(
+            [tool_call("c1", "waiting"), message("done")], quiet_seconds=2.4)
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        await agent.ask("halo")
+        return bot.messages
+
+    notices = [body for body in asyncio.run(go()) if "still working" in body]
+    assert len(notices) >= 2, notices  # a heartbeat, not one alarm
+    assert all("tool" in body for body in notices)  # what it has done so far
+    assert notices[-1] != notices[0]  # and it moves as the turn goes on

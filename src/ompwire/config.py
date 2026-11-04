@@ -235,6 +235,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "show_advisor": True,
         # fraction of the context window that triggers one ⚠️ notice per crossing
         "compaction_warn": 0.6,
+        # minutes of a silent turn before one "still working" notice fires (0 = never). A turn
+        # can legitimately sit quiet — a long build watched inside one bash call, a slow first
+        # token — and the typing dot alone does not say whether anything is alive.
+        "quiet_minutes": 5.0,
     },
     "approval": {
         "policy": "ask",  # ask | allow | deny
