@@ -103,7 +103,7 @@ def test_config_is_written_and_parses(monkeypatch, tmp_path):
     assert data["agent"]["yolo"] is False  # approvals stay on unless someone asks for yolo
     assert "telegram" not in data
     assert "mcp" not in data  # omp owns its servers in its own mcp.json
-    assert "fenced code" in data["agent"]["chat_format_hint"]
+    assert "fenced blocks" in data["agent"]["chat_format_hint"]
     assert data["agent"]["persona"] == ""
 
 

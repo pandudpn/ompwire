@@ -82,7 +82,7 @@ def test_prompt_order_is_persona_then_format_then_protocol(tmp_path):
     prompt = system_prompt(_config(tmp_path, persona="config persona"), None)
     assert prompt.startswith("You are Vidura.")  # SOUL.md beats the config persona
     assert "note" not in prompt
-    assert prompt.index("fenced code") < prompt.index(PROTOCOL_HINT)
+    assert prompt.index("fenced blocks") < prompt.index(PROTOCOL_HINT)
     assert "config persona" not in prompt
 
 
