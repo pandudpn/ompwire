@@ -25,8 +25,6 @@ OPTIONS_RE = re.compile(rf"^[ \t]*{_MARKER}|(?<!`)[ \t]*{_MARKER.replace('body',
 PARTIAL_RE = re.compile(r"(?:^|(?<=[^\s`]))[ \t]*<<\s*options?\s*:(?:(?!>>).)*\Z",
                         re.IGNORECASE | re.DOTALL | re.MULTILINE)
 MAX_OPTIONS = 6
-# a card heading, not a second copy of the answer
-QUESTION_CHARS = 200
 
 
 def extract(text: str) -> tuple[str, list[str]]:
@@ -52,19 +50,41 @@ def question_of(text: str) -> str:
 
     The marker carries only the choices, so the card used to say "pick an answer" and the
     reader scrolled up to find what was asked. The last line ending in "?" is the question;
-    without one, the last paragraph stands in, since that is what the choices follow.
+    without one, the closing paragraph stands in, since that is what the choices follow.
     """
     cleaned, _ = extract(text)
-    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-    if not lines:
+    paragraphs = [block for block in cleaned.split("\n\n") if block.strip()]
+    if not paragraphs:
         return ""
+    lines = [_unmark(line) for line in paragraphs[-1].splitlines() if line.strip()]
     asked = next((line for line in reversed(lines) if line.endswith("?")), "")
     if not asked:
-        asked = " ".join(line.strip() for line in cleaned.split("\n\n")[-1].splitlines()).strip()
-    asked = re.sub(r"[*_`]+", "", asked)  # chat markdown has no meaning inside a card heading
-    if len(asked) > QUESTION_CHARS:
-        asked = asked[:QUESTION_CHARS - 1].rstrip() + "…"
-    return asked
+        asked = " ".join(lines)
+    return _headline(asked)
+
+
+_BULLET_RE = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
+_CODE_RE = re.compile(r"`([^`]*)`")
+_EMPHASIS_RE = re.compile(r"(\*\*|__)(?=\S)|(?<=\S)(\*\*|__)")
+
+
+def _unmark(line: str) -> str:
+    """Plain text for a card heading: a list marker and markdown go, the words stay.
+
+    Stripping every `*` and `_` used to turn `quiet_minutes` into `quietminutes`, so the
+    heading said something the answer never did. Code spans keep their content untouched and
+    only their backticks leave.
+    """
+    text = _BULLET_RE.sub("", line.strip())
+    text = _CODE_RE.sub(lambda m: m.group(1), text)  # keep the identifier, drop the backticks
+    text = _EMPHASIS_RE.sub("", text)
+    return text.strip()
+
+
+def _headline(text: str) -> str:
+    """The heading, whole. A question cut mid-sentence is a question the reader has to go
+    looking for; the card is allowed the room to say it in full."""
+    return " ".join(text.split())
 
 
 def hide_partial(text: str, final: bool) -> str:

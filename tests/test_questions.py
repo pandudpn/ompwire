@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ompwire.questions import MAX_OPTIONS, QUESTION_CHARS, extract, hide_partial, question_of
+from ompwire.questions import MAX_OPTIONS, extract, hide_partial, question_of
 
 
 class TestExtract:
@@ -129,9 +129,30 @@ pinned key or meta fetch
     def test_chat_markdown_does_not_reach_the_heading(self):
         assert question_of("Use **`main`** or `dev`?\n<<options: main | dev>>") == "Use main or dev?"
 
-    def test_a_long_question_is_cut_to_a_heading(self):
+    def test_a_long_question_arrives_whole(self):
+        """A heading cut mid-sentence is a question the reader has to go looking for."""
         asked = question_of("x" * 500 + "?\n<<options: a | b>>")
-        assert len(asked) == QUESTION_CHARS and asked.endswith("…")
+        assert asked == "x" * 500 + "?"
 
     def test_an_answer_that_is_only_the_marker_has_no_question(self):
         assert question_of("<<options: a | b>>") == ""
+
+
+def test_an_inline_code_name_keeps_its_underscores_in_the_heading():
+    """Heading text must say what the answer said: `quiet_minutes`, not `quietminutes`."""
+    text = ("Ringkasan.\n\n- `quiet_minutes = 0.4` di gateway.toml, dikembalikan ke 5 menit?\n\n"
+            "<<options: ya | tidak>>")
+    assert question_of(text) == "quiet_minutes = 0.4 di gateway.toml, dikembalikan ke 5 menit?"
+
+
+def test_a_bullet_marker_never_reaches_the_heading():
+    text = "- Pilih durasi?\n\n<<options: 24 detik | 5 menit>>"
+    assert question_of(text) == "Pilih durasi?"
+
+
+def test_a_sentence_heading_keeps_every_word():
+    text = ("kata " * 80) + "?\n\n<<options: a | b>>"
+    heading = question_of(text)
+    assert heading.endswith("?")
+    assert not heading.endswith("…")
+    assert heading.count("kata") == 80
