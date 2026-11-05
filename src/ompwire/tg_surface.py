@@ -15,7 +15,7 @@ from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest, RetryAfter, TelegramError
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application
 
 from . import engine
@@ -42,6 +42,34 @@ log = logging.getLogger("ompwire.telegram")
 TELEGRAM_LIMIT = 4000  # leave headroom under the 4096 hard cap
 
 
+NETWORK_ATTEMPTS = 3
+
+
+async def _send(bot, chat_id: int, body: str, *, parse_mode=None):
+    """Send one message, riding out a network blip.
+
+    Telegram answers over the same network the agent works on: a read timeout there is not a
+    reason to kill a turn whose answer is already written. Three tries with a growing pause,
+    then the error goes up so the caller can say what happened.
+    """
+    for attempt in range(NETWORK_ATTEMPTS):
+        try:
+            if parse_mode is None:
+                return await bot.send_message(chat_id, body)
+            return await bot.send_message(chat_id, body, parse_mode=parse_mode)
+        except RetryAfter:
+            # a rate limit carries its own window; retrying here would hide it from the caller
+            # that converts it into FloodWait (and, in a PTB that nests it under NetworkError,
+            # would burn the retries first)
+            raise
+        except (TimedOut, NetworkError) as exc:
+            if attempt == NETWORK_ATTEMPTS - 1:
+                raise
+            pause = 1.5 * (attempt + 1)
+            log.warning("telegram network error (%s); retry %s in %.1fs", exc, attempt + 1, pause)
+            await asyncio.sleep(pause)
+
+
 async def send_html(bot, chat_id: int, body: str):
     """Send pre-rendered Telegram HTML, cut into as many messages as the cap needs.
 
@@ -54,10 +82,10 @@ async def send_html(bot, chat_id: int, body: str):
     sent = None
     for part in split_html(body, TELEGRAM_LIMIT):
         try:
-            sent = await bot.send_message(chat_id, part, parse_mode=ParseMode.HTML)
+            sent = await _send(bot, chat_id, part, parse_mode=ParseMode.HTML)
         except BadRequest as exc:
             log.warning("html send rejected (%s); falling back to plain text", exc)
-            sent = await bot.send_message(chat_id, strip_html(part))
+            sent = await _send(bot, chat_id, strip_html(part))
     return sent
 
 
@@ -66,10 +94,10 @@ async def send_md(bot, chat_id: int, text: str):
     sent = None
     for part in fit_markdown(text, TELEGRAM_LIMIT):
         try:
-            sent = await bot.send_message(chat_id, to_html(part), parse_mode=ParseMode.HTML)
+            sent = await _send(bot, chat_id, to_html(part), parse_mode=ParseMode.HTML)
         except BadRequest as exc:
             log.warning("html send rejected (%s); falling back to plain text", exc)
-            sent = await bot.send_message(chat_id, to_plain(part))
+            sent = await _send(bot, chat_id, to_plain(part))
     return sent
 
 
