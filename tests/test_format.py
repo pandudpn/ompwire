@@ -146,3 +146,64 @@ class TestShortAction:
         from ompwire.engine import _short_action
 
         assert _short_action("pytest -q") == "pytest -q"
+
+
+class TestNetworkRetry:
+    """A Telegram read timeout is a blip on the wire, not a reason to lose the turn."""
+
+    def test_a_timed_out_send_is_retried(self):
+        import asyncio
+
+        from telegram.error import TimedOut
+
+        from ompwire.tg_surface import send_html
+
+        tries = []
+
+        class Bot:
+            async def send_message(self, chat_id, text, **_kw):
+                tries.append(text)
+                if len(tries) < 3:
+                    raise TimedOut()
+                return "sent"
+
+        assert asyncio.run(send_html(Bot(), 1, "<b>x</b>")) == "sent"
+        assert len(tries) == 3
+
+    def test_a_dead_connection_gives_up_after_three_tries(self):
+        import asyncio
+
+        import pytest
+        from telegram.error import TimedOut
+
+        from ompwire.tg_surface import send_html
+
+        tries = []
+
+        class Bot:
+            async def send_message(self, chat_id, text, **_kw):
+                tries.append(text)
+                raise TimedOut()
+
+        with pytest.raises(TimedOut):
+            asyncio.run(send_html(Bot(), 1, "<b>x</b>"))
+        assert len(tries) == 3
+
+    def test_a_rate_limit_is_not_retried(self):
+        import asyncio
+
+        import pytest
+        from telegram.error import RetryAfter
+
+        from ompwire.tg_surface import send_html
+
+        tries = []
+
+        class Bot:
+            async def send_message(self, chat_id, text, **_kw):
+                tries.append(text)
+                raise RetryAfter(7)
+
+        with pytest.raises(RetryAfter):
+            asyncio.run(send_html(Bot(), 1, "<b>x</b>"))
+        assert len(tries) == 1  # its window is the caller's to wait out

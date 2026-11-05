@@ -340,6 +340,16 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                     except AgentError as exc:
                         if not self.stopping:  # the shutdown killed it; the next start resumes
                             await message.reply_text(f"agent error: {exc}")
+                    except TelegramError as exc:
+                        # the answer is written; only the network to Telegram refused it. Saying
+                        # "turn failed" here is what made one timed-out send look like lost work
+                        log.warning("reply not delivered chat=%s: %s", chat_id, exc)
+                        try:
+                            await message.reply_text(
+                                f"reply not delivered: {exc}. The turn finished, nothing was "
+                                "lost. Ask again if you need the answer repeated.")
+                        except TelegramError:
+                            log.warning("could not say it either chat=%s", chat_id)
                     except Exception as exc:
                         log.exception("turn failed")
                         await message.reply_text(f"turn failed: {exc}")
