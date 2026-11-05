@@ -207,3 +207,18 @@ class TestNetworkRetry:
         with pytest.raises(RetryAfter):
             asyncio.run(send_html(Bot(), 1, "<b>x</b>"))
         assert len(tries) == 1  # its window is the caller's to wait out
+
+
+class TestOptionLabels:
+    """A button label is one line on a phone: a cut option must not look like a whole one."""
+
+    def test_a_short_option_keeps_its_words(self):
+        from ompwire.tg_surface import _option_label
+
+        assert _option_label(0, "ya") == "1. ya"
+
+    def test_a_long_option_shows_its_number_only(self):
+        from ompwire.tg_surface import _option_label
+
+        long = "Hapus semua gateway lalu jalankan ulang dari konfigurasi default yang baru"
+        assert _option_label(2, long) == "3."

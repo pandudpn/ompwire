@@ -101,6 +101,15 @@ async def send_md(bot, chat_id: int, text: str):
     return sent
 
 
+OPTION_LABEL = 64
+
+
+def _option_label(index: int, option: str) -> str:
+    """The text a choice's button carries: the option itself when it fits, its number when not."""
+    label = f"{index + 1}. {option}"
+    return label if len(label) <= OPTION_LABEL else f"{index + 1}."
+
+
 def _retry_window(exc: Exception) -> float:
     """PTB gives seconds today and a timedelta from v23; both mean the same wait."""
     value = getattr(exc, "retry_after", 5)
@@ -204,7 +213,10 @@ class TelegramSurface(engine.Surface):
 
         An ask question is the card's heading; a plan review has none and keeps the generic one.
         """
-        rows = [[InlineKeyboardButton(f"{index + 1}. {option}"[:64], callback_data=f"qo:{index}")]
+        # A button label is one line on a phone: a long option used to be cut mid-word with
+        # nothing to show it was cut. The card body lists every option in full, so a label that
+        # would not fit shows its number alone instead of a broken sentence.
+        rows = [[InlineKeyboardButton(_option_label(index, option), callback_data=f"qo:{index}")]
                 for index, option in enumerate(options)]
         rows.append([InlineKeyboardButton("✏️ Other answer", callback_data="qo:other"),
                      InlineKeyboardButton("⏭️ Skip", callback_data="qo:skip")])
