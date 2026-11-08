@@ -2316,8 +2316,11 @@ class ChatAgent:
                     if quiet_for < quiet_after:
                         continue
                     parts = [f"⏳ still working · {job_duration(int((now - turn_began) * 1000))}"]
-                    if self.tools_used:
-                        parts.append(f"{self.tools_used} tool{'s' if self.tools_used > 1 else ''}")
+                    # this turn's calls, not `tools_used`: that counter is the session's lifetime
+                    # total, so a turn that asked one question before a heartbeating wait
+                    # reported "94 tools" and read like work nobody had started
+                    if state["tools"]:
+                        parts.append(f"{state['tools']} tool{'s' if state['tools'] > 1 else ''}")
                     if self._last_action:
                         parts.append(self._last_action)
                     log.info("quiet notice chat=%s quiet_for=%.0fs", self.label, quiet_for)

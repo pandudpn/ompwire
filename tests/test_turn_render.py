@@ -855,3 +855,27 @@ def _recording_settle(seen: list[bool]):
         seen.append(expired)
 
     return settle
+
+
+def test_the_heartbeat_counts_this_turn_not_the_session():
+    """`tools_used` is the session's lifetime total, so a turn that had done one thing reported
+    "94 tools" and read like work nobody had started."""
+    config = load_config(env={})
+    config.data["stream"]["quiet_minutes"] = 0.01  # 0.6 s
+    config.data["stream"]["min_gap"] = 0.0
+    bot = FakeBot()
+
+    async def go():
+        agent = telegram.chat_agent(config, 1, key="per-turn", app=types.SimpleNamespace(bot=bot))
+        agent.tools_used = 94  # what earlier turns in this session spent
+        agent.client = SlowFirstFrameClient(
+            [tool_call("c1", "running tests"), message("done")], quiet_seconds=1.6)
+        agent.client.on_update = agent._on_update
+        agent.session_id = "s"
+        await agent.ask("halo")
+        return bot.messages
+
+    notices = [body for body in asyncio.run(go()) if "still working" in body]
+    assert notices, "the heartbeat must still fire"
+    assert "94 tools" not in notices[0], notices[0]
+    assert "1 tool" in notices[0], notices[0]
