@@ -1731,7 +1731,11 @@ class ChatAgent:
                 return slot["optionId"]
             time.sleep(0.2)
         log.warning("permission timed out chat=%s tool=%s (denied)", self.label, tool)
-        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._expire_permission(token)))
+        # the slot goes before the loop is told: a timed-out request that stayed in the table
+        # made every later read of it say a person was still deciding
+        self._pending_perm.pop(token, None)
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(self._expire_permission(slot)))
         return None
 
     OPTION_LABELS: ClassVar[dict[str, str]] = {APPROVE: "✅ Allow", DENY: "⛔ Deny"}
@@ -1880,10 +1884,9 @@ class ChatAgent:
                 log.debug("approval settle failed: %s", exc)
         return label
 
-    async def _expire_permission(self, token: str) -> None:
-        slot = self._pending_perm.get(token)
-        if slot is None:
-            return
+    async def _expire_permission(self, slot: dict[str, Any]) -> None:
+        """Mark the approval card expired. The slot is handed in: the caller has already
+        removed it from the table, and a lookup by token would find nothing to edit."""
         kind, detail = self._permission_detail(slot["params"])
         handle = slot.get("handle")
         if handle is not None:
@@ -2251,6 +2254,12 @@ class ChatAgent:
         return SimpleNamespace(state=state, drain=drain_task, sender=sender_task,
                                finish=finish, queue=source)
 
+    def _waiting_on_person(self) -> bool:
+        """True while the turn is blocked on an answer only the chat can give: an `ask`
+        question, or a tool approval. The card that asked is on screen and already says the
+        run is paused, so a heartbeat here would report work that is not happening."""
+        return self.pending_ask is not None or bool(self._pending_perm)
+
     async def ask(self, text: str, images: list[dict[str, Any]] | None = None,
                   resumes: int = 0, record: str | None = None) -> str:
         text = await self._plan_turn(text)
@@ -2283,6 +2292,7 @@ class ChatAgent:
                 # what it is doing, because a chat that shows only a typing dot cannot tell a
                 # long build from a wedged agent.
                 last = self._clock()
+                paused = False
                 while self.busy:
                     await self._sleep(quiet_after)
                     now = self._clock()
@@ -2292,6 +2302,16 @@ class ChatAgent:
                     last = now
                     if not self.busy:
                         return
+                    waiting = self._waiting_on_person()
+                    if waiting or paused:
+                        # A question or an approval is on screen and nothing runs behind it. The
+                        # card already says the run is paused, so a heartbeat here would report
+                        # work that is not happening, once per window, until somebody answers.
+                        # The tick that sees the answer restarts the clock too: quiet is counted
+                        # from the answer, which is the only silence the person could observe.
+                        paused = waiting
+                        self._frame_at = now
+                        continue
                     quiet_for = now - self._frame_at
                     if quiet_for < quiet_after:
                         continue

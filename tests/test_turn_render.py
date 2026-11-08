@@ -725,3 +725,133 @@ def test_the_quiet_notice_is_a_heartbeat_that_keeps_reporting():
     assert len(notices) >= 2, notices  # a heartbeat, not one alarm
     assert all("tool" in body for body in notices)  # what it has done so far
     assert notices[-1] != notices[0]  # and it moves as the turn goes on
+
+
+class EditableBot(FakeBot):
+    """A bot whose cards can be edited: retiring a question rewrites the message it sent."""
+
+    async def send_message(self, chat_id, text, **_kw):
+        await super().send_message(chat_id, text, **_kw)
+
+        class Sent:
+            async def edit_text(self, body, **_kwargs):
+                self.body = body
+
+        return Sent()
+
+
+class AskClient(FakeClient):
+    """A turn that asks a question, then works quietly once the chat has answered it."""
+
+    def __init__(self, updates, after_seconds=2.0):
+        super().__init__(updates)
+        self.on_dialog = None
+        self.after_seconds = after_seconds
+
+    def prompt(self, _text, images=None, timeout=900.0):
+        import time as _time
+
+        self.on_update(self.updates[0])  # one tool call, then the agent wants an answer
+        self.on_dialog({"method": "ask", "questions": [
+            {"id": "q1", "question": "Choosing reference code format",
+             "options": [{"label": "Full random 12"}, {"label": "NOOV + 8 random"}]}]})
+        _time.sleep(self.after_seconds)  # model-side silence after the answer
+        self.on_update(self.updates[1])
+        return PromptResult(stop_reason="end_turn", usage={}, text="done", updates=[])
+
+
+def _ask_turn(bot, config, *, key, answer_after=1.2, after_seconds=2.0):
+    """One turn whose ask is answered after `answer_after` seconds; returns the chat's messages."""
+
+    async def go():
+        agent = telegram.chat_agent(config, 1, key=key, app=types.SimpleNamespace(bot=bot))
+        client = AskClient([tool_call("c1", "waiting"), message("done")],
+                           after_seconds=after_seconds)
+        agent.client = client
+        agent.client.on_update = agent._on_update
+        agent.client.on_dialog = agent._on_dialog
+        agent.session_id = "s"
+
+        async def answer() -> None:
+            for _ in range(500):
+                if agent.pending_ask is not None:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("the ask never opened")
+            await asyncio.sleep(answer_after)  # a person reading the card, nothing running
+            await agent.answer_ask(None, option_index=0)
+
+        task = asyncio.create_task(answer())
+        await agent.ask("halo")
+        await task
+        return bot.messages
+
+    return asyncio.run(go())
+
+
+def _quiet_config(seconds=0.01):
+    config = load_config(env={})
+    config.data["stream"]["quiet_minutes"] = seconds  # 0.6 s
+    config.data["stream"]["min_gap"] = 0.0
+    config.data.setdefault("approval", {})["timeout"] = 30.0
+    return config
+
+
+def test_no_heartbeat_while_the_turn_waits_for_an_answer():
+    """A question card on screen means nothing is running behind it, so ⏳ still working is a
+    lie that repeats the same line every window until somebody answers. Reported from a live
+    chat: eight identical heartbeats under one ask."""
+    bot = EditableBot()
+    # four windows pass with the card on screen, then the answer ends the turn straight away
+    messages = _ask_turn(bot, _quiet_config(), key="waiting-ask",
+                         answer_after=2.4, after_seconds=0.2)
+
+    notices = [body for body in messages if "still working" in body]
+    assert not notices, notices
+    assert any("Choosing reference code format" in body for body in messages)
+
+
+def test_the_heartbeat_comes_back_once_the_answer_is_in():
+    """The wait is not silence to report on, and it must not poison the clock either: a quiet
+    stretch after the answer is a quiet stretch."""
+    bot = EditableBot()
+    messages = _ask_turn(bot, _quiet_config(), key="answered-then-quiet",
+                         answer_after=0.3, after_seconds=2.4)
+
+    notices = [body for body in messages if "still working" in body]
+    assert notices, messages
+
+
+def test_a_timed_out_approval_leaves_nothing_waiting():
+    """The slot stayed in the table after the deadline, so every later read said a person was
+    still deciding: the heartbeat it now gates would never come back."""
+    config = load_config(env={})
+    config.data.setdefault("approval", {})["timeout"] = 0.3
+    config.data.setdefault("agent", {})["yolo"] = False
+    expired: list[bool] = []
+
+    async def go():
+        agent = telegram.chat_agent(config, 1, key="perm-timeout",
+                                    app=types.SimpleNamespace(bot=EditableBot()))
+        agent.surface.settle_permission = _recording_settle(expired)
+        # what ensure() seeds from get_state; without it the reader thread falls back to the
+        # store for the mode, and its sqlite connection belongs to this thread
+        agent.options = {"mode": {"currentValue": "default"}}
+        frame = {"method": "select", "title": "Allow tool: write\nPath: /tmp/x.txt",
+                 "options": ["Approve", "Deny"]}
+        answer = await asyncio.to_thread(agent._on_permission, frame)
+        await asyncio.sleep(0.1)  # the expiry card is written on the loop
+        return agent, answer
+
+    agent, answer = asyncio.run(go())
+    assert answer is None  # a timeout denies
+    assert agent._pending_perm == {}
+    assert expired == [True]
+
+
+def _recording_settle(seen: list[bool]):
+    async def settle(_handle, _kind, _detail, _outcome, expired: bool) -> None:
+        seen.append(expired)
+
+    return settle

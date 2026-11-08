@@ -195,6 +195,12 @@ When OMP declines a steer or a follow-up, the message falls back to the queue. `
 the turn, plus any bash job or subagent it left running in the background. `/btw` works while a
 turn runs: the side question is answered on its own and never enters the conversation.
 
+A turn that goes quiet posts `⏳ still working` once per `[stream] quiet_minutes` (5 minutes by
+default), with how long it has run, how many tools it has used and what it last did: a chat that
+shows only a typing dot cannot tell a long build from a wedged agent. A turn waiting on you is
+not quiet work, so nothing is posted while a question or an approval is on screen; the card
+already says the run is paused.
+
 ### Subagents
 
 When the agent runs subagents through its `task` tool, a verbose chat gets one summary message
