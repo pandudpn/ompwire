@@ -618,9 +618,19 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
     async def cmd_stop(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return await self._deny(update)
-        agent = self.agent_for(update.effective_chat.id)
+        chat_id = update.effective_chat.id
+        agent = self.agent_for(chat_id)
         ok = await agent.cancel()
-        await update.effective_message.reply_text("cancel sent" if ok else "nothing running")
+        # /stop is the way out of a question that will never be answered. Cancelling the turn
+        # left the card in place, so the next message was held behind it and /stop appeared to
+        # do nothing (chat 749994884, 2026-11-11: "continue" held, /stop, "continue" held again).
+        note = "cancel sent" if ok else "nothing running"
+        if agent.pending_options:
+            self._settle_question(chat_id, agent)
+            await agent.surface.retire_options("closed by /stop")
+            note += " · the open question was closed"
+        await update.effective_message.reply_text(note)
+        await self._release_held(chat_id)
 
     async def cmd_status(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
