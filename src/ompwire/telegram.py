@@ -357,7 +357,10 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
                 kind, payload = await asyncio.wait_for(queue.get(), timeout=IDLE_CHECK_INTERVAL)
             except TimeoutError:
                 idle = float(self.config.get("session", "idle_timeout", 1800))
-                if not agent.busy and time.time() - agent.last_used > idle and agent.client is not None:
+                # `working`, not `busy`: a run the agent started on its own leaves `busy` False.
+                # Evicting on `busy` killed that run (see ChatAgent.working).
+                if (not agent.working and time.time() - agent.last_used > idle
+                        and agent.client is not None):
                     log.info("idle eviction for chat %s", chat_id)
                     await agent.stop_process()
                 if queue.empty():

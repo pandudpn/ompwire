@@ -1049,6 +1049,9 @@ class ChatAgent:
 
     # ------------------------------------------------------- thread -> loop
     def _on_update(self, update: AgentUpdate) -> None:
+        # Any frame is the agent doing something. `last_used` used to move only in ask(), so a
+        # long turn followed by the agent's own run looked 30 minutes idle and was evicted.
+        self.last_used = time.time()
         if update.kind == "available_commands_update":
             names = [f"/{c.get('name')}" for c in (update.raw.get("commands") or [])]
             self._loop.call_soon_threadsafe(self.advertised_commands.__setitem__, slice(None), names)
@@ -2610,6 +2613,18 @@ class ChatAgent:
     async def list_sessions(self) -> list[dict[str, Any]]:
         """This cwd's omp transcripts, newest first: sessionId, updatedAt, size."""
         return omp_sessions.listing(self.cwd)
+
+    @property
+    def working(self) -> bool:
+        """Something of the agent's own is running right now, whoever started it.
+
+        `busy` only follows a turn a message asked for. A run omp starts on its own — a
+        background job reported back, a subagent woke the agent — leaves `busy` False while it
+        works, so a check that read only `busy` evicted the process mid-run (chat 749994884,
+        2026-11-11 12:05: a long turn ended, the agent woke to finish the follow-up 10s later,
+        and the idle sweep killed it 50s after that).
+        """
+        return self.busy or self._idle_run is not None or self._pending_wait is not None
 
     @property
     def pending_options(self) -> list[str]:
