@@ -52,6 +52,7 @@ show_tool_calls = true
 show_usage = false       # per-turn token line; use /usage instead
 min_gap = 1.0              # seconds between messages; Telegram allows about one a second per chat
 compaction_warn = 0.6     # fraction of the context window that triggers one ⚠️ notice per crossing
+quiet_minutes = 5.0       # silence before one ⏳ still working line; 0 = never
 
 # MCP servers are omp's: list them in ~/.omp/agent/mcp.json (`ompwire setup` can add one).
 # The agent loads them itself, so a hub there starts only the servers a turn calls.
