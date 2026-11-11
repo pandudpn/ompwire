@@ -130,10 +130,16 @@ def save(raw: bytes, name: str, directory: Path, max_mb: float = 20.0) -> Path:
     return target
 
 
-def incoming_summary(path: Path, mime: str = "", caption: str = "") -> str:
-    """What the agent is told when a document arrives."""
+def incoming_summary(path: Path, mime: str = "", caption: str = "", kind: str = "file",
+                     facts: str = "") -> str:
+    """What the agent is told when an attachment arrives.
+
+    `kind` names what landed (a photo, a video, a voice note); `facts` carries what the transport
+    already knows about it (duration, dimensions) so the agent does not have to probe for it.
+    """
     size = path.stat().st_size if path.exists() else 0
-    detail = f"[file] {path.name} ({mime or 'unknown type'}, {size} bytes) saved at {path}"
+    detail = ", ".join(part for part in (mime or "unknown type", f"{size} bytes", facts) if part)
+    detail = f"[{kind}] {path.name} ({detail}) saved at {path}"
     if caption.strip():
         detail += f"\ncaption: {caption.strip()}"
     return detail
