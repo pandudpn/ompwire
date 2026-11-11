@@ -254,7 +254,10 @@ class Transport:
                 kind, payload = await asyncio.wait_for(queue.get(), timeout=IDLE_CHECK_INTERVAL)
             except TimeoutError:
                 idle = float(self.config.get("session", "idle_timeout", 1800))
-                if not agent.busy and time.time() - agent.last_used > idle and agent.client is not None:
+                # `working`, not `busy`: a run the agent started on its own leaves `busy` False,
+                # and evicting on `busy` killed that run mid-flight (see ChatAgent.working).
+                if (not agent.working and time.time() - agent.last_used > idle
+                        and agent.client is not None):
                     log.info("idle eviction for chat %s", chat)
                     await agent.stop_process()
                 if queue.empty():
