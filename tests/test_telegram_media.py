@@ -213,3 +213,37 @@ def test_none_of_these_handlers_take_a_plain_text_message(tmp_path):
     assert transport._media(types.SimpleNamespace(
         video=None, video_note=None, animation=None, voice=None, audio=None, sticker=None)) == (
         None, "")
+
+
+def test_every_new_handler_ignores_an_edited_message(tmp_path):
+    """An edit must not run a turn a second time; docs/guide.md says so, and a rewrap broke it.
+
+    `new & filters.PHOTO | filters.Document.IMAGE` parses as `(new & PHOTO) | Document.IMAGE`
+    because `&` binds tighter, so an edited image document escaped the `new` scope and matched
+    on_photo. Probed here through the real registered handlers, not a re-typed filter.
+    """
+    from telegram import Chat, Document, Message, PhotoSize, Update
+    from telegram.ext import Application
+
+    transport = _transport(_config(tmp_path))
+    app = Application.builder().token("1:x").build()
+    transport.register(app)
+    # the handlers this PR adds, plus the photo one it touched
+    ours = [handler for group in app.handlers.values() for handler in group
+            if getattr(handler, "callback", None) in (transport.on_photo, transport.on_media,
+                                                      transport.on_unsupported,
+                                                      transport.on_document)]
+    assert len(ours) >= 4, [type(handler).__name__ for handler in ours]
+
+    chat, user = Chat(id=7, type="private"), types.SimpleNamespace(id=7)
+    image_doc = Message(message_id=1, date=None, chat=chat, from_user=user, caption="x",
+                        document=Document(file_id="d", file_unique_id="u", mime_type="image/png"))
+    video = Message(message_id=2, date=None, chat=chat, from_user=user, video=Media())
+    photo = Message(message_id=3, date=None, chat=chat, from_user=user,
+                    photo=(PhotoSize(file_id="p", file_unique_id="p", width=9, height=9),))
+
+    for message, label in ((image_doc, "image document"), (video, "video"), (photo, "photo")):
+        assert any(handler.check_update(Update(update_id=9, message=message)) for handler in ours), \
+            f"a new {label} message must still be handled"
+        assert not any(handler.check_update(Update(update_id=9, edited_message=message))
+                       for handler in ours), f"an edited {label} message must not run a turn"
