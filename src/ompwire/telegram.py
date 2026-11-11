@@ -892,7 +892,8 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             if getattr(message, field, None) is not None:
                 log.info("unreadable message chat=%s kind=%s", update.effective_chat.id, field)
                 return await message.reply_text(
-                    f"I can't read {what} yet. Send text, a photo, a file, or a video.")
+                    f"I can't read {what} yet. Send text, a photo, a file, a video "
+                    f"or a voice note.")
         log.info("unhandled message chat=%s", update.effective_chat.id)
 
     async def cmd_context(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1585,8 +1586,10 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         new = filters.UpdateType.MESSAGE | filters.UpdateType.CHANNEL_POST
         app.add_handler(MessageHandler(new & filters.TEXT & filters.COMMAND, self.on_command))
         app.add_handler(MessageHandler(new & filters.TEXT & ~filters.COMMAND, self.on_text))
-        app.add_handler(MessageHandler(new & filters.PHOTO
-                                       | filters.Document.IMAGE, self.on_photo))
+        # the parentheses matter: `&` binds tighter than `|`, so without them Document.IMAGE
+        # escapes the `new` scope and an edited image document runs its prompt a second time
+        app.add_handler(MessageHandler(new & (filters.PHOTO | filters.Document.IMAGE),
+                                       self.on_photo))
         # any other document: PDF, zip, csv, text. The image filter above owns the rest.
         app.add_handler(MessageHandler(new & filters.Document.ALL & ~filters.Document.IMAGE,
                                        self.on_document))
