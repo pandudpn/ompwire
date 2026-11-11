@@ -16,6 +16,7 @@ import asyncio
 import base64
 import logging
 import logging.handlers
+import mimetypes
 import os
 import pathlib
 import re
@@ -131,11 +132,48 @@ BUSY_NOTES = {
 }
 FOLLOWED_UP = "📥 follow-up queued · runs right after the current turn"
 
+# Telegram hands a bot at most 20 MB through getFile, whatever files.max_mb allows; a clip above
+# that cannot be fetched at all, so the limit is named in the reply rather than failed silently.
+TELEGRAM_GETFILE_MB = 20
+# Everything a message can carry that is not prose, and the name to use when talking about it.
+# One table serves the log line and the reply to what ompwire cannot read, so they cannot drift.
+ATTACHMENT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("photo", "a photo"), ("video", "a video"), ("video_note", "a video note"),
+    ("animation", "an animation"), ("voice", "a voice note"), ("audio", "an audio file"),
+    ("sticker", "a sticker"), ("document", "a file"), ("location", "a location pin"),
+    ("venue", "a place"), ("contact", "a contact"), ("poll", "a poll"), ("dice", "a dice"),
+    ("story", "a story"), ("paid_media", "paid media"),
+)
+# What no handler takes: the message still arrives, and a message with no reply reads as a
+# dropped one.
+UNREADABLE = {"location": "a location pin", "venue": "a place", "contact": "a contact",
+              "poll": "a poll", "dice": "a dice", "story": "a story",
+              "paid_media": "paid media"}
+# Clips and notes: nothing in the command surface carries them, so one handler owns the lot.
+MEDIA_FILTER = filters.VIDEO | filters.VIDEO_NOTE | filters.ANIMATION | filters.VOICE \
+    | filters.AUDIO | filters.Sticker.ALL
+
 
 async def _download(source: Any) -> bytes:
     """A Telegram photo or document's bytes, with time to arrive."""
     telegram_file = await source.get_file(read_timeout=DOWNLOAD_TIMEOUT)
     return bytes(await telegram_file.download_as_bytearray(read_timeout=DOWNLOAD_TIMEOUT))
+
+
+def _media_facts(media: Any) -> str:
+    """What the transport already knows about a clip: length and dimensions, when it has them."""
+    parts: list[str] = []
+    duration = getattr(media, "duration", None)
+    # PTB_TIMEDELTA (set at import) makes duration a timedelta; an older PTB gives plain seconds
+    seconds = duration.total_seconds() if hasattr(duration, "total_seconds") else duration
+    if seconds:
+        parts.append(f"{round(float(seconds))}s")
+    width, height = getattr(media, "width", None), getattr(media, "height", None)
+    if width and height:
+        parts.append(f"{width}x{height}")
+    if getattr(media, "emoji", ""):
+        parts.append(str(media.emoji))
+    return ", ".join(parts)
 
 
 FORWARD_HINT = (
@@ -772,6 +810,91 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
             incoming_summary(target, document.mime_type or "", message.caption or ""), message)
         await self.submit(chat_id, payload, message)
 
+    @staticmethod
+    def _media(message: Any) -> tuple[Any, str]:
+        """The clip this message carries and what to call it; (None, "") when it carries none."""
+        for kind, media in (("video", message.video), ("video note", message.video_note),
+                            ("animation", message.animation), ("voice note", message.voice),
+                            ("audio", message.audio), ("sticker", message.sticker)):
+            if media is not None:
+                return media, kind
+        return None, ""
+
+    async def on_media(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Save a video, voice note or sticker and hand the agent its path.
+
+        These fell through every handler before: the clip showed as delivered in the chat and
+        then nothing came back at all. omp's RPC has no block for them either, and the agent has
+        a shell, so what it needs is a readable path and what the transport already knows about
+        the file — its length and dimensions, not a probe it would otherwise redo.
+        """
+        if not self._authorized(update):
+            return await self._deny(update)
+        message = update.effective_message
+        if message is None:
+            return
+        media, kind = self._media(message)
+        if media is None:
+            return
+        chat_id = update.effective_chat.id
+        max_mb = float(self.config.get("files", "max_mb", 20.0))
+        # Telegram serves a bot at most 20 MB per file through getFile, whatever files.max_mb says
+        limit = min(value for value in (max_mb, TELEGRAM_GETFILE_MB) if value > 0)
+        size = getattr(media, "file_size", 0) or 0
+        if size and limit and size > limit * 1024 * 1024:
+            return await message.reply_text(
+                f"too large: {size / (1024 * 1024):.1f} MB, a Telegram bot can download "
+                f"at most {limit:g} MB")
+        try:
+            raw = await _download(media)
+        except TelegramError as exc:
+            log.warning("%s download failed chat=%s: %s", kind, chat_id, exc)
+            return await message.reply_text(f"could not fetch the {kind}: {exc}")
+        base = Path(str(self.config.get("files", "incoming_dir", str(default_state_dir() / "files"))))
+        directory = base.expanduser() / str(chat_id)
+        try:
+            target = save_incoming(raw, self._media_name(media, kind), directory, max_mb)
+        except (OSError, ValueError) as exc:
+            log.warning("%s save failed chat=%s: %s", kind, chat_id, exc)
+            return await message.reply_text(f"could not save the {kind}: {exc}")
+        log.info("%s chat=%s saved=%s bytes=%s", kind, chat_id, target, len(raw))
+        payload = _TextOnly(
+            incoming_summary(target, getattr(media, "mime_type", "") or "", message.caption or "",
+                             kind=kind, facts=_media_facts(media)), message)
+        await self.submit(chat_id, payload, message)
+
+    @staticmethod
+    def _media_name(media: Any, kind: str) -> str:
+        """A filename with the extension the format really uses, so the shell can open it."""
+        suffix = ""
+        if kind == "sticker":
+            suffix = ".tgs" if getattr(media, "is_animated", False) else (
+                ".webm" if getattr(media, "is_video", False) else ".webp")
+        elif getattr(media, "file_name", ""):
+            return safe_name(media.file_name)
+        if not suffix:
+            suffix = mimetypes.guess_extension(getattr(media, "mime_type", "") or "") or ""
+        return safe_name(f"telegram-{kind.replace(' ', '-')}{suffix}", "file")
+
+    async def on_unsupported(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Name what arrived instead of letting the chat go silent.
+
+        A location pin, a contact card, a poll: none of them is text, a photo, a file or a clip,
+        so every handler above declines them. Left alone the person sees their message delivered
+        and never hears back.
+        """
+        if not self._authorized(update):
+            return await self._deny(update)
+        message = update.effective_message
+        if message is None:
+            return
+        for field, what in UNREADABLE.items():
+            if getattr(message, field, None) is not None:
+                log.info("unreadable message chat=%s kind=%s", update.effective_chat.id, field)
+                return await message.reply_text(
+                    f"I can't read {what} yet. Send text, a photo, a file, or a video.")
+        log.info("unhandled message chat=%s", update.effective_chat.id)
+
     async def cmd_context(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """The agent renders a better context report than we could, so ask it."""
         if not self._authorized(update):
@@ -1386,9 +1509,16 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         self._note_chat(update.effective_chat)
         message = update.effective_message
         body = (message.text if message and message.text else "")
-        log.info("update chat=%s user=%s authorized=%s text=%r",
+        # A video logged only `text=''`, which read the same as an empty message. Name what
+        # arrived, so "why did my clip get no answer" is answerable from the log alone.
+        kind = ""
+        if message is not None and not body:
+            kind = next((field for field, _what in ATTACHMENT_FIELDS
+                         if getattr(message, field, None) is not None), "")
+        log.info("update chat=%s user=%s authorized=%s text=%r%s",
                  update.effective_chat.id if update.effective_chat else "?",
-                 user.id if user else "?", self._authorized(update), body[:200])
+                 user.id if user else "?", self._authorized(update), body[:200],
+                 f" attachment={kind}" if kind else "")
 
     async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("handler failed", exc_info=context.error)
@@ -1455,11 +1585,18 @@ class Transport(SkillsMixin, LoginMixin, PickerMixin):
         new = filters.UpdateType.MESSAGE | filters.UpdateType.CHANNEL_POST
         app.add_handler(MessageHandler(new & filters.TEXT & filters.COMMAND, self.on_command))
         app.add_handler(MessageHandler(new & filters.TEXT & ~filters.COMMAND, self.on_text))
-        app.add_handler(MessageHandler(new & (filters.PHOTO | filters.Document.IMAGE),
-                                       self.on_photo))
+        app.add_handler(MessageHandler(new & filters.PHOTO
+                                       | filters.Document.IMAGE, self.on_photo))
         # any other document: PDF, zip, csv, text. The image filter above owns the rest.
         app.add_handler(MessageHandler(new & filters.Document.ALL & ~filters.Document.IMAGE,
                                        self.on_document))
+        # Anything that is not text, a photo, a file or a command: a clip, a voice note, a sticker,
+        # a pin, a poll. These used to reach no handler at all, so the chat showed the message as
+        # delivered and never answered.
+        app.add_handler(MessageHandler(new & MEDIA_FILTER, self.on_media))
+        app.add_handler(MessageHandler(
+            new & ~filters.TEXT & ~filters.PHOTO & ~filters.Document.ALL & ~MEDIA_FILTER,
+            self.on_unsupported))
         app.add_handler(MessageHandler(filters.ALL, self.log_update), group=-1)
 
     async def _serve(self, app) -> None:
