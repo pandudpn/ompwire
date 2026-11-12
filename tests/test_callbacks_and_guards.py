@@ -541,3 +541,79 @@ def test_display_flags_named_like_writes_stay_read_only():
     for command in ("journalctl -u ompwire --output=short-precise -n 20",
                     "git log --oneline -5", "rg -n foo src", "sort -n f"):
         assert allowlist.is_read_only(command) is True, command
+
+
+def test_stop_closes_a_question_that_would_have_held_every_later_message(tmp_path):
+    """/stop was the way out of an unanswerable question, and it was not.
+
+    Seen live (chat 749994884, 2026-11-11): a stale options card from a process that had been
+    replaced held "continue", /stop cancelled nothing and left the card, so the next "continue"
+    was held too. Cancelling the turn has to settle the question and free what waited on it.
+    """
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent = transport.agent_for(7)
+        agent.pending_options = ["merge now", "merge and release", "review first"]
+        replies: list[str] = []
+        transport.enqueue = lambda _chat, _kind, payload: replies.append(payload.text) or 1
+
+        async def cancel():
+            return True
+
+        agent.cancel = cancel
+        # a message behind the question, exactly like the two "continue"s
+        update, _ = _update(text="continue")
+        message = update.effective_message
+        await transport.submit(7, message, message)
+        assert agent.pending_options, "the question is still open, so nothing ran yet"
+
+        await transport.cmd_stop(*_update(text="/stop"))
+        return replies, agent.pending_options, transport.held.get(7)
+
+    ran, left, held = asyncio.run(go())
+    assert ran == ["continue"], "the held message runs once /stop closes the question"
+    assert left == [], "the card is settled, so the next message is not held behind it"
+    assert not held
+
+
+def test_stop_says_so_when_it_closed_a_question(tmp_path):
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent = transport.agent_for(7)
+        agent.pending_options = ["yes", "no"]
+
+        async def cancel():
+            return True
+
+        agent.cancel = cancel
+        update, replies = _update(text="/stop")
+        await transport.cmd_stop(update, None)
+        return replies, agent.pending_options
+
+    replies, left = asyncio.run(go())
+    assert left == []
+    assert any("question was closed" in reply for reply in replies), replies
+
+
+def test_stop_with_no_open_question_still_reports_the_cancel(tmp_path):
+    """The common case must not grow a misleading sentence about a question."""
+    config = _config(tmp_path)
+
+    async def go():
+        transport = _transport(config)
+        agent = transport.agent_for(7)
+
+        async def cancel():
+            return False
+
+        agent.cancel = cancel
+        update, replies = _update(text="/stop")
+        await transport.cmd_stop(update, None)
+        return replies
+
+    replies = asyncio.run(go())
+    assert replies == ["nothing running"]
