@@ -228,12 +228,13 @@ def test_every_new_handler_ignores_an_edited_message(tmp_path):
     transport = _transport(_config(tmp_path))
     app = Application.builder().token("1:x").build()
     transport.register(app)
-    # the handlers this PR adds, plus the photo one it touched
-    ours = [handler for group in app.handlers.values() for handler in group
-            if getattr(handler, "callback", None) in (transport.on_photo, transport.on_media,
-                                                      transport.on_unsupported,
-                                                      transport.on_document)]
+    # Every handler in group 0, whatever its type: picking the MessageHandlers by class would
+    # leave a future kind (a CallbackQueryHandler, a new update type) silently unguarded.
+    # Group -1 is `log_update`, which is meant to see edits — it only logs.
+    ours = [handler for group, handlers in app.handlers.items() if group != -1
+            for handler in handlers]
     assert len(ours) >= 4, [type(handler).__name__ for handler in ours]
+    assert transport.log_update in [handler.callback for handler in app.handlers[-1]]
 
     chat, user = Chat(id=7, type="private"), types.SimpleNamespace(id=7)
     image_doc = Message(message_id=1, date=None, chat=chat, from_user=user, caption="x",
