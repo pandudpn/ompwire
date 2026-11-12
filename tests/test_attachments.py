@@ -192,3 +192,25 @@ def test_a_leftover_enabled_key_cannot_turn_attachments_off(tmp_path):
 
     asyncio.run(run())
     assert sent == ["photo"]
+
+
+def test_a_marker_wrapped_in_emphasis_still_sends(tmp_path):
+    """Seen live: the agent wrote its reply in bold, so the marker became `**<<file: p>>**`.
+
+    It matched nothing, sent nothing, and stayed in the chat as raw text with no warning
+    (chat 749994884, 2026-11-12 23:08, a pairing QR that never arrived).
+    """
+    (tmp_path / "qr.png").write_bytes(b"x" * 64)
+    for wrap in ("**{}**", "_{}_", "`{}`", "*{}*", "__{}__"):
+        marker = wrap.format(f"<<file: {tmp_path}/qr.png>>")
+        cleaned, files, rejected = attachments.extract(marker, root=tmp_path)
+        assert [item.path.name for item in files] == ["qr.png"], (wrap, files)
+        assert rejected == [], (wrap, rejected)
+        assert "<<" not in cleaned and "qr.png" not in cleaned, (wrap, cleaned)
+
+
+def test_a_plain_marker_still_works(tmp_path):
+    (tmp_path / "qr.png").write_bytes(b"x" * 64)
+    cleaned, files, _ = attachments.extract(f"<<file: {tmp_path}/qr.png>>", root=tmp_path)
+    assert [item.path.name for item in files] == ["qr.png"]
+    assert cleaned == ""

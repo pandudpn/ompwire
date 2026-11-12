@@ -21,10 +21,16 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# own line only, like every marker: a path mentioned inside a sentence is not a request to send it
-FILE_RE = re.compile(r"^[ \t]*<<\s*files?\s*:\s*(?P<body>[^>\n]+?)\s*>>",
-                     re.IGNORECASE | re.MULTILINE)
-PARTIAL_RE = re.compile(r"^[ \t]*<<\s*files?\s*:(?:(?!>>).)*\Z",
+# Own line only, like every marker: a path mentioned inside a sentence is not a request to send
+# it. Markdown emphasis around the marker is tolerated: a model that writes its reply in bold
+# produced `**<<file: ...>>**`, which matched nothing, sent nothing, and left the raw marker in
+# the chat with no warning (chat 749994884, 2026-11-12 23:08, a QR code that never arrived).
+EMPHASIS = r"(?:\*\*|__|\*|_|`)?"
+FILE_RE = re.compile(
+    rf"^[ \t]*{EMPHASIS}[ \t]*(?P<marker><<\s*files?\s*:[^>\n]*?>>)[ \t]*{EMPHASIS}",
+    re.IGNORECASE | re.MULTILINE)
+BODY_RE = re.compile(r"<<\s*files?\s*:\s*(?P<body>[^>\n]+?)\s*>>", re.IGNORECASE)
+PARTIAL_RE = re.compile(rf"^[ \t]*{EMPHASIS}[ \t]*<<\s*files?\s*:(?:(?!>>).)*\Z",
                         re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
 MAX_FILES = 5                  # per turn, so one reply cannot turn into a dump
@@ -66,7 +72,8 @@ def extract(text: str, root: str | Path, max_mb: float = 20.0) -> tuple[str, lis
     seen: set[Path] = set()
 
     for match in FILE_RE.finditer(text):
-        for raw in re.split(r"[|\n]", match.group("body")):
+        body = BODY_RE.search(match.group("marker"))
+        for raw in re.split(r"[|\n]", body.group("body") if body else ""):
             candidate = raw.strip().strip("\"'")
             if not candidate:
                 continue
