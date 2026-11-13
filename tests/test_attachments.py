@@ -194,19 +194,36 @@ def test_a_leftover_enabled_key_cannot_turn_attachments_off(tmp_path):
     assert sent == ["photo"]
 
 
-def test_a_marker_wrapped_in_emphasis_still_sends(tmp_path):
-    """Seen live: the agent wrote its reply in bold, so the marker became `**<<file: p>>**`.
+@pytest.mark.parametrize("wrap", [
+    "**{}**", "__{}__", "*{}*", "_{}_", "`{}`", "***{}***", "~~{}~~",
+    "# {}", "### {}", "> {}", "> - {}", "- {}", "* {}", "1. {}", "    {}",
+])
+def test_a_marker_decorated_with_markdown_still_sends(tmp_path, wrap):
+    """A model that formats its reply must not lose the file.
 
-    It matched nothing, sent nothing, and stayed in the chat as raw text with no warning
-    (chat 749994884, 2026-11-12 23:08, a pairing QR that never arrived).
+    Seen live: the agent wrote `**<<file: qr.png>>**`, which matched nothing, sent nothing, and
+    left the raw marker in the chat with no warning (chat 749994884, 2026-11-12 23:08).
     """
     (tmp_path / "qr.png").write_bytes(b"x" * 64)
-    for wrap in ("**{}**", "_{}_", "`{}`", "*{}*", "__{}__"):
-        marker = wrap.format(f"<<file: {tmp_path}/qr.png>>")
-        cleaned, files, rejected = attachments.extract(marker, root=tmp_path)
-        assert [item.path.name for item in files] == ["qr.png"], (wrap, files)
-        assert rejected == [], (wrap, rejected)
-        assert "<<" not in cleaned and "qr.png" not in cleaned, (wrap, cleaned)
+    marker = wrap.format(f"<<file: {tmp_path}/qr.png>>")
+    cleaned, files, rejected = attachments.extract(marker, root=tmp_path)
+    assert [item.path.name for item in files] == ["qr.png"], (marker, files)
+    assert rejected == [], (marker, rejected)
+    assert "<<" not in cleaned and "qr.png" not in cleaned, (marker, cleaned)
+
+
+@pytest.mark.parametrize("text", [
+    "here is <<file: {p}>>",
+    "<<file: {p}>> is the path",
+    "- <<file: {p}>> is the path",
+    "> <<file: {p}>> is the path",
+])
+def test_a_marker_that_shares_its_line_with_prose_is_not_sent(tmp_path, text):
+    """Decoration is only decoration when the line is nothing but the marker."""
+    (tmp_path / "qr.png").write_bytes(b"x" * 64)
+    _clean, files, _rejected = attachments.extract(
+        text.format(p=tmp_path / "qr.png"), root=tmp_path)
+    assert files == []
 
 
 def test_a_plain_marker_still_works(tmp_path):
