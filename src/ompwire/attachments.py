@@ -21,11 +21,24 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# own line only, like every marker: a path mentioned inside a sentence is not a request to send it
-FILE_RE = re.compile(r"^[ \t]*<<\s*files?\s*:\s*(?P<body>[^>\n]+?)\s*>>",
-                     re.IGNORECASE | re.MULTILINE)
-PARTIAL_RE = re.compile(r"^[ \t]*<<\s*files?\s*:(?:(?!>>).)*\Z",
-                        re.IGNORECASE | re.DOTALL | re.MULTILINE)
+# Own line only, like every marker: a path mentioned inside a sentence is not a request to send
+# it. Markdown that decorates the line around the marker is tolerated, because a model that
+# formats its reply should not lose the file: `**<<file: ...>>**` matched nothing, sent nothing,
+# and left the raw marker in the chat with no warning (chat 749994884, 2026-11-12 23:08, a QR that
+# never arrived). Measured wrappers: bold, italic, underscore, backtick, bold-italic, strikethrough,
+# heading, blockquote, bullet list, and ordered list all send now.
+#
+# A leading `>`, `-` or `1.` is only decoration when the line is nothing but the marker: the line
+# still has to end after it, or `- <<file: p>> is a bad path` would send a file from prose.
+DECOR = r"""(?:\*\*\*|\*\*|__|\*|_|`|~~|#{1,6}|\d+[.)]|[-*+])?"""
+FILE_RE = re.compile(
+    rf"^[ \t]*(?:>[ \t]*){{0,3}}{DECOR}[ \t]*(?P<marker><<\s*files?\s*:[^>\n]*?>>)"
+    rf"[ \t]*(?:\*\*\*|\*\*|__|\*|_|`|~~)?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE)
+BODY_RE = re.compile(r"<<\s*files?\s*:\s*(?P<body>[^>\n]+?)\s*>>", re.IGNORECASE)
+PARTIAL_RE = re.compile(
+    rf"^[ \t]*(?:>[ \t]*){{0,3}}{DECOR}[ \t]*<<\s*files?\s*:(?:(?!>>).)*\Z",
+    re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
 MAX_FILES = 5                  # per turn, so one reply cannot turn into a dump
 PHOTO_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -66,7 +79,8 @@ def extract(text: str, root: str | Path, max_mb: float = 20.0) -> tuple[str, lis
     seen: set[Path] = set()
 
     for match in FILE_RE.finditer(text):
-        for raw in re.split(r"[|\n]", match.group("body")):
+        body = BODY_RE.search(match.group("marker"))
+        for raw in re.split(r"[|\n]", body.group("body") if body else ""):
             candidate = raw.strip().strip("\"'")
             if not candidate:
                 continue
