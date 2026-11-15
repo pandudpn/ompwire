@@ -197,7 +197,9 @@ mode omp asks before a shell command and lets its own write tool through; `yolo`
 Plan mode respawns the process with `--approval-mode=always-ask` so that every tool asks, then
 answers reads itself and denies the rest (see Plan mode below). omp's `ask` tool is a question,
 not an approval: it reaches the chat as buttons whatever the approval policy (see Questions
-below). Any other dialog (`input`, `editor`) is cancelled, since nobody in the chat is shown it.
+below). Since omp 18.19 the `ask` tool takes an HTML form, and omp's RPC host asks it one field
+at a time as plain `select`/`input`/`editor` dialogs; each becomes the same question card. Any
+other dialog is cancelled, since nobody in the chat is shown it.
 
 A denial is the safe default: the request expires after `[approval] timeout`, ompwire answers
 `Deny`, and omp fails that one tool call instead of the turn. That is why an approval left
@@ -253,6 +255,15 @@ resolves to the recommended or first option and carries on. A bare `{cancelled: 
 the whole turn (measured on 18.12.6), so it is never sent for an ask. rpc-ui also sends
 presentation requests (`setWidget`, `notify`, ...); they are fire-and-forget and never answered.
 The `<<options>>` marker stays as the fallback for questions the model writes into its reply.
+
+Since omp 18.19 the `ask` tool's argument is an HTML `<form>`. omp's RPC host has no form dialog,
+so it asks the form one field at a time: `select` for a radio or checkbox group, `input` for a
+text field, `editor` for a textarea or a prefilled field (measured on 18.19.0). Each field gets
+the options card, without omp's own `Other (type your own)` entry since the card has an Other
+button. Typed text that names an option picks it; any other text on a group answers that `Other`
+entry and then fills the `input` omp opens for it. Cancelling any field makes omp fail the whole
+ask as "cancelled by the user" and end the turn, so Skip answers `{cancelled, timedOut}` (the
+field keeps its default) and, for `editor`, which has no timeout path, the field's prefill.
 
 omp names the tool on every event (`toolName`), MCP tools included, so the trace is headed by the
 tool's own name; a call whose path is `xd://x` is named after the device instead of `read`. A
@@ -336,7 +347,7 @@ negotiates protocol v2, which splits large frames into chunks that `rpc.py` reas
 | `auto_retry_*`, `retry_fallback_*`, `notice`, `auto_compaction_*` | from agent | the notices above |
 | `set_subagent_subscription`, `subagent_lifecycle`, `subagent_progress` | both | the job cards |
 | `available_commands_update` | from agent | `/commands` |
-| `extension_ui_request` | from agent | approvals (`select`) and questions (`ask`); other dialogs are cancelled |
+| `extension_ui_request` | from agent | approvals (`select`), questions (`ask`) and ask-form fields (`select`, `input`, `editor`); other dialogs are cancelled |
 
 `/sessions` has no command behind it: omp's transcripts are listed from disk for the chat's cwd.
 `/plan` has no RPC handler either (omp's plan review is TUI-only), which is why plan mode is

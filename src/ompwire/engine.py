@@ -50,6 +50,10 @@ PENDING_RECHECK = 30.0
 # Tools whose call changes what the agent knows next time; the trace names the skill touched.
 SKILL_TOOLS = frozenset({"manage_skill", "learn"})
 PERMISSION_TIMEOUT = 120.0
+# How omp's RPC host asks the fields of an ask form: radio/checkbox groups, text, textarea.
+FORM_DIALOGS = frozenset({"select", "input", "editor"})
+# omp labels a group's free-text choice "Other (type your own)".
+OTHER_SUFFIX = "(type your own)"
 # One more try after a restart is worth it; a turn that keeps dying with the gateway is the cause.
 RESUME_LIMIT = 2
 RESUME_PROMPT = (
@@ -809,6 +813,8 @@ class ChatAgent:
         self._lock = asyncio.Lock()
         self._btw_waiters: dict[str, asyncio.Future] = {}
         self._ask_slots: dict[str, dict[str, Any]] = {}
+        # (field title, text) typed on a select card, handed to the input omp opens for "Other"
+        self._form_other: tuple[str, str] | None = None
         # a run omp started on its own (a background job's result woke the agent): its renderer,
         # on a queue of its own, open from its agent_start until its agent_end
         self._idle_run: SimpleNamespace | None = None
@@ -1604,24 +1610,75 @@ class ChatAgent:
         self._on_options(updated)
 
     def _on_dialog(self, frame: dict[str, Any]) -> dict[str, Any] | None:
-        """A dialog the agent opened (reader thread). Tool approvals become buttons, an `ask`
-        becomes a question card; any other dialog is cancelled and the agent carries on."""
-        if frame.get("method") == "ask":
+        """A dialog the agent opened (reader thread). Tool approvals become buttons; an `ask`
+        and the fields of an ask form become question cards; any other dialog is cancelled
+        and the agent carries on."""
+        method = frame.get("method")
+        if method == "ask":
             return self._on_ask(frame)
-        if not is_approval(frame):
-            log.info("dialog cancelled chat=%s method=%s title=%r", self.label, frame.get("method"),
-                     str(frame.get("title") or "")[:120])
-            return None
-        option = self._on_permission(frame)
-        return {"value": option} if option else {"cancelled": True}
+        if is_approval(frame):
+            option = self._on_permission(frame)
+            return {"value": option} if option else {"cancelled": True}
+        if method in FORM_DIALOGS:
+            return self._on_form_field(frame)
+        log.info("dialog cancelled chat=%s method=%s title=%r", self.label, method,
+                 str(frame.get("title") or "")[:120])
+        return None
 
     def _on_ask(self, frame: dict[str, Any]) -> dict[str, Any]:
-        """The ask tool's questions (reader thread, blocking like _on_permission). Questions go
-        to the chat one at a time through the options card. An ask is a question, not an
-        approval: it always reaches a person, whatever the approval policy says."""
+        """The ask tool's questions, as omp sends them through `ui.askDialog`."""
         questions = [q for q in (frame.get("questions") or []) if isinstance(q, dict)]
         if not questions:
             return {"cancelled": True}
+        return self._ask_person(questions)
+
+    def _on_form_field(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """One field of the ask tool's HTML form (reader thread).
+
+        Since omp 18.19 the ask tool takes an HTML form, and a host without a form dialog (RPC)
+        gets it one field at a time: `select` for a radio or checkbox group, `input` for a text
+        field, `editor` for a textarea or a prefilled field. Cancelling any of them makes omp
+        fail the whole ask as "cancelled by the user" and end the turn.
+        """
+        method = str(frame.get("method"))
+        title = str(frame.get("title") or "")
+        carried, self._form_other = self._form_other, None
+        if method == "input" and carried is not None and carried[0] == title:
+            # the answer was typed on the select card; omp now asks for the Other text itself
+            return {"value": carried[1]}
+        options = [str(o) for o in (frame.get("options") or [])] if method == "select" else []
+        other = next((o for o in options if o.endswith(OTHER_SUFFIX)), None)
+        # the card has its own Other button; omp's own Other option would be a second one
+        shown = [o for o in options if o != other]
+        reply = self._ask_person([{"id": "field", "question": title,
+                                   "options": [{"label": o} for o in shown]}])
+        if reply.get("cancelled"):
+            if method == "editor":
+                # omp's editor dialog has no timeout path: a cancel ends the ask, while the
+                # prefill is the field's own default, which is what Skip promises
+                return {"value": str(frame.get("prefill") or "")}
+            return reply
+        answer = (reply.get("answers") or [{}])[0]
+        picked = answer.get("selectedOptions") or []
+        if picked:
+            return {"value": str(picked[0])}
+        text = str(answer.get("customInput") or "")
+        if method != "select":
+            return {"value": text}
+        match = next((o for o in shown if o.casefold() == text.strip().casefold()), None)
+        if match is not None:
+            return {"value": match}
+        if other is not None:
+            self._form_other = (title, text)
+            return {"value": other}
+        log.info("form answer fits no option chat=%s title=%r; the field keeps its default",
+                 self.label, title[:120])
+        return {"cancelled": True, "timedOut": True}
+
+    def _ask_person(self, questions: list[dict[str, Any]]) -> dict[str, Any]:
+        """Put questions to the chat one at a time through the options card and block (reader
+        thread, like _on_permission) until they are answered. A question is not an approval:
+        it always reaches a person, whatever the approval policy says."""
         slot: dict[str, Any] = {"answer": None}
         token = f"ask-{uuid.uuid4().hex[:12]}"
         state = {"questions": questions, "index": 0, "answers": [], "slot": slot,
