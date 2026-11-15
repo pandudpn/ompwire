@@ -252,6 +252,119 @@ def test_multi_question_ask_answers_each_in_order(tmp_path):
     asyncio.run(go())
 
 
+# --------------------------------------------------------------- ask form fields (omp 18.19+)
+
+class FieldClient(DialogClient):
+    """omp's RPC host asking an HTML-form ask one field at a time. `frames` are the dialogs
+    in order; one that answers the select with the Other option is followed by its `input`,
+    as omp does."""
+
+    def __init__(self, frames):
+        super().__init__()
+        self.frames = frames
+
+    def prompt(self, _text, images=None, timeout=900.0):
+        for frame in self.frames:
+            body = self.on_dialog(frame)
+            self.bodies.append(body)
+            other = next((o for o in frame.get("options", []) if o.endswith("(type your own)")),
+                         None)
+            if other is not None and body == {"value": other}:
+                self.bodies.append(self.on_dialog({"method": "input", "title": frame["title"]}))
+        return PromptResult(stop_reason="end_turn", usage={}, text="done", updates=[])
+
+
+_TARGET = {"method": "select", "title": "Target",
+           "options": ["ompwire", "clone", "Other (type your own)"]}
+
+
+def _run_fields(tmp_path, frames, answers):
+    """Answer each card with the next of `answers`: an int taps an option, a str is typed,
+    None skips. Returns (bodies, surface)."""
+    surface = FakeSurface()
+    client = FieldClient(frames)
+    config = _config(tmp_path)
+
+    async def go():
+        agent = _agent(surface, client, config)
+        task = asyncio.create_task(asyncio.to_thread(client.prompt, "choose"))
+        answered: set[str] = set()
+        for answer in answers:
+            for _ in range(500):
+                token = next(iter(agent._ask_slots), None)
+                if token is not None and token not in answered:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("the field never reached the chat")
+            answered.add(token)
+            await asyncio.sleep(0.05)
+            if answer is None:
+                await agent.answer_ask(None, skip=True)
+            elif isinstance(answer, int):
+                await agent.answer_ask(None, option_index=answer)
+            else:
+                await agent.answer_ask(answer)
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(go())
+    return client.bodies, surface
+
+
+def test_a_form_radio_group_reaches_the_chat_instead_of_failing_the_ask(tmp_path):
+    """omp 18.19 sends the ask tool's form as a plain `select` per field. It used to be
+    cancelled on sight, and omp then failed the ask as "cancelled by the user" and ended the
+    turn before the chat ever saw the question."""
+    bodies, surface = _run_fields(tmp_path, [_TARGET], [1])
+    assert bodies == [{"value": "clone"}]
+    assert surface.cards[0] == (["ompwire", "clone"], "Target"), \
+        "omp's own Other option is the card's Other button, not a second one"
+
+
+def test_text_typed_on_a_form_group_answers_through_omps_other_option(tmp_path):
+    bodies, _ = _run_fields(tmp_path, [_TARGET], ["game anak"])
+    assert bodies == [{"value": "Other (type your own)"}, {"value": "game anak"}]
+
+
+def test_text_that_names_an_option_picks_it(tmp_path):
+    bodies, _ = _run_fields(tmp_path, [_TARGET], ["Clone "])
+    assert bodies == [{"value": "clone"}]
+
+
+def test_skipping_a_form_field_keeps_the_turn(tmp_path):
+    """A bare `cancelled` would end the ask and the turn; `timedOut` keeps the field's
+    default and lets the form go on."""
+    bodies, _ = _run_fields(tmp_path, [_TARGET], [None])
+    assert bodies == [{"cancelled": True, "timedOut": True}]
+
+
+def test_form_text_fields_take_the_typed_answer(tmp_path):
+    frames = [{"method": "input", "title": "Lifetime (days)"},
+              {"method": "editor", "title": "Notes", "prefill": "draft"}]
+    bodies, surface = _run_fields(tmp_path, frames, ["30", "rewrite it"])
+    assert bodies == [{"value": "30"}, {"value": "rewrite it"}]
+    assert surface.cards[0] == ([], "Lifetime (days)")
+
+
+def test_skipping_a_form_editor_keeps_its_prefill(tmp_path):
+    """omp's editor dialog has no timeout path: any cancel would end the ask."""
+    frames = [{"method": "editor", "title": "Notes", "prefill": "draft"}]
+    bodies, _ = _run_fields(tmp_path, frames, [None])
+    assert bodies == [{"value": "draft"}]
+
+
+def test_an_approval_select_still_goes_to_the_approval_path(tmp_path):
+    async def go():
+        agent = _agent(FakeSurface(), DialogClient(), _config(tmp_path))
+        seen = []
+        agent._on_permission = lambda frame: seen.append(frame) or "Approve"
+        frame = {"method": "select", "title": "Allow tool: bash", "options": ["Approve", "Deny"]}
+        assert agent._on_dialog(frame) == {"value": "Approve"}
+        assert seen == [frame]
+
+    asyncio.run(go())
+
+
 # --------------------------------------------------------------- follow_up when idle
 
 def test_follow_up_when_idle_reports_prompt_required(tmp_path):
